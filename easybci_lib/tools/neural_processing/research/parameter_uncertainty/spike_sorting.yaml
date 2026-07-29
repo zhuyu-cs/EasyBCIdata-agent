@@ -1,0 +1,25 @@
+operator: spike_sorting
+version: 1
+parameters:
+  detect_threshold:
+    research_trigger: paradigm_dependent
+    canonical_question: |
+      Recommended spike-detection threshold (× MAD) for {paradigm} {modality}?
+    empirical_defaults:
+      spike:    {value: 5.0, origin: "Quian Quiroga 2004"}
+      _default: {value: 5.0, origin: "Quian Quiroga 2004"}
+    sanity_range: [3.0, 10.0]
+
+  detect_sign:
+    research_trigger: never
+    canonical_question: ""
+    empirical_defaults:
+      _default: {value: -1, origin: "negative-going spikes (extracellular convention)"}
+
+  sorter:
+    research_trigger: paradigm_dependent
+    canonical_question: |
+      Recommended sorter algorithm for {paradigm} {modality} (e.g. spykingcircus,
+      kilosort, mountainsort)?
+    empirical_defaults:
+      _default: {value: "spykingcircus", origin: "SpikeInterface common default"}

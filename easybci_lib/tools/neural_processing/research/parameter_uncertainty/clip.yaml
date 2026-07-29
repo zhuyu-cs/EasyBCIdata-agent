@@ -1,0 +1,20 @@
+operator: clip
+version: 1
+parameters:
+  threshold_uv:
+    research_trigger: data_dependent
+    canonical_question: |
+      Reasonable amplitude clipping threshold (μV) for {paradigm} {modality} data
+      to remove gross artifacts without distorting valid signal?
+    empirical_defaults:
+      eeg:        {value: 250.0, unit: uV, origin: "common scalp-EEG threshold"}
+      seeg:       {value: 1500.0, unit: uV, origin: "intracranial — higher amplitudes are physiological"}
+      ecog:       {value: 1500.0, unit: uV, origin: "intracranial"}
+      _default:   {value: 500.0, unit: uV, origin: "conservative cross-modality default"}
+    sanity_range: [50.0, 5000.0]
+
+  mode:
+    research_trigger: never
+    canonical_question: ""
+    empirical_defaults:
+      _default: {value: "absolute", origin: "common practice"}

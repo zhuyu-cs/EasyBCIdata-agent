@@ -1,0 +1,24 @@
+operator: notch_filter
+version: 1
+parameters:
+  freq:
+    research_trigger: region_dependent
+    canonical_question: |
+      What line-noise frequency (Hz) should the notch filter target for
+      {paradigm} {modality} data — region-dependent (50 Hz EU/Asia,
+      60 Hz Americas)?
+    empirical_defaults:
+      _default: {value: 50.0, unit: Hz, origin: "EU/Asia power grid; users in Americas should override to 60"}
+    sanity_range: [40.0, 70.0]
+
+  width:
+    research_trigger: never
+    canonical_question: ""
+    empirical_defaults:
+      _default: {value: 2.0, unit: Hz, origin: "MNE notch_filter default"}
+
+  method:
+    research_trigger: never
+    canonical_question: ""
+    empirical_defaults:
+      _default: {value: "iir", origin: "MNE convention"}

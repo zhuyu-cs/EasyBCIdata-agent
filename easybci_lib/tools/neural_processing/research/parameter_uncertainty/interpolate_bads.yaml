@@ -1,0 +1,14 @@
+operator: interpolate_bads
+version: 1
+parameters:
+  method:
+    research_trigger: never
+    canonical_question: ""
+    empirical_defaults:
+      _default: {value: "spline", origin: "MNE default for EEG sensors"}
+
+  reset_bads:
+    research_trigger: never
+    canonical_question: ""
+    empirical_defaults:
+      _default: {value: true, origin: "MNE convention"}

@@ -1,0 +1,30 @@
+operator: ica
+version: 1
+parameters:
+  n_components:
+    research_trigger: paradigm_dependent
+    canonical_question: |
+      Recommended ICA n_components for {paradigm} {modality} with the given
+      channel count?
+    empirical_defaults:
+      motor_imagery:  {value: 20, origin: "Makoto's preprocessing pipeline"}
+      p300_erp:       {value: 25, origin: "Luck 2014"}
+      _default:       {value: 0.99, origin: "MNE: explained-variance fraction"}
+    sanity_range: [5, 200]
+
+  threshold:
+    research_trigger: paradigm_dependent
+    canonical_question: |
+      Recommended IC rejection threshold (correlation/variance) for {paradigm}
+      {modality}?
+    empirical_defaults:
+      motor_imagery:  {value: 0.85, origin: "ICLabel default"}
+      p300_erp:       {value: 0.85, origin: "ICLabel default"}
+      _default:       {value: 0.85, origin: "ICLabel default"}
+    sanity_range: [0.5, 0.99]
+
+  method:
+    research_trigger: never
+    canonical_question: ""
+    empirical_defaults:
+      _default: {value: "infomax", origin: "MNE default; robust on EEG"}

@@ -1,0 +1,8 @@
+operator: pick_channels
+version: 1
+parameters:
+  picks:
+    research_trigger: user_only
+    canonical_question: ""
+    empirical_defaults:
+      _default: {value: null, origin: "user must specify channel selection"}

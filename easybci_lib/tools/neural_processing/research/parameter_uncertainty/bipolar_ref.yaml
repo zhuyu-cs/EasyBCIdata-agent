@@ -1,0 +1,8 @@
+operator: bipolar_ref
+version: 1
+parameters:
+  pairs:
+    research_trigger: user_only
+    canonical_question: ""
+    empirical_defaults:
+      _default: {value: null, origin: "user must specify anode/cathode pairs"}

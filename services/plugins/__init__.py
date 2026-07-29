@@ -1,0 +1,1 @@
+# EasyBCI plugins package

@@ -1,0 +1,8 @@
+operator: scale
+version: 1
+parameters:
+  factor:
+    research_trigger: never
+    canonical_question: ""
+    empirical_defaults:
+      _default: {value: 1.0e-6, origin: "V → uV conversion"}

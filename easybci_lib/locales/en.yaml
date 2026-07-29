@@ -1,0 +1,67 @@
+progress:
+  stage:
+    plan: "Plan"
+    codegen: "Codegen"
+    preprocess: "Preprocess"
+    qc: "QC"
+  stalled_warning: "No heartbeat for > 30s — task may be stalled."
+  eta_unknown: "—"
+  estimating_next_step: "estimating {kind} elapsed..."
+  eta_remaining: "est +{seconds}"
+  eta_overrun: "{over_seconds}s over"
+
+internalization:
+  list_empty: "(no internalizations yet)"
+  list_header: "ID         SKILL                CONFIDENCE  WHEN         FLAGS"
+  legacy_flag: "(legacy)"
+  no_such_id: "no internalization with id {id}"
+  revoke_success: "Revoked {id} from {path} ({lines} lines)."
+  hand_edited_warning: "marker body was hand-edited (body differs from stored content); pass --allow-unsafe to revoke anyway."
+  hand_edited_hint: "If you are sure, re-run with --allow-unsafe."
+  missing_id_arg: "missing internalization id"
+  panel_title: "Internalized Knowledge"
+  refresh: "Refresh"
+  revoke_button: "Revoke"
+  no_entries: "No internalizations recorded yet."
+  prompt_reason: "Reason for revoking?"
+  hand_edited_confirm: "Marker body was hand-edited. Revoke anyway? (irreversible)"
+  legacy_unrevokable_tooltip: "Legacy entries can't be revoked via UI; use TTL or edit JSON"
+
+source_guard:
+  blocked_file_write: "BLOCKED: '{path}' is registered source data and cannot be {operation}."
+  blocked_dir_write: "BLOCKED: '{path}' is inside protected source directory '{dir}' and cannot be {operation}."
+  blocked_shell_target: "BLOCKED: shell command would {operation} '{target}' inside protected source directory '{dir}'."
+  blocked_codegen_write: "BLOCKED: generated script {script}:{line} writes to protected path '{target}'. Choose an output path inside the mini-repo work_dir."
+  warning_overly_broad_dir: "Source directory '{dir}' is too broad to protect (e.g. $HOME root, /tmp). Protecting only the file itself."
+
+resume_preprocessing:
+  errors:
+    work_dir_required: "work_dir is required"
+    work_dir_missing: "work_dir does not exist: {path}"
+    no_routing_table: "no inputs_routing.json — nothing to resume. Multi-input resume requires the routing table produced by deep_inspect."
+    enumerate_failed: "enumerate_pending failed: {reason}"
+
+doctor:
+  layout:
+    cli_help: "Verify and (optionally) repair a preprocess work_dir layout"
+    dry_run_header: "Dry-run against {path} — no filesystem changes will be made."
+    apply_header: "Repairing layout at {path}."
+    summary: "{initial} initial violation(s), {remaining} remaining after {rounds} round(s) ({elapsed}s)."
+    unrepairable_header: "Unrepairable items require manual attention:"
+    resolve_failed: "Cannot resolve work_dir {path!r}: {err}"
+    not_a_dir: "Not a directory: {path}"
+    drift_hint: "{count} recent work_dir(s) show layout drift — run 'easybci doctor layout <path>' to investigate."
+
+pipelines:
+  migrate:
+    cli_help: "Scan a directory tree for *_preprocess_work_dir/ and repair layout drift"
+    root_not_dir: "Root path is not a directory: {path}"
+    summary: "{scanned} scanned, {drift_count} with drift, {remaining} with residuals after repair."
+
+layout_repair:
+  hygiene:
+    partial_swept: "Moved {n_files} partial output file(s) from previous failed run of {stage} to {target}."
+    reuse_suppressed: "This call is suppressed because the current work_dir is in Reuse Mode ({reuse_source}). The research tools are unnecessary — the proven skill's parameters are already authoritative."
+    disallowed_ext_moved: "Moved {n_files} file(s) with disallowed extension from {dir_name}/ to middle_process/sweep_<ts>/."
+
+

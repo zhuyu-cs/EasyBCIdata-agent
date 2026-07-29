@@ -1,0 +1,14 @@
+operator: drop_bads
+version: 1
+parameters:
+  reject_criteria:
+    research_trigger: paradigm_dependent
+    canonical_question: |
+      Recommended trial-rejection criteria (peak-to-peak μV thresholds) for
+      {paradigm} {modality}?
+    empirical_defaults:
+      motor_imagery:  {value: 150.0, unit: uV, origin: "Makoto's preprocessing pipeline"}
+      p300_erp:       {value: 100.0, unit: uV, origin: "Luck 2014"}
+      ssvep:          {value: 150.0, unit: uV, origin: "common SSVEP practice"}
+      _default:       {value: 150.0, unit: uV, origin: "general scalp-EEG default"}
+    sanity_range: [30.0, 1000.0]

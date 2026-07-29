@@ -1,0 +1,8 @@
+operator: fill_nan
+version: 1
+parameters:
+  method:
+    research_trigger: never
+    canonical_question: ""
+    empirical_defaults:
+      _default: {value: "linear", origin: "scipy.interpolate convention"}

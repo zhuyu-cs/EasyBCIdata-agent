@@ -1,0 +1,569 @@
+"""Full-data scan producing inspection_report.json — Phase 1 of the
+two-phase pipeline flow.
+
+Trades wall-clock + RAM at Phase 1 for accurate operator/parameter choices
+at Phase 2. See docs/superpowers/specs/2026-06-16-data-preprocessing-two-phase-design.md.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import signal
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
+
+import numpy as np
+
+from easybci_lib.tools.neural_processing.io.inspection_report import (
+    ArtifactSummary,
+    ChannelStat,
+    ChannelSummary,
+    Fingerprint,
+    InspectionReport,
+    MemoryEstimate,
+    PsdSummary,
+    compute_file_id,
+    save_inspection_report,
+)
+from easybci_lib.tools.neural_processing.io.routing_table import (
+    RoutingEntry,
+    RoutingConflictError,
+    stem_safe,
+    upsert_routing_entry,
+)
+from easybci_lib.tools.neural_processing.profile.identity_resolver import (
+    resolve_identity,
+)
+
+logger = logging.getLogger(__name__)
+
+_REPORT_FILENAME = "inspection_report.json"
+_DEFAULT_SAMPLE_PCT = 0.10
+_DEFAULT_PSD_RES_HZ = 1.0
+_DEFAULT_MAX_PRELOAD_MB = 4096
+_DEFAULT_TIMEOUT_S = 300
+
+
+class _TimeoutError(Exception):
+    pass
+
+
+def _timeout_handler(signum, frame):  # noqa: ARG001
+    raise _TimeoutError("deep_inspect timeout")
+
+
+def deep_inspect(
+    data_path: str,
+    work_dir: str,
+    *,
+    sample_pct: float = _DEFAULT_SAMPLE_PCT,
+    psd_resolution_hz: float = _DEFAULT_PSD_RES_HZ,
+    max_preload_mb: int = _DEFAULT_MAX_PRELOAD_MB,
+    timeout_s: int = _DEFAULT_TIMEOUT_S,
+    cli_subject_id: str | None = None,
+    cli_session_id: str | None = None,
+) -> dict[str, Any]:
+    """Full-data scan; writes work_dir/middle_process/inspection_report.json.
+
+    Returns {success, report_path, report, degraded, elapsed_s}. Never raises
+    into the agent loop — degraded paths still return success=True.
+    """
+    out_path = Path(work_dir) / "middle_process" / _REPORT_FILENAME
+
+    # SIGALRM is POSIX-only and signal.signal() may only be installed from
+    # the main thread of the main interpreter. Under the gateway, tool
+    # dispatch runs in a worker thread, so skip the alarm there and rely on
+    # the caller's wall-clock budget — same fallback path Windows already uses.
+    has_alarm = (
+        hasattr(signal, "SIGALRM")
+        and threading.current_thread() is threading.main_thread()
+    )
+    if has_alarm:
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(int(timeout_s))
+
+    started = time.monotonic()
+    try:
+        report = _scan(
+            data_path=data_path,
+            sample_pct=sample_pct,
+            psd_resolution_hz=psd_resolution_hz,
+            max_preload_mb=max_preload_mb,
+        )
+    except _TimeoutError:
+        report = _degraded_lightweight(
+            data_path, reason="timeout",
+        )
+    except MemoryError:
+        report = _degraded_lightweight(data_path, reason="memory_cap")
+    except Exception as exc:
+        logger.exception("deep_inspect scan failed; degrading")
+        report = _degraded_lightweight(
+            data_path, reason=f"loader_error: {type(exc).__name__}: {exc}"
+        )
+    finally:
+        if has_alarm:
+            signal.alarm(0)
+
+    # Resolve subject + session identity — single source of truth that all
+    # downstream tools (codegen, repo_builder, figure writers) must read
+    # instead of re-inferring from data_path.stem.
+    try:
+        identity = resolve_identity(
+            Path(data_path),
+            cli_subject_id=cli_subject_id,
+            cli_session_id=cli_session_id,
+        )
+        report.identity = identity
+        if identity.fallback_used:
+            report.warnings.append(
+                f"subject_id defaulted to '{identity.subject_id}' "
+                f"({identity.notes})"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("identity resolution failed: %s", exc)
+        identity = None
+
+    # Compute a stable file_id (sha256 of first 1 MiB → 8 hex). Falls back to
+    # an md5 of the path string when the file is unreadable so multi-input
+    # routing still gets a unique key.
+    file_id = compute_file_id(data_path) or hashlib.md5(
+        str(data_path).encode("utf-8")
+    ).hexdigest()[:8]
+    report.file_id = file_id
+
+    # Persist BOTH: per-file report under middle_process/inspect/<file_id>/
+    # (multi-input single source of truth) AND the legacy root path
+    # (back-compat for code that hasn't been migrated yet).
+    work_dir_path = Path(work_dir)
+    per_file_path = (
+        work_dir_path / "middle_process" / "inspect" / file_id / _REPORT_FILENAME
+    )
+    save_inspection_report(report, per_file_path)
+    save_inspection_report(report, out_path)
+
+    # Upsert into the routing table. Conflicts (same (sub, ses, stem) under
+    # different file_id) are logged + the per-file report still lands; the
+    # routing table is left in its prior state for the caller to reconcile.
+    if identity is not None:
+        try:
+            entry = RoutingEntry(
+                data_path=str(data_path),
+                stem_safe=stem_safe(data_path),
+                sha256_1mb=file_id,
+                file_id=file_id,
+                subject_id=identity.subject_id,
+                session_id=identity.session_id,
+                identity_source=identity.source,
+                identity_confidence=identity.confidence,
+                inspection_report_path=str(
+                    per_file_path.relative_to(work_dir_path)
+                ),
+                events_path=_discover_events_csv(data_path),
+                override_script=None,
+            )
+            upsert_routing_entry(work_dir_path, entry)
+        except RoutingConflictError as exc:
+            logger.warning("routing table upsert refused: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("routing table upsert failed: %s", exc)
+
+    return {
+        "success": True,
+        "report_path": str(out_path),
+        "report": report.to_dict(),
+        "degraded": report.degraded,
+        "elapsed_s": round(time.monotonic() - started, 2),
+    }
+
+
+def _discover_events_csv(data_path: Path | str) -> Optional[str]:
+    """Best-effort lookup of a sidecar ``events_{stem}.csv``.
+
+    Searches the raw file's parent directory for ``events_{stem_safe}.csv``
+    and ``events_{raw_stem}.csv`` (raw stem may contain spaces). Returns an
+    absolute path string or ``None``. Used by the routing table so
+    build_ai_ready never has to re-discover events at run time.
+    """
+    p = Path(data_path)
+    data_dir = p.parent
+    if not data_dir.is_dir():
+        return None
+    candidates = [
+        data_dir / f"events_{stem_safe(p)}.csv",
+        data_dir / f"events_{p.stem}.csv",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+    return None
+
+
+def _scan(
+    *,
+    data_path: str,
+    sample_pct: float,
+    psd_resolution_hz: float,
+    max_preload_mb: int,
+) -> InspectionReport:
+    from easybci_lib.tools.neural_processing.io.loader import load_neural
+
+    light = load_neural(data_path, modality="auto", inspect_only=True)
+    meta = light.get("meta", {}) or {}
+    if isinstance(meta, dict) and meta.get("load_error"):
+        raise RuntimeError(meta["load_error"])
+
+    n_channels = int(meta.get("n_channels") or len(light.get("channels") or []))
+    n_samples_total = int(meta.get("n_samples_total") or 0)
+    fs = float(light.get("frequency") or 0.0)
+    duration_s = float(light.get("duration") or (n_samples_total / fs if fs else 0.0))
+    channels = list(light.get("channels") or [])
+    modality = light.get("modality", "auto")
+    fmt = (meta.get("format") or Path(data_path).suffix.lstrip(".")).lower()
+
+    preload_mb = (n_channels * n_samples_total * 4) / (1024 * 1024)
+    if preload_mb > max_preload_mb:
+        raise MemoryError(
+            f"preload_mb={preload_mb:.0f} > cap={max_preload_mb}"
+        )
+
+    full = load_neural(data_path, modality=modality, inspect_only=False)
+    data = full["data"]
+
+    if isinstance(data, list):
+        # Spike modality: list-of-arrays — PSD / artifact stats not meaningful.
+        return _spike_fingerprint(
+            data_path=data_path, channels=channels, modality=modality,
+            fs=fs, duration_s=duration_s, fmt=fmt, data=data,
+        )
+
+    channel_stats = _per_channel_stats(data, channels)
+    psd_summary = _psd_summary(data, fs=fs, resolution_hz=psd_resolution_hz)
+    artifact_summary = _artifact_summary(data, fs=fs, sample_pct=sample_pct)
+    channel_summary = _classify_channels(
+        channel_stats=channel_stats, channels=channels, meta=meta,
+        modality=modality,
+    )
+    warnings = _build_warnings(channel_stats, channel_summary, psd_summary)
+
+    events_block = meta.get("annotations") or {}
+    n_events = (
+        len(events_block.get("onset", []))
+        if isinstance(events_block, dict) else 0
+    )
+    event_types = (
+        sorted({str(d) for d in events_block.get("description", [])})
+        if n_events else []
+    )
+
+    return InspectionReport(
+        generated_at=datetime.utcnow().isoformat(timespec="seconds"),
+        data_path=str(data_path),
+        degraded=False,
+        degraded_reason=None,
+        fingerprint=Fingerprint(
+            format=fmt, modality=modality,
+            n_channels=n_channels, sampling_freq_hz=fs,
+            duration_s=round(duration_s, 2),
+            n_events=int(n_events), event_types=event_types,
+        ),
+        channel_stats=channel_stats,
+        channel_summary=channel_summary,
+        psd_summary=psd_summary,
+        artifact_summary=artifact_summary,
+        memory_estimate=MemoryEstimate(
+            preload_full_mb=round(preload_mb, 1),
+            peak_processing_mb_estimate=round(preload_mb * 4, 1),
+        ),
+        warnings=warnings,
+    )
+
+
+def _per_channel_stats(data: np.ndarray, channels: list[str]) -> list[ChannelStat]:
+    if data.ndim != 2:
+        return []
+    out: list[ChannelStat] = []
+    for i in range(data.shape[0]):
+        ch = data[i]
+        nan_pct = float(np.isnan(ch).mean() * 100.0)
+        inf_pct = float(np.isinf(ch).mean() * 100.0)
+        flat_pct = float((np.diff(ch) == 0).mean() * 100.0)
+        std = float(np.nanstd(ch))
+        spike_count = (
+            int(np.sum(np.abs(ch - np.nanmean(ch)) > 8 * std)) if std > 0 else 0
+        )
+        out.append(ChannelStat(
+            name=channels[i] if i < len(channels) else f"ch{i}",
+            category="data",
+            variance=float(np.nanvar(ch)),
+            mean=float(np.nanmean(ch)),
+            std=std,
+            nan_pct=nan_pct, inf_pct=inf_pct, flat_pct=flat_pct,
+            spike_count=spike_count,
+        ))
+    return out
+
+
+def _psd_summary(data: np.ndarray, *, fs: float, resolution_hz: float) -> PsdSummary:
+    from scipy.signal import welch
+
+    empty = PsdSummary(
+        power_line_peak_hz=None,
+        power_line_peak_db_above_floor=None,
+        harmonics_detected_hz=[],
+        low_freq_drift_below_1hz_present=False,
+        high_freq_noise_above_40hz_present=False,
+    )
+    if data.ndim != 2 or fs <= 0 or data.shape[1] < int(fs * 4):
+        return empty
+
+    nperseg = max(64, int(fs / resolution_hz))
+    avg = data.mean(axis=0)
+    freqs, pxx = welch(avg, fs=fs, nperseg=min(nperseg, len(avg)))
+    pxx_db = 10 * np.log10(pxx + 1e-20)
+    median_db = float(np.median(pxx_db))
+
+    band = (freqs >= 48) & (freqs <= 62)
+    line_peak = None
+    line_db = None
+    if band.any():
+        idx = int(np.argmax(pxx_db[band]))
+        peak_hz = float(freqs[band][idx])
+        peak_db = float(pxx_db[band][idx] - median_db)
+        if peak_db > 6.0:
+            line_peak = peak_hz
+            line_db = peak_db
+
+    harmonics: list[float] = []
+    if line_peak:
+        for k in (2, 3, 4):
+            h = line_peak * k
+            if h >= freqs[-1]:
+                break
+            i = int(np.argmin(np.abs(freqs - h)))
+            if pxx_db[i] - median_db > 6.0:
+                harmonics.append(round(float(freqs[i]), 1))
+
+    low_drift = bool(np.any((freqs < 1.0) & (pxx_db > median_db + 10)))
+    high_noise = bool(
+        np.any((freqs > 40) & (freqs < min(fs / 2, 100)) & (pxx_db > median_db + 6))
+    )
+
+    return PsdSummary(
+        power_line_peak_hz=line_peak,
+        power_line_peak_db_above_floor=(
+            round(line_db, 1) if line_db is not None else None
+        ),
+        harmonics_detected_hz=harmonics,
+        low_freq_drift_below_1hz_present=low_drift,
+        high_freq_noise_above_40hz_present=high_noise,
+    )
+
+
+def _artifact_summary(
+    data: np.ndarray, *, fs: float, sample_pct: float,
+) -> ArtifactSummary:
+    empty = ArtifactSummary(
+        sample_pct=sample_pct, blink_rate_per_min=0.0,
+        muscle_artifact_pct=0.0, saturation_pct=0.0,
+    )
+    if data.ndim != 2 or fs <= 0:
+        return empty
+    n_total = data.shape[1]
+    n_sample = max(int(fs * 4), int(n_total * sample_pct))
+    n_sample = min(n_sample, n_total)
+    if n_sample <= 1:
+        return empty
+    start = int((n_total - n_sample) / 2)
+    seg = data[:, start:start + n_sample]
+
+    mx = float(np.nanmax(np.abs(seg)))
+    saturation_pct = (
+        float((np.abs(seg) > 0.999 * mx).mean() * 100.0) if mx > 0 else 0.0
+    )
+
+    z = (seg[0] - np.nanmean(seg[0])) / (np.nanstd(seg[0]) + 1e-12)
+    blink_events = int(np.sum(np.abs(z) > 4))
+    blink_rate_per_min = (
+        float(blink_events / (n_sample / fs / 60.0)) if n_sample else 0.0
+    )
+
+    diff_var = np.var(np.diff(seg, axis=1), axis=1)
+    if diff_var.size:
+        muscle_pct = float(
+            (diff_var > np.percentile(diff_var, 90)).mean() * 100.0
+        )
+    else:
+        muscle_pct = 0.0
+
+    return ArtifactSummary(
+        sample_pct=sample_pct,
+        blink_rate_per_min=round(blink_rate_per_min, 2),
+        muscle_artifact_pct=round(muscle_pct, 2),
+        saturation_pct=round(saturation_pct, 2),
+    )
+
+
+def _classify_channels(
+    *,
+    channel_stats: list[ChannelStat],
+    channels: list[str],
+    meta: dict,
+    modality: str,
+) -> ChannelSummary:
+    from easybci_lib.tools.neural_tools import _build_channel_summary
+    try:
+        legacy = _build_channel_summary(channels, meta, modality) or {}
+    except Exception:
+        legacy = {"must_drop": [], "suggest_drop": []}
+
+    must = list(legacy.get("must_drop") or [])
+    suggest = list(legacy.get("suggest_drop") or [])
+
+    variances = [c.variance for c in channel_stats if c.variance > 0]
+    median_var = float(np.median(variances)) if variances else 0.0
+    high_var = [
+        c.name for c in channel_stats
+        if median_var and c.variance > 5 * median_var
+    ]
+    flat = [c.name for c in channel_stats if c.flat_pct > 50.0]
+    spiky = [c.name for c in channel_stats if c.spike_count > 100]
+
+    return ChannelSummary(
+        must_drop=must, suggest_drop=suggest,
+        bad_candidates_high_variance=high_var,
+        bad_candidates_flat=flat,
+        bad_candidates_spike=spiky,
+    )
+
+
+def _build_warnings(
+    channel_stats: list[ChannelStat],
+    channel_summary: ChannelSummary,
+    psd_summary: PsdSummary,
+) -> list[str]:
+    warns: list[str] = []
+    for ch in channel_summary.bad_candidates_high_variance:
+        warns.append(
+            f"Channel {ch} variance much higher than median — likely bad channel"
+        )
+    for ch in channel_summary.bad_candidates_flat:
+        warns.append(
+            f"Channel {ch} is flat (>50% identical samples) — disconnected electrode"
+        )
+    if psd_summary.low_freq_drift_below_1hz_present:
+        warns.append("Low-frequency drift (<1 Hz) detected — recommend high-pass filter")
+    if psd_summary.high_freq_noise_above_40hz_present:
+        warns.append(
+            "High-frequency noise above 40 Hz — recommend low-pass filter or muscle ICA"
+        )
+    if psd_summary.power_line_peak_hz:
+        warns.append(
+            f"Power line peak at {psd_summary.power_line_peak_hz} Hz "
+            f"({psd_summary.power_line_peak_db_above_floor} dB above floor) — recommend notch"
+        )
+    return warns
+
+
+def _degraded_lightweight(data_path: str, *, reason: str) -> InspectionReport:
+    """Fallback: header-only fingerprint, neutral zero stats."""
+    from easybci_lib.tools.neural_processing.io.loader import load_neural
+    try:
+        light = load_neural(data_path, modality="auto", inspect_only=True)
+    except Exception as exc:
+        light = {
+            "meta": {"load_error": str(exc)},
+            "data": np.zeros((0, 0)),
+            "channels": [], "frequency": 0.0, "duration": 0.0,
+            "modality": "auto",
+        }
+
+    meta = light.get("meta", {}) or {}
+    n_channels = int(meta.get("n_channels") or 0)
+    n_samples = int(meta.get("n_samples_total") or 0)
+    fs = float(light.get("frequency") or 0.0)
+    duration_s = float(light.get("duration") or 0.0)
+    modality = light.get("modality", "auto")
+    fmt = (meta.get("format") or Path(data_path).suffix.lstrip(".")).lower()
+
+    return InspectionReport(
+        generated_at=datetime.utcnow().isoformat(timespec="seconds"),
+        data_path=str(data_path),
+        degraded=True,
+        degraded_reason=reason,
+        fingerprint=Fingerprint(
+            format=fmt, modality=modality,
+            n_channels=n_channels, sampling_freq_hz=fs,
+            duration_s=round(duration_s, 2),
+            n_events=0, event_types=[],
+        ),
+        channel_stats=[],
+        channel_summary=ChannelSummary(
+            must_drop=[], suggest_drop=[],
+            bad_candidates_high_variance=[],
+            bad_candidates_flat=[], bad_candidates_spike=[],
+        ),
+        psd_summary=PsdSummary(
+            power_line_peak_hz=None,
+            power_line_peak_db_above_floor=None,
+            harmonics_detected_hz=[],
+            low_freq_drift_below_1hz_present=False,
+            high_freq_noise_above_40hz_present=False,
+        ),
+        artifact_summary=ArtifactSummary(
+            sample_pct=0.0, blink_rate_per_min=0.0,
+            muscle_artifact_pct=0.0, saturation_pct=0.0,
+        ),
+        memory_estimate=MemoryEstimate(
+            preload_full_mb=round((n_channels * n_samples * 4) / (1024 * 1024), 1),
+            peak_processing_mb_estimate=0.0,
+        ),
+        warnings=[
+            f"deep_inspect ran in degraded mode (reason={reason!r}); "
+            "channel stats / PSD / artifact rate are unavailable. "
+            "Treat operator/parameter choices as best-effort.",
+        ],
+    )
+
+
+def _spike_fingerprint(
+    *, data_path, channels, modality, fs, duration_s, fmt, data,
+) -> InspectionReport:
+    n_channels = len(data)
+    return InspectionReport(
+        generated_at=datetime.utcnow().isoformat(timespec="seconds"),
+        data_path=str(data_path),
+        degraded=True,
+        degraded_reason="spike_modality_no_psd",
+        fingerprint=Fingerprint(
+            format=fmt, modality=modality,
+            n_channels=n_channels, sampling_freq_hz=fs,
+            duration_s=round(duration_s, 2),
+            n_events=0, event_types=[],
+        ),
+        channel_stats=[],
+        channel_summary=ChannelSummary(
+            must_drop=[], suggest_drop=[],
+            bad_candidates_high_variance=[],
+            bad_candidates_flat=[], bad_candidates_spike=[],
+        ),
+        psd_summary=PsdSummary(
+            power_line_peak_hz=None,
+            power_line_peak_db_above_floor=None,
+            harmonics_detected_hz=[],
+            low_freq_drift_below_1hz_present=False,
+            high_freq_noise_above_40hz_present=False,
+        ),
+        artifact_summary=ArtifactSummary(
+            sample_pct=0.0, blink_rate_per_min=0.0,
+            muscle_artifact_pct=0.0, saturation_pct=0.0,
+        ),
+        memory_estimate=MemoryEstimate(
+            preload_full_mb=0.0, peak_processing_mb_estimate=0.0,
+        ),
+        warnings=["spike modality: deep_inspect returns fingerprint only"],
+    )

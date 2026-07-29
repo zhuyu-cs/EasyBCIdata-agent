@@ -1,0 +1,434 @@
+@import 'tailwindcss';
+
+/* ------------------------------------------------------------------ */
+/* EasyBCI Agent — CSS Variable Design System                          */
+/* ------------------------------------------------------------------ */
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts-terminal/JetBrainsMono-Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts-terminal/JetBrainsMono-Bold.woff2') format('woff2');
+}
+
+/* ---- Light theme (default) ---- */
+:root {
+  --radius: 0.5rem;
+  --bg-primary: #f7f7f5;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f1f1ef;
+  --bg-hover: #ebebea;
+  --bg-active: #e8e5e0;
+  --bg-code: #fafaf8;
+  --bg-code-header: #f4f3f0;
+  --bg-user-bubble: #f0ebe3;
+  --bg-agent-bubble: #f7f7f5;
+  --bg-input: #f7f6f3;
+  --text-primary: #37352f;
+  --text-secondary: #5f5e5b;
+  --text-muted: #9b9a97;
+  --text-faint: #c4c3c0;
+  --border-primary: #e8e5e0;
+  --border-secondary: #e0ddd8;
+  --border-code: #e0ddd8;
+  --accent-green: #2d8a4e;
+  --accent-blue: #1a73e8;
+  --accent-red: #d1242f;
+  --accent-yellow: #854d0e;
+  /* Composer Send/Stop button — same color both states so the chrome stays
+     calm; only the icon shape conveys send vs. stop. Light mode = near-black. */
+  --composer-btn-bg: #1f1f1f;
+  --composer-btn-bg-hover: #000000;
+  --composer-btn-fg: #ffffff;
+  /* Stop button — a muted, warm rust instead of GitHub-red. Reads as
+     "warning/cancel" but doesn't shout. Same brightness as send button
+     so the composer doesn't visually jump on streaming start. */
+  --composer-stop-bg: #8a4a3a;
+  --composer-stop-bg-hover: #6e3a2c;
+  --overlay-bg: rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+  --scrollbar-thumb: #d4d4d0;
+  --scrollbar-hover: #a8a8a4;
+  --resize-handle: rgba(55, 53, 47, 0.08);
+  --gradient-shimmer: linear-gradient(90deg, transparent, rgba(55, 53, 47, 0.06), transparent);
+  --bg-success-subtle: #f0fdf4;
+  --bg-warning-subtle: #fefce8;
+  --bg-error-subtle: #fef2f2;
+  --border-success: #bbf7d0;
+  --border-warning: #fde68a;
+  --border-error: #fecaca;
+  --text-on-accent: #ffffff;
+  --text-error: #dc2626;
+  --text-warning: #854d0e;
+  --text-success: #166534;
+  --ring-focus: rgba(55, 53, 47, 0.08);
+  --bg-search-highlight: #fef9c3;
+  --bg-delete-hover: #fef2f2;
+  --text-delete: #d1242f;
+  --text-delete-hover: #b91c1c;
+  --bg-button-primary: #37352f;
+  --bg-button-primary-hover: #2f2e2b;
+  --bg-button-danger: #d1242f;
+  --bg-button-danger-hover: #b91c1c;
+  --bg-drop-active: #f0fdf4;
+  --border-drop-active: #2d8a4e;
+}
+
+/* ---- Dark theme ---- */
+[data-theme="dark"] {
+  --bg-primary: #191919;
+  --bg-secondary: #232323;
+  --bg-tertiary: #2a2a2a;
+  --bg-hover: #333333;
+  --bg-active: #3d3d3d;
+  --bg-code: #1e1e1e;
+  --bg-code-header: #252525;
+  --bg-user-bubble: #2c2a26;
+  --bg-agent-bubble: #232323;
+  --bg-input: #2a2a2a;
+  --text-primary: #e8e6e3;
+  --text-secondary: #a8a6a2;
+  --text-muted: #777774;
+  --text-faint: #555553;
+  --border-primary: #333333;
+  --border-secondary: #3d3d3d;
+  --border-code: #3d3d3d;
+  --accent-green: #4ade80;
+  --accent-blue: #60a5fa;
+  --accent-red: #f87171;
+  --accent-yellow: #fbbf24;
+  /* Dark-mode composer button — soft white. The black-on-light → white-on-dark
+     flip is the visual rhyme that makes the composer feel intentional. */
+  --composer-btn-bg: #ededed;
+  --composer-btn-bg-hover: #ffffff;
+  --composer-btn-fg: #1a1a1a;
+  /* Dark-mode stop — soft terracotta. Picks up on the dark backdrop without
+     glaring. */
+  --composer-stop-bg: #c97968;
+  --composer-stop-bg-hover: #d68a78;
+  --overlay-bg: rgba(0, 0, 0, 0.6);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --scrollbar-thumb: #444;
+  --scrollbar-hover: #666;
+  --resize-handle: rgba(255, 255, 255, 0.06);
+    --gradient-shimmer: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.04), transparent);
+  --bg-success-subtle: #052e16;
+  --bg-warning-subtle: #422006;
+  --bg-error-subtle: #450a0a;
+  --border-success: #166534;
+  --border-warning: #92400e;
+  --border-error: #991b1b;
+  --text-on-accent: #ffffff;
+  --text-error: #f87171;
+  --text-warning: #fbbf24;
+  --text-success: #4ade80;
+  --ring-focus: rgba(255, 255, 255, 0.06);
+  --bg-search-highlight: #854d0e;
+  --bg-delete-hover: #450a0a;
+  --text-delete: #f87171;
+  --text-delete-hover: #fca5a5;
+  --bg-button-primary: #e8e6e3;
+  --bg-button-primary-hover: #d4d2cf;
+  --bg-button-danger: #f87171;
+  --bg-button-danger-hover: #fca5a5;
+  --bg-drop-active: #052e16;
+  --border-drop-active: #4ade80;
+}
+
+/* ---- Dark theme (system preference) ---- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg-primary: #191919;
+    --bg-secondary: #232323;
+    --bg-tertiary: #2a2a2a;
+    --bg-hover: #333333;
+    --bg-active: #3d3d3d;
+    --bg-code: #1e1e1e;
+    --bg-code-header: #252525;
+    --bg-user-bubble: #2c2a26;
+    --bg-agent-bubble: #232323;
+    --bg-input: #2a2a2a;
+    --text-primary: #e8e6e3;
+    --text-secondary: #a8a6a2;
+    --text-muted: #777774;
+    --text-faint: #555553;
+    --border-primary: #333333;
+    --border-secondary: #3d3d3d;
+    --border-code: #3d3d3d;
+    --accent-green: #4ade80;
+    --accent-blue: #60a5fa;
+    --accent-red: #f87171;
+    --accent-yellow: #fbbf24;
+    --composer-btn-bg: #ededed;
+    --composer-btn-bg-hover: #ffffff;
+    --composer-btn-fg: #1a1a1a;
+    --composer-stop-bg: #c97968;
+    --composer-stop-bg-hover: #d68a78;
+    --overlay-bg: rgba(0, 0, 0, 0.6);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+    --scrollbar-thumb: #444;
+    --scrollbar-hover: #666;
+    --resize-handle: rgba(255, 255, 255, 0.06);
+    --gradient-shimmer: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.04), transparent);
+    --bg-success-subtle: #052e16;
+    --bg-warning-subtle: #422006;
+    --bg-error-subtle: #450a0a;
+    --border-success: #166534;
+    --border-warning: #92400e;
+    --border-error: #991b1b;
+    --text-on-accent: #ffffff;
+    --text-error: #f87171;
+    --text-warning: #fbbf24;
+    --text-success: #4ade80;
+    --ring-focus: rgba(255, 255, 255, 0.06);
+    --bg-search-highlight: #854d0e;
+    --bg-delete-hover: #450a0a;
+    --text-delete: #f87171;
+    --text-delete-hover: #fca5a5;
+    --bg-button-primary: #e8e6e3;
+    --bg-button-primary-hover: #d4d2cf;
+    --bg-button-danger: #f87171;
+    --bg-button-danger-hover: #fca5a5;
+    --bg-drop-active: #052e16;
+    --border-drop-active: #4ade80;
+  }
+}
+
+html {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+}
+
+/* ---- Theme transition ----
+   Applied only briefly (200ms) by themeStore on user-initiated theme change,
+   so colors cross-fade instead of snapping. Removed afterwards to avoid
+   interfering with normal hover/interaction animations. */
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme-transitioning] *,
+  [data-theme-transitioning] *::before,
+  [data-theme-transitioning] *::after {
+    transition:
+      background-color 200ms ease,
+      color 200ms ease,
+      border-color 200ms ease,
+      fill 200ms ease,
+      stroke 200ms ease !important;
+  }
+}
+
+body {
+  min-height: 0;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+code, kbd, pre, samp, .font-mono {
+  font-family: 'JetBrains Mono', ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+}
+
+#root {
+  min-height: 0;
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+/* ------------------------------------------------------------------ */
+/* Semantic type scale                                                  */
+/* Centralizes font-size/line-height semantics so components reference   */
+/* meaning ("caption", "label") rather than scattered text-[Xpx].        */
+/* Placed in the components layer so per-instance Tailwind utilities can  */
+/* still override when a one-off size is genuinely needed.               */
+/* ------------------------------------------------------------------ */
+@layer components {
+  .text-body {
+    font-size: 13.5px;
+    line-height: 1.6;
+  }
+  .text-caption {
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .text-label {
+    font-size: 11px;
+    line-height: 1.4;
+    letter-spacing: 0.01em;
+  }
+  .text-micro {
+    font-size: 10px;
+    line-height: 1.3;
+  }
+  .text-heading-sm {
+    font-size: 14px;
+    line-height: 1.3;
+    font-weight: 600;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Three-column workspace grid                                         */
+/* ------------------------------------------------------------------ */
+
+.workspace-grid {
+  display: grid;
+  grid-template-rows: 1fr;
+  grid-template-areas: "session conversation workspace";
+}
+
+.session-panel {
+  grid-area: session;
+  position: relative;
+}
+
+.workspace-panel {
+  grid-area: workspace;
+  position: relative;
+}
+
+.conversation-panel {
+  grid-area: conversation;
+}
+
+/* Tablet and mobile responsive handled in WorkspaceLayout.tsx via useMediaQuery */
+
+/* ------------------------------------------------------------------ */
+/* Scrollbar styling                                                    */
+/* ------------------------------------------------------------------ */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-hover);
+}
+
+/* ------------------------------------------------------------------ */
+/* Animations                                                           */
+/* ------------------------------------------------------------------ */
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out forwards;
+}
+
+@keyframes backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-backdrop-in {
+  animation: backdrop-in 0.2s ease-out forwards;
+}
+
+.animate-dialog-in {
+  animation: dialog-in 0.2s ease-out forwards;
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.animate-shimmer {
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-4px); }
+}
+
+.typing-dot {
+  animation: typing-bounce 1.4s ease-in-out infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes approval-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-approval-slide-up {
+  animation: approval-slide-up 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Pulsing accent border for the agent bubble while it is streaming */
+@keyframes accent-pulse {
+  0%, 100% { border-left-color: var(--accent-green); }
+  50% { border-left-color: color-mix(in srgb, var(--accent-green) 55%, transparent); }
+}
+
+.animate-accent-pulse {
+  animation: accent-pulse 2s ease-in-out infinite;
+}
+
+/* Subtle breathing dot for the reasoning phase (thinking, no content yet) — a
+   gentler signal than the bubble's accent-pulse (U12). */
+@keyframes reasoning-dot {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+.reasoning-dot {
+  animation: reasoning-dot 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-dot { animation: none; }
+}

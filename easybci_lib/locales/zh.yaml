@@ -1,0 +1,65 @@
+progress:
+  stage:
+    plan: "规划"
+    codegen: "生成代码"
+    preprocess: "预处理"
+    qc: "质量检查"
+  stalled_warning: "30 秒未收到心跳——任务可能停滞。"
+  eta_unknown: "—"
+  estimating_next_step: "估算 {kind} 耗时..."
+  eta_remaining: "估 +{seconds}"
+  eta_overrun: "{over_seconds}s 已超"
+
+internalization:
+  list_empty: "（暂无内化记录）"
+  list_header: "ID         技能                  可信度      日期         标记"
+  legacy_flag: "（历史条目）"
+  no_such_id: "找不到 id 为 {id} 的内化记录"
+  revoke_success: "已从 {path} 撤销 {id}（移除 {lines} 行）。"
+  hand_edited_warning: "标记块内容被手工编辑过（与存档内容不一致）；如确认仍要撤销，请加 --allow-unsafe。"
+  hand_edited_hint: "如确认仍要撤销，请重试并加 --allow-unsafe。"
+  missing_id_arg: "缺少 internalization id 参数"
+  panel_title: "已内化知识"
+  refresh: "刷新"
+  revoke_button: "撤销"
+  no_entries: "尚未记录任何内化条目。"
+  prompt_reason: "撤销原因？"
+  hand_edited_confirm: "标记块被手工编辑过。仍要撤销吗？（不可恢复）"
+  legacy_unrevokable_tooltip: "历史条目无法通过 UI 撤销；请等待 TTL 自动失效或手动编辑 JSON。"
+
+source_guard:
+  blocked_file_write: "已拒绝：'{path}' 是受保护的源数据，无法执行 {operation} 操作。"
+  blocked_dir_write: "已拒绝：'{path}' 位于受保护的源数据目录 '{dir}' 内，无法执行 {operation} 操作。"
+  blocked_shell_target: "已拒绝：shell 命令试图在受保护源数据目录 '{dir}' 中 {operation} '{target}'。"
+  blocked_codegen_write: "已拒绝：生成脚本 {script}:{line} 写入了受保护路径 '{target}'。请改用 mini-repo work_dir 内的输出路径。"
+  warning_overly_broad_dir: "源数据目录 '{dir}' 过宽（如 $HOME 根、/tmp），仅保护文件本身。"
+
+resume_preprocessing:
+  errors:
+    work_dir_required: "缺 work_dir 参数"
+    work_dir_missing: "work_dir 不存在：{path}"
+    no_routing_table: "找不到 inputs_routing.json —— 没有可续跑的内容。多输入续跑需要 deep_inspect 产出的 routing 表。"
+    enumerate_failed: "enumerate_pending 失败：{reason}"
+
+doctor:
+  layout:
+    cli_help: "校验并（可选）修复 preprocess work_dir 布局"
+    dry_run_header: "对 {path} 做 dry-run —— 不会写盘。"
+    apply_header: "正在修复 {path} 的布局。"
+    summary: "初始违规 {initial} 条，{rounds} 轮后剩余 {remaining} 条（耗时 {elapsed}s）。"
+    unrepairable_header: "以下项无法自动修复，需要人工介入："
+    resolve_failed: "无法解析 work_dir {path!r}: {err}"
+    not_a_dir: "不是目录: {path}"
+    drift_hint: "{count} 个最近的 work_dir 存在布局漂移——用 'easybci doctor layout <path>' 查看详情。"
+
+pipelines:
+  migrate:
+    cli_help: "扫描目录下所有 *_preprocess_work_dir/ 并修复布局漂移"
+    root_not_dir: "根路径不是目录: {path}"
+    summary: "扫描 {scanned} 个，{drift_count} 个存在漂移，修复后剩余 {remaining} 个未收敛。"
+
+layout_repair:
+  hygiene:
+    partial_swept: "已将上一次 {stage} 失败运行残留的 {n_files} 个部分产物文件移动到 {target}。"
+    reuse_suppressed: "本次调用已被抑制，因为当前 work_dir 处于 Reuse Mode（{reuse_source}）。research 工具无必要——已验证 skill 的参数已是权威来源。"
+    disallowed_ext_moved: "已将 {dir_name}/ 下 {n_files} 个非法扩展名文件移动到 middle_process/sweep_<ts>/。"

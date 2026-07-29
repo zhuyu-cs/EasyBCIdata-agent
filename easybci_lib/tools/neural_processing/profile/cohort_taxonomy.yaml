@@ -1,0 +1,14 @@
+# 6 broad cohort categories; sub-categories share parent so cohort_similarity
+# can return 0.5 for siblings. Extend liberally — schema is just (name → parent).
+healthy:
+  parent: null
+clinical-stroke:
+  parent: clinical
+clinical-epilepsy:
+  parent: clinical
+clinical-other:
+  parent: clinical
+pediatric:
+  parent: null
+elderly:
+  parent: null

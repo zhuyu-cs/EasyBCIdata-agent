@@ -1,0 +1,20 @@
+operator: resample
+version: 1
+parameters:
+  sfreq:
+    research_trigger: paradigm_dependent
+    canonical_question: |
+      Recommended target sampling frequency (Hz) for {paradigm} {modality}?
+    empirical_defaults:
+      motor_imagery:  {value: 250.0, unit: Hz, origin: "Pfurtscheller convention"}
+      p300_erp:       {value: 256.0, unit: Hz, origin: "Luck 2014"}
+      ssvep:          {value: 256.0, unit: Hz, origin: "common SSVEP target"}
+      sleep_staging:  {value: 100.0, unit: Hz, origin: "AASM convention"}
+      _default:       {value: 250.0, unit: Hz, origin: "general EEG default"}
+    sanity_range: [50.0, 5000.0]
+
+  npad:
+    research_trigger: never
+    canonical_question: ""
+    empirical_defaults:
+      _default: {value: "auto", origin: "MNE default"}
