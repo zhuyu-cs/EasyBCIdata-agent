@@ -19,6 +19,11 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import numpy as np
 
 from easybci_lib.tools.neural_processing._seed import EASYBCI_SEED
+from easybci_lib.tools.neural_processing.quality.plot_style import (
+    QC_DPI_PREVIEW,
+    QC_DPI_SAVE,
+    apply_qc_style,
+)
 
 if TYPE_CHECKING:
     from easybci_lib.tools.neural_processing.quality.final_view import FinalDataView
@@ -49,6 +54,7 @@ def generate_qc_figures(
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    apply_qc_style()
 
     data = view.data
     channels = list(view.channels)
@@ -87,7 +93,7 @@ def _plot_psd(data: np.ndarray, sfreq: float, channels: List[str]) -> str:
     ax.set_ylabel("PSD (V²/Hz)", color="#c0caf5")
     ax.set_title("Power Spectral Density", color="#c0caf5")
     ax.tick_params(colors="#565f89")
-    ax.legend(loc="upper right", fontsize=7, framealpha=0.5)
+    ax.legend(loc="upper right", framealpha=0.5)
     ax.set_xlim(0, min(sfreq / 2, 100))
     ax.grid(True, alpha=0.2)
 
@@ -129,11 +135,11 @@ def _plot_channel_variance(data: np.ndarray, channels: List[str]) -> str:
     ax.set_ylabel("Variance", color="#c0caf5")
     ax.set_title("Channel Variance", color="#c0caf5")
     ax.tick_params(colors="#565f89")
-    ax.legend(fontsize=7, framealpha=0.5)
+    ax.legend(framealpha=0.5)
 
     if n_ch <= 32:
         ax.set_xticks(x)
-        ax.set_xticklabels(channels[:n_ch], rotation=45, ha="right", fontsize=6)
+        ax.set_xticklabels(channels[:n_ch], rotation=45, ha="right")
 
     for spine in ax.spines.values():
         spine.set_color("#3b4261")
@@ -167,7 +173,7 @@ def _plot_amplitude_dist(data: np.ndarray) -> str:
     ax.set_ylabel("Count", color="#c0caf5")
     ax.set_title("Amplitude Distribution", color="#c0caf5")
     ax.tick_params(colors="#565f89")
-    ax.legend(fontsize=7, framealpha=0.5)
+    ax.legend(framealpha=0.5)
 
     for spine in ax.spines.values():
         spine.set_color("#3b4261")
@@ -200,7 +206,7 @@ def _plot_timeseries(data: np.ndarray, sfreq: float, channels: List[str]) -> str
     ax.set_title("Signal Preview (first 5s)", color="#c0caf5")
     ax.tick_params(colors="#565f89")
     ax.set_yticks(offsets)
-    ax.set_yticklabels(channels[:n_ch], fontsize=6, color="#565f89")
+    ax.set_yticklabels(channels[:n_ch], color="#565f89")
 
     for spine in ax.spines.values():
         spine.set_color("#3b4261")
@@ -213,7 +219,7 @@ def _fig_to_base64(fig) -> str:
     """Convert matplotlib figure to base64 PNG string."""
     import matplotlib.pyplot as plt
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight",
+    fig.savefig(buf, format="png", dpi=QC_DPI_PREVIEW, bbox_inches="tight",
                 facecolor=fig.get_facecolor(), edgecolor="none")
     plt.close(fig)
     buf.seek(0)
@@ -230,7 +236,7 @@ def _save_figure_to_file(fig, filepath: Path) -> bool:
     import matplotlib.pyplot as plt
     filepath.parent.mkdir(parents=True, exist_ok=True)
     try:
-        fig.savefig(str(filepath), format="png", dpi=100, bbox_inches="tight",
+        fig.savefig(str(filepath), format="png", dpi=QC_DPI_SAVE, bbox_inches="tight",
                     facecolor=fig.get_facecolor(), edgecolor="none")
     except (OSError, ValueError) as exc:
         logger.debug("Failed to save figure %s: %s", filepath, exc)
@@ -268,6 +274,7 @@ def generate_subject_qc_figures(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from scipy.signal import welch
+    apply_qc_style()
 
     data = view.data
     channels = list(view.channels)
@@ -293,7 +300,7 @@ def generate_subject_qc_figures(
     ax.set_ylabel("PSD (V²/Hz)", color="#c0caf5")
     ax.set_title(f"PSD — {subject_id}", color="#c0caf5")
     ax.tick_params(colors="#565f89")
-    ax.legend(loc="upper right", fontsize=7, framealpha=0.5)
+    ax.legend(loc="upper right", framealpha=0.5)
     ax.set_xlim(0, min(frequency / 2, 100))
     ax.grid(True, alpha=0.2)
     for spine in ax.spines.values():
@@ -366,7 +373,7 @@ def generate_subject_qc_figures(
     ax.set_title(f"Signal Preview — {subject_id}", color="#c0caf5")
     ax.tick_params(colors="#565f89")
     ax.set_yticks(offsets)
-    ax.set_yticklabels(channels[:n_display], fontsize=6, color="#565f89")
+    ax.set_yticklabels(channels[:n_display], color="#565f89")
     for spine in ax.spines.values():
         spine.set_color("#3b4261")
     fig.tight_layout()
@@ -528,6 +535,7 @@ def _generate_batch_overview(
 ) -> Optional[Path]:
     """Generate a batch overview figure showing cross-subject statistics."""
     import matplotlib.pyplot as plt
+    apply_qc_style()
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
     fig.patch.set_facecolor("#1a1b26")
@@ -547,10 +555,10 @@ def _generate_batch_overview(
     ax1.set_ylabel("SNR (dB)", color="#c0caf5")
     ax1.set_title("Signal-to-Noise Ratio", color="#c0caf5")
     ax1.tick_params(colors="#565f89")
-    ax1.legend(fontsize=8, framealpha=0.5)
+    ax1.legend(framealpha=0.5)
     if len(subject_ids) <= 30:
         ax1.set_xticks(list(x))
-        ax1.set_xticklabels(short_ids, rotation=45, ha="right", fontsize=6)
+        ax1.set_xticklabels(short_ids, rotation=45, ha="right")
     for spine in ax1.spines.values():
         spine.set_color("#3b4261")
 
@@ -566,15 +574,15 @@ def _generate_batch_overview(
     ax2.set_ylabel("Artifact (%)", color="#c0caf5")
     ax2.set_title("Artifact Ratio (>5σ samples)", color="#c0caf5")
     ax2.tick_params(colors="#565f89")
-    ax2.legend(fontsize=8, framealpha=0.5)
+    ax2.legend(framealpha=0.5)
     if len(subject_ids) <= 30:
         ax2.set_xticks(list(x))
-        ax2.set_xticklabels(short_ids, rotation=45, ha="right", fontsize=6)
+        ax2.set_xticklabels(short_ids, rotation=45, ha="right")
     for spine in ax2.spines.values():
         spine.set_color("#3b4261")
 
     fig.suptitle(f"Batch QC Overview ({len(subject_ids)} subjects)",
-                 color="#c0caf5", fontsize=12, fontweight="bold")
+                 color="#c0caf5", fontweight="bold")
     fig.tight_layout()
 
     overview_path = qc_base / "batch_overview.png"

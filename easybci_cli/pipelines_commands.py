@@ -45,6 +45,7 @@ def cmd_pipelines_list(args) -> int:
             "cohort_tag": e.cohort_tag,
             "pass_rate": stats.pass_rate if stats else 0.0,
             "manual_flag": stats.manual_flag if stats else False,
+            "source_kind": getattr(e, "source_kind", ""),
         })
     if json_mode:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
@@ -52,12 +53,13 @@ def cmd_pipelines_list(args) -> int:
     if not rows:
         cli_output.print_info("(no proven pipelines in library)")
         return 0
-    cli_output.print_info(f"{'NAME':<30} {'MODALITY':<8} {'PARADIGM':<20} {'LAB':<15} {'PASS%':>6} FLAGS")
+    cli_output.print_info(f"{'NAME':<30} {'MODALITY':<8} {'PARADIGM':<20} {'LAB':<15} {'PASS%':>6} {'REF':<4} FLAGS")
     for r in rows:
         flag = "[flag]" if r["manual_flag"] else ""
+        ref = "ref" if r.get("source_kind") == "reference_import" else ""
         cli_output.print_info(
             f"{r['name']:<30} {r['modality']:<8} {r['paradigm']:<20} "
-            f"{r['lab_id']:<15} {r['pass_rate']*100:>5.0f} {flag}"
+            f"{r['lab_id']:<15} {r['pass_rate']*100:>5.0f} {ref:<4} {flag}"
         )
     return 0
 
@@ -79,6 +81,16 @@ def cmd_pipelines_show(args) -> int:
                 cli_output.print_info(f"lab_id:     {d.get('lab_id', '')}")
                 cli_output.print_info(f"cohort_tag: {d.get('cohort_tag', '')}")
                 cli_output.print_info(f"steps:      {', '.join(d.get('steps', []))}")
+                if d.get("source_kind"):
+                    cli_output.print_info(f"source_kind: {d['source_kind']}")
+                    cli_output.print_info(f"reference:   {d.get('reference_origin', '')}")
+                    _slots = ", ".join(
+                        f"{s.get('param')}({s.get('strategy')})"
+                        for s in d.get("adaptation_slots", []))
+                    cli_output.print_info(f"slots:       {_slots}")
+                    _qb = d.get("qc_baselines", {})
+                    if _qb:
+                        cli_output.print_info(f"qc_baselines: {json.dumps(_qb, ensure_ascii=False)}")
                 if d.get("stats"):
                     cli_output.print_info(f"stats:      {json.dumps(d['stats'], ensure_ascii=False)}")
             return 0

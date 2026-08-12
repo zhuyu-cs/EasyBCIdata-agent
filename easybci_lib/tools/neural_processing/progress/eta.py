@@ -10,6 +10,27 @@ from .history import ProgressHistoryStore
 ConfidenceLevel = Literal["high", "medium", "low", "unknown"]
 
 
+# ── Per-stage turn-ETA anchor floors ──────────────────────────────────────
+#
+# The user-visible turn-scope countdown (``est +Xm Ys`` in both CLI and WebUI)
+# re-anchors when these stages start, so each "phase" shows a realistic ~10min
+# expectation instead of the 60s cold-start fallback. This dict is the SINGLE
+# source of truth for the floor — neither UI carries a hardcoded minimum (the
+# WebUI's old ``Math.max(240, ...)`` was removed in favour of this).
+#
+# Phase 1 = "plan"  (inspect / research / propose).
+# Phase 2 = the execution phase, anchored at "codegen" (the first execution
+#           stage; preprocess + qc coast on this same anchor).
+#
+# ``max(floor, history)`` is applied at emit time, so accumulated history can
+# only RAISE the estimate, never drop it below the floor.
+STAGE_ETA_FLOOR_SECONDS: dict[str, int] = {
+    "plan": 600,
+    "codegen": 600,
+}
+ANCHOR_STAGES = frozenset(STAGE_ETA_FLOOR_SECONDS)
+
+
 @dataclass(frozen=True)
 class ElapsedStats:
     operator: str

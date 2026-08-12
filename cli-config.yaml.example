@@ -525,12 +525,32 @@ web:
     # Web-evidence breadth/precision for research_preprocessing.
     # sources_per_query: candidates fetched per planned query before ranking.
     sources_per_query: 8
-    # max_sources: how many top-ranked citations are kept + extracted.
-    # Larger = broader evidence but more aux-LLM calls (bounded to 2 concurrent).
+    # max_sources: legacy breadth key (kept for back-compat). Superseded by
+    # max_extract_citations below for the per-citation extraction cap.
     max_sources: 10
     # include_tool_docs: allow tool/library documentation (MNE, EEGLAB,
     # SpikeInterface, sklearn...) as sources, not only journal papers.
     include_tool_docs: true
+
+    # ── Latency guards ──────────────────────────────────────────────────
+    # The whole research chain (query planning → web search → per-citation
+    # extraction → synthesis) is bounded so an unstable/slow endpoint can
+    # never stall the agent. All values are in SECONDS.
+    #
+    # total_budget_seconds: hard wall-clock cap for one research call. On
+    #   timeout, research fails open and the pipeline uses registry defaults
+    #   (identical to the "web unavailable" path). This is the backstop.
+    total_budget_seconds: 60
+    # llm_timeout_seconds: per-call timeout for the research chain's auxiliary
+    #   LLM calls (query planner, per-citation extraction, synthesis). Kept
+    #   SHORT here so these don't inherit the long auxiliary.web_extract.timeout.
+    llm_timeout_seconds: 25
+    # search_timeout_seconds: per-call wall-clock cap for a single Exa search
+    #   or content-extract HTTP request (the exa-py SDK sets no timeout itself).
+    search_timeout_seconds: 15
+    # max_extract_citations: how many top-ranked citations get a per-citation
+    #   LLM extraction. Fewer = fewer blocking LLM calls = lower latency.
+    max_extract_citations: 4
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Gateway Streaming

@@ -218,6 +218,7 @@ from easybci_cli.pipelines_commands import (
     cmd_pipelines_stats,
     cmd_pipelines_unflag,
 )
+from easybci_cli.reference_commands import cmd_reference_import
 from easybci_cli.registry_commands import cmd_registry_check
 
 load_easybci_dotenv(project_env=PROJECT_ROOT / ".env")
@@ -8946,6 +8947,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "model", "plugins", "profile", "proxy", "sessions", "setup",
         "skills", "status", "tools", "uninstall", "update",
         "version", "chat", "pipelines", "registry", "experience", "federation",
+        "reference",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
         # expensive eager import of every bundled plugin module.
@@ -11042,6 +11044,16 @@ Examples:
     mig_mode.add_argument("--apply", action="store_true")
     p_migrate.add_argument("--json", action="store_true", dest="json_mode")
     p_migrate.set_defaults(func=cmd_pipelines_migrate_layout)
+
+    # Reference subcommand group: import a gold-standard project.
+    reference_parser = subparsers.add_parser("reference", help="Ingest gold-standard reference projects")
+    reference_subparsers = reference_parser.add_subparsers(dest="reference_action")
+    r_import = reference_subparsers.add_parser("import", help="Ingest a gold-standard project into an enhanced proven-pipeline skill")
+    r_import.add_argument("reference_dir", help="Root dir of the gold-standard project")
+    r_import.add_argument("--analysis-goal", dest="analysis_goal", default=None)
+    r_import.add_argument("--dry-run", dest="dry_run", action="store_true")
+    r_import.add_argument("--json", action="store_true")
+    r_import.set_defaults(func=cmd_reference_import)
 
     # registry check (sweep parameter_uncertainty for retracted citations)
     registry_parser = subparsers.add_parser("registry", help="Manage parameter-uncertainty registry")

@@ -2506,6 +2506,64 @@ class AIAgent:
         except Exception:
             logger.debug("emit_whole_turn_eta failed", exc_info=True)
 
+    def _emit_stage_anchor_eta(self, stage: str) -> None:
+        """Re-anchor the turn-scope ETA countdown when a phase-boundary stage
+        starts (``plan`` → phase 1, ``codegen`` → phase 2).
+
+        Emits a turn-scope ``progress`` event carrying ``reanchor: True`` so
+        both the CLI and the WebUI DISCARD the previous smoothed value and jump
+        cleanly to the per-stage floor (~10min) instead of EWMA-blending it with
+        whatever the plan-phase countdown had ticked down to.
+
+        The floor lives solely in ``progress.eta.STAGE_ETA_FLOOR_SECONDS`` —
+        neither UI carries a hardcoded minimum. ``max(floor, history)`` means
+        accumulated history can only raise the estimate, never drop it below
+        the floor. Registered as the ``stage_anchor`` callback on the
+        module-level tracker registry (see progress/context.py).
+        """
+        if not self.status_callback:
+            return
+        try:
+            import time as _time
+
+            from easybci_lib.tools.neural_processing.progress.eta import (
+                STAGE_ETA_FLOOR_SECONDS,
+            )
+
+            floor = STAGE_ETA_FLOOR_SECONDS.get(stage, 0)
+            if floor <= 0:
+                return  # not an anchor stage; nothing to do
+
+            now = _time.time()
+            turn_started = getattr(self, "_turn_started_at", 0.0) or now
+
+            # No turn-scope history bucket exists for plan/codegen today, so the
+            # floor governs. Kept as max(floor, computed) so a future per-stage
+            # history bucket can only lengthen the estimate.
+            eta_seconds = int(floor)
+
+            payload = {
+                "scope": "turn",
+                "next_intent_kind": "whole_turn",
+                "eta_seconds": eta_seconds,
+                "confidence": "medium",
+                "source": "stage_anchor",
+                "reanchor": True,
+                "elapsed_seconds": int(now - turn_started),
+                "heartbeat_ts": now,
+            }
+            try:
+                from easybci_agent.i18n import t
+                msg = t("progress.estimating_next_step", kind="whole_turn")
+            except Exception:
+                msg = "estimating whole-turn elapsed..."
+            try:
+                self.status_callback("progress", msg, payload)
+            except TypeError:
+                self.status_callback("progress", msg)
+        except Exception:
+            logger.debug("emit_stage_anchor_eta failed", exc_info=True)
+
     def _record_whole_turn_elapsed(self) -> None:
         """Append one whole-turn elapsed sample (kind="whole_turn") at turn end.
 
@@ -2610,7 +2668,11 @@ class AIAgent:
             on_progress=_on_progress, estimator=_estimator,
         )
         self._heartbeat_daemon = HeartbeatDaemon(tracker=self._progress_tracker)
-        set_active_tracker(self._progress_tracker, daemon=self._heartbeat_daemon)
+        set_active_tracker(
+            self._progress_tracker,
+            daemon=self._heartbeat_daemon,
+            stage_anchor=self._emit_stage_anchor_eta,
+        )
 
     def _emit_warning(self, message: str) -> None:
         """Emit a user-visible warning through the same status plumbing.
@@ -10252,6 +10314,11 @@ class AIAgent:
                     # and self-corrects. Don't pollute errors.log.
                     if "denied non-whitelisted tool" in _err_text:
                         logger.debug("Tool %s blocked by whitelist (%.2fs): %s", function_name, tool_duration, _err_text)
+                    elif "(not an error)" in _err_text or "(expected, not an error)" in _err_text:
+                        # Benign non-zero exit (grep/rg no-match, diff differs)
+                        # is already labelled by terminal_tool.exit_code_meaning
+                        # — don't pollute errors.log with it.
+                        logger.debug("Tool %s benign non-zero exit (%.2fs): %s", function_name, tool_duration, _err_text)
                     else:
                         logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, _err_text)
 
@@ -10695,6 +10762,10 @@ class AIAgent:
                 # the concurrent path above for the full rationale.
                 if "denied non-whitelisted tool" in (function_result or ""):
                     logger.debug("Tool %s blocked by whitelist (%.2fs): %s", function_name, tool_duration, result_preview)
+                elif "(not an error)" in (function_result or "") or "(expected, not an error)" in (function_result or ""):
+                    # Benign non-zero exit (grep/rg no-match, diff differs) —
+                    # already labelled by terminal_tool.exit_code_meaning.
+                    logger.debug("Tool %s benign non-zero exit (%.2fs): %s", function_name, tool_duration, result_preview)
                 else:
                     logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
             else:

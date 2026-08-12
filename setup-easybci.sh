@@ -194,13 +194,15 @@ if is_termux; then
     export ANDROID_API_LEVEL="$(getprop ro.build.version.sdk 2>/dev/null || printf '%s' "${ANDROID_API_LEVEL:-}")"
     echo -e "${CYAN}→${NC} Termux detected — installing the tested Android bundle"
     "$SETUP_PYTHON" -m pip install --upgrade pip setuptools wheel
+    # `.[termux,exa]`: fold in the exa web-search backend (pure-Python SDK,
+    # safe on Android) so the agent doesn't lazy-install it mid-session.
     if [ -f "constraints-termux.txt" ]; then
-        "$SETUP_PYTHON" -m pip install -e ".[termux]" -c constraints-termux.txt || {
+        "$SETUP_PYTHON" -m pip install -e ".[termux,exa]" -c constraints-termux.txt || {
             echo -e "${YELLOW}⚠${NC} Termux bundle install failed, falling back to base install..."
             "$SETUP_PYTHON" -m pip install -e "." -c constraints-termux.txt
         }
     else
-        "$SETUP_PYTHON" -m pip install -e ".[termux]" || "$SETUP_PYTHON" -m pip install -e "."
+        "$SETUP_PYTHON" -m pip install -e ".[termux,exa]" || "$SETUP_PYTHON" -m pip install -e "."
     fi
     echo -e "${GREEN}✓${NC} Dependencies installed"
 else
@@ -217,6 +219,11 @@ else
         modal daytona vercel matrix cron cli dev tts-premium
         pty honcho mcp homeassistant sms acp voice dingtalk feishu google
         bedrock web youtube
+        # exa: web-search backend, eager-installed at setup so the agent
+        # never pays a first-use `pip install exa-py` mid-session. NOT in
+        # pyproject's [all] extra (search backends stay lazy there); we add
+        # it explicitly here. tavily needs no package (HTTP-only via httpx).
+        exa
     )
     _SAFE_EXTRAS=()
     for _e in "${_ALL_EXTRAS[@]}"; do
@@ -228,7 +235,10 @@ else
     done
     _SAFE_SPEC=".[$(IFS=,; echo "${_SAFE_EXTRAS[*]}")]"
     _try_install() {
-        $UV_CMD pip install -e ".[all]" \
+        # `.[all,exa]`: eager-install exa-py alongside the curated [all]
+        # extra (exa is intentionally kept out of [all] itself — see the
+        # pyproject.toml policy comment).
+        $UV_CMD pip install -e ".[all,exa]" \
             || $UV_CMD pip install -e "$_SAFE_SPEC" \
             || $UV_CMD pip install -e "."
     }
@@ -251,7 +261,15 @@ else
         # at first use.
         # Also: stream stderr through directly so the user sees uv's
         # progress UI instead of staring at a frozen prompt.
-        if UV_PROJECT_ENVIRONMENT="$SCRIPT_DIR/venv" $UV_CMD sync --extra all --locked; then
+        #
+        # `--extra exa` is added ON TOP of `--extra all`: the web-search
+        # backend exa-py is deliberately NOT in pyproject's [all] extra
+        # (search backends stay lazy-installable there — see that policy
+        # comment), but we eager-install it here so a running agent never
+        # pays a first-use `pip install exa-py` mid-session. exa-py is
+        # already in uv.lock, so this stays hash-verified under --locked.
+        # tavily needs no package (HTTP-only via httpx, already core).
+        if UV_PROJECT_ENVIRONMENT="$SCRIPT_DIR/venv" $UV_CMD sync --extra all --extra exa --locked; then
             echo -e "${GREEN}✓${NC} Dependencies installed (hash-verified via uv.lock)"
         else
             echo -e "${YELLOW}⚠${NC} Lockfile sync failed (see uv output above)."
@@ -429,13 +447,18 @@ mkdir -p "$EASYBCI_SKILLS_DIR"
 
 echo ""
 echo "Syncing bundled skills to ~/.easybci/skills/ ..."
-if "$SCRIPT_DIR/venv/bin/python" "$SCRIPT_DIR/tools/skills_sync.py" 2>/dev/null; then
+# Run the sync module from the repo root so `-m` resolves the package. Do NOT
+# swallow its output — a silent failure here leaves ~/.easybci/skills/ empty.
+if (cd "$SCRIPT_DIR" && "$SCRIPT_DIR/venv/bin/python" -m easybci_lib.tools.skills_sync); then
     echo -e "${GREEN}✓${NC} Skills synced"
 else
-    # Fallback: copy if sync script fails (missing deps, etc.)
-    if [ -d "$SCRIPT_DIR/skills" ]; then
-        cp -rn "$SCRIPT_DIR/skills/"* "$EASYBCI_SKILLS_DIR/" 2>/dev/null || true
+    # Fallback: copy bundled skills verbatim if the sync module fails.
+    echo -e "${YELLOW}!${NC} Skill sync failed; falling back to plain copy."
+    if [ -d "$SCRIPT_DIR/easybci_lib/skills" ]; then
+        cp -rn "$SCRIPT_DIR/easybci_lib/skills/"* "$EASYBCI_SKILLS_DIR/" 2>/dev/null || true
         echo -e "${GREEN}✓${NC} Skills copied"
+    else
+        echo -e "${RED}✗${NC} Bundled skills dir not found at easybci_lib/skills/"
     fi
 fi
 

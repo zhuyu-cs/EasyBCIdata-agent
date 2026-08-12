@@ -45,7 +45,13 @@ _NEURAL_ORCHESTRATION_TOOLS = [
     "confirm_output_format",
     "research_preprocessing",
     "research_parameter",
+    "batch_process_adaptive",
     "clarify",
+    # register_io_loader — agent-authored loader plugins for formats the
+    # built-in loaders can't read. MUST stay in this list (spread into
+    # _EASYBCI_CORE_TOOLS + neural + easybci-webui) or the neural⊆cli subset
+    # check drops the ENTIRE neural toolset. See CLAUDE.md sync rule.
+    "register_io_loader",
     # `skill_manage` (write access to skills) is intentionally included so the
     # proven-pipeline flywheel can crystallize successful runs into reusable
     # skills on every platform, not just the CLI.
@@ -76,6 +82,7 @@ _EASYBCI_CORE_TOOLS = [
     "segment_data", "save_processed", "plan_pipeline",
     "list_data", "export_repo",
     "bin_spikes", "batch_process",
+    "import_reference",
     # Layout repair + resume (registered under the `neural` toolset — MUST be
     # listed here too, otherwise `neural` stops being a subset of the
     # `easybci-cli` / `easybci-webui` composites and `_get_platform_tools`'s
@@ -182,6 +189,7 @@ TOOLSETS = {
             "segment_data", "save_processed", "plan_pipeline",
             "list_data", "export_repo",
             "bin_spikes", "batch_process",
+            "import_reference",
             *_NEURAL_ORCHESTRATION_TOOLS,
         ],
         "includes": [],

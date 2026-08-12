@@ -8627,9 +8627,20 @@ class EasybciCLI:
                     from easybci_lib.cli_eta import apply_ewma
                     new_eta = progress.get("eta_seconds")
                     if isinstance(new_eta, int) and new_eta > 0:
+                        # Phase-boundary re-anchor (plan / codegen stage start):
+                        # the backend sends `reanchor: True` so we DISCARD the
+                        # previous smoothed value and jump cleanly to the new
+                        # anchor rather than EWMA-blending it. Mirrors the WebUI
+                        # (useConversation.ts) so both UIs render the identical
+                        # value.
+                        prev = (
+                            None
+                            if progress.get("reanchor")
+                            else getattr(self, "_turn_eta_smoothed", None)
+                        )
                         self._turn_eta_smoothed = apply_ewma(
                             new=new_eta,
-                            prev=getattr(self, "_turn_eta_smoothed", None),
+                            prev=prev,
                             alpha=0.4,
                         )
                         self._turn_eta_emitted_at = time.time()

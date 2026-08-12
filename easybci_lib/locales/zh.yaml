@@ -63,3 +63,13 @@ layout_repair:
     partial_swept: "已将上一次 {stage} 失败运行残留的 {n_files} 个部分产物文件移动到 {target}。"
     reuse_suppressed: "本次调用已被抑制，因为当前 work_dir 处于 Reuse Mode（{reuse_source}）。research 工具无必要——已验证 skill 的参数已是权威来源。"
     disallowed_ext_moved: "已将 {dir_name}/ 下 {n_files} 个非法扩展名文件移动到 middle_process/sweep_<ts>/。"
+
+scenario:
+  research: "科研"
+  clinical: "临床"
+  deployment: "部署"
+
+deliverables:
+  preprocessed: "预处理信号 (NWB)"
+  ai_ready: "AI-ready 训练数据 (epochs)"
+

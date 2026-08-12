@@ -21,6 +21,7 @@ Backward-compatible aliases:
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 
 from easybci_agent.source_data_guard import register_source_path, check_output_path
@@ -83,6 +84,23 @@ _PENDING_QC_PAYLOADS: dict = {}
 # keeps the gate from failing with a confusing "auto-discovery failed" error
 # when middle_process/inspection_report.json is sitting right there on disk.
 _LAST_DEEP_INSPECT_WORK_DIR: str | None = None
+
+
+def _resolve_timeout(raw) -> int | None:
+    """LLM-opt-in wall-clock cap for run_script; None/0/absent → unlimited.
+
+    Aligns with the gateway's ``EASYBCI_AGENT_TIMEOUT=0`` default: BCI
+    preprocessing must not be hard-killed by a wall-clock, only by inactivity
+    (or by an explicit override the LLM passes). See ``EASYBCI_SCRIPT_TIMEOUT_MAX``
+    in ``script_runner.run_script`` for the environment-wide ceiling.
+    """
+    if raw in (None, "", 0, "0"):
+        return None
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
 
 
 def _register_last_work_dir(work_dir: str | None) -> None:
@@ -609,13 +627,24 @@ DEEP_INSPECT_SCHEMA = {
         "type": "object",
         "properties": {
             "data_path": {"type": "string", "description": "Path to neural data file"},
-            "work_dir": {"type": "string", "description": "Preprocessing work directory"},
+            "work_dir": {"type": "string", "description": "Explicit preprocessing work directory (optional). Prefer passing output_base_dir instead when the user names a location; omit both to use the default next to the data."},
+            "output_base_dir": {
+                "type": "string",
+                "description": (
+                    "Optional. The directory the USER asked results to be stored "
+                    "under (extract it verbatim from their request). The "
+                    "'{subject}_preprocess_work_dir/' folder is created INSIDE it, "
+                    "and may live on a different disk than the raw data. Do NOT "
+                    "compute the work_dir path yourself — pass only this base dir. "
+                    "Omit entirely if the user gave no location."
+                ),
+            },
             "sample_pct": {"type": "number", "description": "Fraction of data sampled for artifact rate (default 0.10)"},
             "psd_resolution_hz": {"type": "number", "description": "Welch PSD frequency resolution in Hz (default 1.0)"},
             "max_preload_mb": {"type": "integer", "description": "Cap on full-preload size in MB; degrades if exceeded (default 4096)"},
             "timeout_s": {"type": "integer", "description": "Wall-clock cap in seconds; degrades if exceeded (default 300)"},
         },
-        "required": ["data_path", "work_dir"],
+        "required": ["data_path"],
     },
 }
 
@@ -647,6 +676,20 @@ MARK_PROPOSAL_CONFIRMED_SCHEMA = {
             "proposal_summary": {
                 "type": "string",
                 "description": "One-line summary of the proposal (audit trail)",
+            },
+            "presented_steps": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "REQUIRED on 'confirm': the ordered list of operator names "
+                    "you presented to the user (e.g. "
+                    "[\"drop_nondata_channels\",\"notch\",\"bandpass\",...]). This "
+                    "is the PROOF that you showed the user the FULL pipeline "
+                    "(every step + its rationale) before they confirmed. It MUST "
+                    "match the staged proposal's steps exactly (same count, same "
+                    "order, same operators) or confirmation is REJECTED. Do not "
+                    "invent it — list what you actually rendered in chat."
+                ),
             },
         },
         "required": ["work_dir", "user_decision"],
@@ -975,6 +1018,34 @@ PLAN_PIPELINE_SCHEMA = {
             "segment_duration": {"type": "number"},
             "stride": {"type": "number"},
             "output_format": {"type": "string", "enum": ["nwb", "auto"]},
+            "scenario": {
+                "type": "string",
+                "enum": ["research", "clinical", "deployment"],
+                "description": (
+                    "Delivery context — ORTHOGONAL to analysis_goal. Infer from the "
+                    "user's words about who the output is for: 'clinical / 临床 / "
+                    "patient / diagnosis / 诊断' → clinical; 'online / real-time / 实时 "
+                    "/ deploy / 部署' → deployment; otherwise → research (default). "
+                    "Biases recommended parameters (conservative for clinical, "
+                    "low-latency for deployment) but forces NO pipeline branching — "
+                    "every step still appears in proposal.json for review. If not "
+                    "stated, default to research and mark it '(inferred)' in the "
+                    "Step 7 confirmation so the user can override."
+                ),
+            },
+            "deliverables": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["preprocessed", "ai_ready"]},
+                "description": (
+                    "Output artefact families to produce. 'preprocessed' (NWB) is "
+                    "ALWAYS produced and is the default. 'ai_ready' (epochs.pkl for "
+                    "ML training) is OPT-IN — add it ONLY when the user explicitly "
+                    "asks for AI-ready / training data / epochs. Do NOT infer it from "
+                    "the mere presence of events/labels. Default (omitted) = "
+                    "['preprocessed']. The final decision is confirmed by the user at "
+                    "Step 7 before any beyond-NWB artefact is generated."
+                ),
+            },
             "reuse_source": {
                 "type": "string",
                 "description": (
@@ -982,6 +1053,27 @@ PLAN_PIPELINE_SCHEMA = {
                     "(from suggest_pipeline's proven_recommendation.name). Persisted into "
                     "plan/proposal.json so downstream tooling knows this run reuses a "
                     "proven pipeline. Omit for New-Plan Mode."
+                ),
+            },
+            "inspection_report": {
+                "type": "object",
+                "description": (
+                    "Optional. The full deep_inspect report dict "
+                    "(report['report'] from deep_inspect). When provided AND the "
+                    "top proven match is a reference-import enhanced skill, suggest "
+                    "returns reuse_contract='adaptive_reference' with per-recording "
+                    "recomputed params + a per-slot adaptation_report. Omit for the "
+                    "legacy locked-replay behavior."
+                ),
+            },
+            "adaptation_report": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": (
+                    "Optional. The per-slot adaptation_report from suggest_pipeline's "
+                    "adaptive_reference proven_recommendation (原值→实测→采用 per slot). "
+                    "Pass through verbatim; persisted into plan/proposal.json under "
+                    "'reuse_adaptation' for auditability. Omit for New-Plan / legacy Reuse."
                 ),
             },
         },
@@ -1135,6 +1227,37 @@ BATCH_PROCESS_SCHEMA = {
             "max_workers": {"type": "integer", "description": "Max parallel workers (default: 4, hard limit: 8). Actual workers may be lower based on available memory."},
         },
         "required": ["pattern", "steps", "output_dir"],
+    },
+}
+
+BATCH_PROCESS_ADAPTIVE_SCHEMA = {
+    "name": "batch_process_adaptive",
+    "description": (
+        "Reference-driven adaptive batch: anchor every matching file to an "
+        "enhanced proven-pipeline skill (source_kind=reference_import), then "
+        "per file recompute numeric params (bad channels, notch freqs, resample "
+        "target, reject segments) from that file's own deep_inspect. Skeleton "
+        "step kinds/order stay locked to the skill. Each file gets internal QC "
+        "(A-F) plus a SOFT comparison to the skill's qc_baselines (advisory "
+        "warnings only, never fails a file). One file's failure never aborts the "
+        "batch. Use this instead of batch_process when reusing a reference skill."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "Glob giving the signal-file EXTENSION and (if no source_root) the anchor directory, e.g. '/data/patientX/**/*.EEG'. NOTE: this is NOT the enumerator — every signal file of this extension under source_root (or the pattern's fixed anchor dir) is included by default, whether or not the glob itself would have matched it. To narrow the set, use exclude_paths/exclude_globs, not a tighter pattern. A pattern with no extension (e.g. '*') falls back to plain glob enumeration."},
+            "skill_name": {"type": "string", "description": "Enhanced proven-pipeline skill name (from import_reference)"},
+            "output_dir": {"type": "string"},
+            "modality": {"type": "string", "enum": ["auto", "eeg", "seeg", "ecog", "meg", "spike"]},
+            "max_workers": {"type": "integer", "description": "Max parallel workers (default 4, hard limit 8)"},
+            "max_duration": {"type": "number", "description": "If set, crop each file's load to the first N seconds (memory guard for large recordings). If omitted, oversized files are auto-skipped rather than loaded."},
+            "source_root": {"type": "string", "description": "PRIMARY ENUMERATOR. Every signal file (of the pattern's extension) found by a recursive walk of this directory is included by default — this makes silent under-coverage impossible (a pattern one folder-level too shallow can no longer drop a whole sibling subtree). Pass the top-level data dir the user pointed at (e.g. the patient folder). If omitted, the pattern's deepest wildcard-free directory is used as the scan root."},
+            "exclude_paths": {"type": "array", "items": {"type": "string"}, "description": "Absolute file paths to EXCLUDE from the default-included candidate set. This is the ONLY way to drop a same-extension file under source_root. Use when the user, after seeing the preview, asks to skip specific recordings."},
+            "exclude_globs": {"type": "array", "items": {"type": "string"}, "description": "Glob patterns to exclude from the candidate set (fnmatch against each candidate path), e.g. '*/calibration/*'. Same purpose as exclude_paths for whole subtrees/name patterns."},
+            "extra_reject_keywords": {"type": "array", "items": {"type": "string"}, "description": "Extra time-segment reject keywords for this environment, union'd with the skill's keywords AND a built-in multilingual floor (seizure/stim/IID across en+zh). Use when the tool's returned label_diagnostics.suspicious_labels shows unlisted seizure/stim markers. Word-START boundary matched (IID→IIDa, but not mid-word). Add confirmed terms to the skill via skill_manage patch so they persist."},
+            "confirm": {"type": "boolean", "description": "Two-phase gate. Omit or false = PREVIEW: compute the plan (routed file count, per-file exclusions + reasons, dropped companions, resolved steps/modality) and return awaiting_confirmation WITHOUT scaffolding or running anything. Paste the returned `presentation_block` VERBATIM to the user in chat (every numbered step + n_routed + every included/excluded file) and wait for their plain-text reply — do NOT summarize it and do NOT use the `clarify` tool. When they approve, re-call with the SAME pattern/skill_name/output_dir (plus any exclude_paths they named) AND confirm=true to actually run the batch."},
+        },
+        "required": ["pattern", "skill_name", "output_dir"],
     },
 }
 
@@ -1503,6 +1626,192 @@ def _handle_inspect_data(args, **kw):
     return json.dumps(result, default=str)
 
 
+def _guard_output_dir_collision(work_dir: str) -> dict | None:
+    """Return an error payload if work_dir exists, is non-empty, and does NOT
+    look like an EasyBCI run (finalized or in-progress); otherwise None.
+
+    - missing / empty dir            → None (proceed)
+    - has plan/pipeline_record.json  → None (finalized run; _runN archive handles it)
+    - has middle_process/            → None (in-progress run; deep_inspect is
+                                        called once-per-input into the SAME
+                                        work_dir and is idempotent — see
+                                        SKILL.md multi-input runs)
+    - non-empty & unrelated files    → refuse + ask (structured error)
+    """
+    from pathlib import Path
+    wd = Path(work_dir)
+    if not wd.exists():
+        return None
+    try:
+        entries = list(wd.iterdir())
+    except OSError:
+        return None
+    if not entries:
+        return None
+    if (wd / "plan" / "pipeline_record.json").is_file():
+        return None  # finalized easybci run — defer to _maybe_archive_prior_run
+    if (wd / "middle_process").is_dir():
+        return None  # in-progress easybci run — multi-input / re-inspect is idempotent
+    return {
+        "success": False,
+        "error_kind": "output_dir_not_empty",
+        "error": (
+            f"Output directory {work_dir!r} already exists and is not empty, and "
+            "does not look like a previous EasyBCI run. Refusing to write into it "
+            "to avoid clobbering unrelated files."
+        ),
+        "fix_hint": (
+            "Ask the user to confirm a different output location (pass it as "
+            "output_base_dir), or to clear/rename this directory first."
+        ),
+    }
+
+
+IMPORT_REFERENCE_SCHEMA = {
+    "name": "import_reference",
+    "description": (
+        "Ingest a structured gold-standard preprocessing project (raw + code + "
+        "config + products) into an enhanced proven-pipeline skill: skeleton "
+        "steps anchored to the gold standard + adaptation_slots (per-recording "
+        "recompute rules) + qc_baselines (soft baselines for later comparison). "
+        "The skill is written under proven-pipelines/ and becomes recallable via "
+        "match_proven_pipelines. Source data is read-only."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "reference_dir": {
+                "type": "string",
+                "description": "Root directory of the gold-standard project "
+                               "(contains Code/config.json + Data/Processed/...).",
+            },
+            "analysis_goal": {
+                "type": "string",
+                "description": "Analysis goal for the resulting skill; sEEG "
+                               "default is clinical_screening. Optional.",
+            },
+            "modality": {
+                "type": "string",
+                "description": "Modality override (default seeg). Optional.",
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "When true, build+return the profile WITHOUT "
+                               "writing the skill to disk. Optional.",
+            },
+        },
+        "required": ["reference_dir"],
+    },
+}
+
+
+REGISTER_IO_LOADER_SCHEMA = {
+    "name": "register_io_loader",
+    "description": (
+        "Register a custom data loader for a format the built-in loaders cannot "
+        "read (deep_inspect / inspect_data returned reason='unsupported_format'). "
+        "Provide `source_code` for a python module exposing `matches(path) -> bool` "
+        "(narrow: match only your format by extension/magic bytes) and "
+        "`load(path, inspect_only=False) -> dict` returning the standard loader "
+        "dict {data:(n_channels,n_samples) float32 ndarray, frequency>0, channels "
+        "(len==n_channels), duration, meta{format,source_file,data_unit}}. "
+        "Registration writes the loader under ~/.easybci/io_loaders/<name>.py, then "
+        "AUTO-PROBES it: it dry-runs load(probe_path, inspect_only=True) and requires "
+        "the result to pass validation — if that fails the loader is NOT kept and a "
+        "structured error is returned for you to fix. Built-in formats always win; a "
+        "plugin only fills genuine blanks. Source data is read-only. On success, "
+        "re-run deep_inspect — your loader now serves every load (inspect/batch/cache)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Module name (python identifier, e.g. 'neuralynx_ncs'). "
+                               "Becomes ~/.easybci/io_loaders/<name>.py.",
+            },
+            "source_code": {
+                "type": "string",
+                "description": "Full python source defining matches(path) and "
+                               "load(path, inspect_only=False).",
+            },
+            "probe_path": {
+                "type": "string",
+                "description": "Path to the real file this loader should read; "
+                               "registration dry-runs load() on it to verify.",
+            },
+        },
+        "required": ["name", "source_code", "probe_path"],
+    },
+}
+
+
+def _handle_register_io_loader(args, **kw):
+    """Register + auto-probe an agent-authored IO loader plugin.
+
+    Never raises into the agent loop. On success attaches a next_action telling
+    the agent to re-run deep_inspect (touchpoint 4 of the extensible-io design).
+    """
+    if not isinstance(args, dict):
+        return json.dumps({"success": False, "error": "invalid args"})
+    name = args.get("name")
+    source_code = args.get("source_code")
+    probe_path = args.get("probe_path")
+    if not name or not source_code or not probe_path:
+        return json.dumps({
+            "success": False,
+            "error": "name, source_code, and probe_path are all required",
+        })
+    try:
+        from easybci_lib.tools.neural_processing.io.loader_registry import register
+        res = register(name=name, source_code=source_code, probe_path=probe_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("register_io_loader failed")
+        return json.dumps({"success": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    payload = {
+        "success": res.success,
+        "name": res.name,
+        "registered_path": res.registered_path,
+        "stage": res.stage,
+        "error": res.error,
+        "fix_hint": res.fix_hint,
+    }
+    if res.success:
+        payload["next_action"] = {
+            "next_tool": "deep_inspect",
+            "must_present": True,
+            "reason": "loader_registered",
+            "hint": (
+                f"Loader '{res.name}' registered and probe-validated. Re-run "
+                "deep_inspect on the data — it (and batch/inspect/cache) now uses "
+                "your loader automatically."
+            ),
+        }
+    return json.dumps(payload, default=str)
+
+
+def _handle_import_reference(args, **kw):
+    """Dispatch reference ingest. Never raises into the agent loop."""
+    if not isinstance(args, dict):
+        return json.dumps({"success": False, "error": "invalid args"})
+    reference_dir = args.get("reference_dir")
+    if not reference_dir:
+        return json.dumps({"success": False, "error": "reference_dir is required"})
+    try:
+        from easybci_lib.tools.neural_processing.reference.ingest import ingest_reference
+        res = ingest_reference(
+            reference_dir,
+            analysis_goal=args.get("analysis_goal") or "clinical_screening",
+            modality=args.get("modality") or "seeg",
+            dry_run=bool(args.get("dry_run", False)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("import_reference failed")
+        return json.dumps({"success": False, "error": f"{type(exc).__name__}: {exc}"})
+    return json.dumps(res, default=str)
+
+
 def _handle_deep_inspect(args, **kw):
     """Phase 1: full-data scan producing inspection_report.json.
 
@@ -1512,17 +1821,28 @@ def _handle_deep_inspect(args, **kw):
     from easybci_lib.tools.neural_processing.io.deep_inspect import deep_inspect
 
     data_path = args.get("data_path")
-    work_dir = args.get("work_dir")
     if not data_path:
         return json.dumps({"success": False, "error": "data_path is required"})
+
+    output_base_dir = args.get("output_base_dir") or None
+    work_dir = args.get("work_dir")
     if not work_dir:
-        return json.dumps({
-            "success": False,
-            "error": (
-                "work_dir is required — pass <your_preprocess_work_dir> so the "
-                "inspection_report.json lands in <work_dir>/middle_process/."
-            ),
-        })
+        # No explicit work_dir: derive it. output_base_dir (if the user named a
+        # location) becomes the parent; otherwise the default sits next to data.
+        work_dir = resolve_work_dir(data_path, output_base_dir)
+        if not work_dir:
+            return json.dumps({
+                "success": False,
+                "error": f"data_path does not exist: {data_path!r}",
+            })
+
+    # Collision guard (refuse + ask): a non-empty target that is NOT a prior
+    # easybci run must not be clobbered. Prior finalized runs are left to the
+    # existing _runN archive machinery; empty / missing dirs proceed.
+    _guard = _guard_output_dir_collision(work_dir)
+    if _guard is not None:
+        return json.dumps(_guard)
+
     register_source_path(data_path)
     _register_last_work_dir(work_dir)
     result = deep_inspect(
@@ -1535,7 +1855,108 @@ def _handle_deep_inspect(args, **kw):
         cli_subject_id=args.get("subject_id") or None,
         cli_session_id=args.get("session_id") or None,
     )
+    # Additive guidance for weak models: after a successful deep_inspect the
+    # next step is always plan_pipeline (which itself triggers research). This
+    # reduces redundant re-inspection round-trips. Purely a hint — no control
+    # flow depends on it.
+    if isinstance(result, dict) and result.get("success") and "next_action" not in result:
+        result["next_action"] = {
+            "next_tool": "plan_pipeline",
+            "hint": (
+                "Inspection is complete. Decide the analysis_goal and paradigm "
+                "from this report, then call plan_pipeline — do NOT re-inspect "
+                "the same data."
+            ),
+        }
+        # C-2 speculative prewarm: kick off background research for the generic
+        # goal now that modality is known, so a later plan_pipeline(goal=generic)
+        # hits a warm SearchCache instead of blocking. Only prewarms the generic
+        # key (paradigm/goal aren't known yet); a specific goal simply misses and
+        # runs normally (or backgrounds via C-1). Best-effort, never fatal.
+        try:
+            _fp = (result.get("report") or {}).get("fingerprint") or {}
+            _modality = _fp.get("modality") or "unknown"
+            if _modality and _modality != "unknown" and _research_preprocessing_available()[0]:
+                _prewarm_args = _build_research_question({
+                    "modality": _modality,
+                    "paradigm": "general",
+                    "analysis_goal": "generic",
+                    "fingerprint": {
+                        "n_channels": _fp.get("n_channels"),
+                        "frequency_hz": _fp.get("sampling_freq_hz"),
+                    },
+                })
+                if _research_cache_probe(_prewarm_args) is None:
+                    _start_background_research(_prewarm_args)
+        except Exception as _exc:  # noqa: BLE001 — prewarm must never break inspect
+            logger.debug("deep_inspect research prewarm skipped: %s", _exc)
     return json.dumps(result, ensure_ascii=False)
+
+
+def _staged_proposal_steps(envelope: dict) -> list:
+    """Extract the ``steps`` list from a staged proposal envelope.
+
+    The evidence-driven envelope carries the full proposal JSON text under
+    ``plan_files["proposal.json"]``; parse it and return ``steps`` (each a
+    dict with operator/method/params/param_evidence). Returns [] when the
+    envelope is the legacy form or steps can't be recovered.
+    """
+    try:
+        plan_files = envelope.get("plan_files") or {}
+        raw = plan_files.get("proposal.json")
+        if not isinstance(raw, str):
+            return []
+        proposal = json.loads(raw)
+        steps = proposal.get("steps")
+        return steps if isinstance(steps, list) else []
+    except (ValueError, TypeError, AttributeError):
+        return []
+
+
+def _staged_step_operators(envelope: dict) -> list:
+    """Ordered operator names of the staged proposal (presentation baseline)."""
+    ops = []
+    for s in _staged_proposal_steps(envelope):
+        if isinstance(s, dict):
+            op = s.get("operator")
+            if op:
+                ops.append(str(op))
+    return ops
+
+
+def _render_staged_pipeline(envelope: dict) -> str:
+    """Produce a ready-to-paste, full pipeline rendering for the user.
+
+    Prefers the already-rendered ``plan_files["reasoning.md"]`` (per-step +
+    per-parameter evidence). Falls back to a compact per-step render from the
+    structured steps via the terminal renderer, then to a bare operator list.
+    """
+    plan_files = envelope.get("plan_files") or {}
+    reasoning = plan_files.get("reasoning.md")
+    if isinstance(reasoning, str) and reasoning.strip():
+        return reasoning
+    steps = _staged_proposal_steps(envelope)
+    if steps:
+        try:
+            from easybci_cli.evidence_render import render_proposal
+            evidence_per_step = [
+                (s.get("param_evidence") or {}) if isinstance(s, dict) else {}
+                for s in steps
+            ]
+            rendered = render_proposal(steps, evidence_per_step)
+            if rendered and rendered.strip():
+                return rendered
+        except Exception:  # noqa: BLE001 — renderer is best-effort
+            pass
+        # Bare fallback: numbered operator + params list.
+        lines = []
+        for i, s in enumerate(steps, 1):
+            if not isinstance(s, dict):
+                continue
+            lines.append(f"Step {i} — {s.get('operator','?')}  params={s.get('params', {})}")
+        if lines:
+            return "\n".join(lines)
+    return "(no structured steps found in staged proposal)"
 
 
 def _handle_mark_proposal_confirmed(args, **kw):
@@ -1595,6 +2016,49 @@ def _handle_mark_proposal_confirmed(args, **kw):
                 "error": "staged proposal envelope is not a JSON object",
             })
 
+        # ── Presentation guard (code-enforced Step-7 gate) ──────────────────
+        # The FULL pipeline (every step + rationale) MUST be shown to the user
+        # before confirmation. We cannot read chat history from here, so the
+        # LLM must PROVE it presented by passing presented_steps=[operators...].
+        # We compare against the staged proposal's real steps. Mismatch/empty →
+        # reject and hand back a ready-to-paste rendering so the LLM shows it
+        # and retries. Works identically in CLI and WebUI (no clarify/SSE dep).
+        _baseline_ops = _staged_step_operators(envelope)
+        if _baseline_ops:  # only guard when the envelope actually carries steps
+            _presented = args.get("presented_steps")
+            _norm_presented = [
+                str(s).strip().lower() for s in _presented
+            ] if isinstance(_presented, list) else []
+            _norm_baseline = [str(o).strip().lower() for o in _baseline_ops]
+            if _norm_presented != _norm_baseline:
+                return json.dumps({
+                    "success": False,
+                    "guard": "presentation_required",
+                    "error": (
+                        "Cannot confirm: you must present the COMPLETE pipeline "
+                        "(all "
+                        f"{len(_baseline_ops)} steps, each with its rationale) to "
+                        "the user for review BEFORE confirming, and pass "
+                        "presented_steps matching the proposal's operators. "
+                        + (
+                            f"Got presented_steps={_norm_presented!r}, "
+                            f"expected {_norm_baseline!r}."
+                            if _norm_presented else
+                            "presented_steps was missing or empty."
+                        )
+                    ),
+                    "expected_steps": list(_baseline_ops),
+                    "rendered_pipeline": _render_staged_pipeline(envelope),
+                    "fix_hint": (
+                        "1) Show the user the FULL pipeline above (rendered_pipeline) "
+                        "verbatim — every step with operator, params and rationale — "
+                        "and ask them to confirm / modify / abort. "
+                        "2) Only after they respond, call mark_proposal_confirmed "
+                        "again with presented_steps set to the exact ordered list of "
+                        "operators shown (expected_steps)."
+                    ),
+                }, ensure_ascii=False)
+
         materialized: list = []
 
         # Root-level files (pipeline.yaml for the legacy form).
@@ -1627,6 +2091,8 @@ def _handle_mark_proposal_confirmed(args, **kw):
                 "proposal_summary": args.get("proposal_summary", ""),
                 "confirmed_at": _dt.utcnow().isoformat(timespec="seconds"),
                 "envelope_kind": envelope.get("kind", "unknown"),
+                "scenario": envelope.get("scenario") or "research",
+                "deliverables": envelope.get("deliverables") or ["preprocessed"],
                 "materialized": materialized,
             }, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -2102,6 +2568,7 @@ def _handle_repair_layout(args, **_kw):
         _default_codegen_generator,
         _default_script_runner,
         _dispatch_violation,
+        _read_deliverables_for_layout,
         detect_violations,
         resolve_for_goal,
         verify_and_repair,
@@ -2118,7 +2585,9 @@ def _handle_repair_layout(args, **_kw):
         return _json.dumps(payload)
 
     # Filtered path: only touch violations whose kind matches any of only_kinds.
-    resolved = resolve_for_goal(goal)
+    # deliverables overrides the goal's AI-ready hint (same as verify_and_repair)
+    # so an NWB-only run is not false-flagged as missing build_ai_ready.py.
+    resolved = resolve_for_goal(goal, _read_deliverables_for_layout(wd))
     generator = None if dry_run else _default_codegen_generator(wd, resolved)
     runner = None if (dry_run or not allow_subprocess) else _default_script_runner()
 
@@ -2166,7 +2635,7 @@ def _do_handle_preprocess_neural(args, **kw):
     register_source_path(data_path)
     steps = args["steps"]
     modality = args.get("modality", "auto")
-    output_path = args.get("output_path") or _derive_work_dir(data_path)
+    output_path = args.get("output_path") or resolve_work_dir(data_path)
     analysis_goal = (
         args.get("analysis_goal")
         or _resolve_analysis_goal_for_run(args, output_path)
@@ -2234,7 +2703,7 @@ def _do_handle_preprocess_neural(args, **kw):
         work_dir=str(work_dir),
         stage="pipeline",
         input_path=None if multi_input else str(data_path),
-        timeout=int(args.get("timeout", 900)),
+        timeout=_resolve_timeout(args.get("timeout")),
     )
 
     if result["ok"]:
@@ -2284,18 +2753,52 @@ def _do_handle_preprocess_neural(args, **kw):
     })
 
 
-def _derive_work_dir(data_path: str) -> str:
-    """Derive the preprocessing work directory from data file path.
+def resolve_work_dir(data_path: str, output_base_dir: str | None = None) -> str:
+    """Compute the canonical preprocess work_dir.
 
-    Convention: {data_parent_parent}/{data_parent_name}_preprocess_work_dir/
+    Naming convention (unchanged): ``{parent_name}_preprocess_work_dir`` where
+    ``parent_name = Path(data_path).parent.name``.
+
+    * ``output_base_dir`` is None  → base = data's ``parent.parent`` (legacy default,
+      i.e. work_dir sits next to the data). BUT if that base is not writable — the
+      common case when data lives directly under a removable-drive mount point whose
+      parent (``/media/<user>``) is root-owned — fall back to the data's own
+      ``parent`` (the writable drive interior). This stops the default from landing
+      on a root-owned mount-point parent and forcing a scramble to ``$HOME``.
+    * ``output_base_dir`` given    → base = that directory (fully independent absolute
+      path; may live on a different disk than the data).
+
+    The ``_preprocess_work_dir`` suffix is ALWAYS present (four detectors key off it).
+    If ``output_base_dir`` already ends in that suffix (user pasted a full work_dir),
+    it is used as-is and NOT double-suffixed.
+
+    Returns "" when ``data_path`` does not exist (preserves legacy _derive_work_dir).
     """
+    import os
     from pathlib import Path
     p = Path(data_path)
     if not p.exists():
         return ""
     parent = p.parent
-    work_dir = parent.parent / f"{parent.name}_preprocess_work_dir"
-    return str(work_dir)
+    if output_base_dir:
+        base = Path(output_base_dir).expanduser()
+        if base.name.endswith("_preprocess_work_dir"):
+            return str(base)
+        return str(base / f"{parent.name}_preprocess_work_dir")
+    # Default: sit next to the data (parent.parent). If that dir is not writable
+    # (e.g. data at /media/<user>/DRIVE/... whose parent /media/<user> is root-owned),
+    # drop the work_dir INSIDE the data's parent — the writable drive interior —
+    # rather than emitting an un-creatable path that weak models "fix" by scrambling
+    # to $HOME.
+    default_base = parent.parent
+    if not os.access(default_base, os.W_OK):
+        default_base = parent
+    return str(default_base / f"{parent.name}_preprocess_work_dir")
+
+
+def _derive_work_dir(data_path: str) -> str:
+    """Backward-compatible thin wrapper around resolve_work_dir (no base dir)."""
+    return resolve_work_dir(data_path)
 
 
 def _handle_resume_preprocessing(args, **kw):
@@ -2386,7 +2889,7 @@ def _handle_resume_preprocessing(args, **kw):
         })
 
     force = bool(args.get("force"))
-    timeout = int(args.get("timeout") or 900)
+    timeout = _resolve_timeout(args.get("timeout"))
 
     # Register every input for source-path tracking (mirrors _do_handle_preprocess_neural).
     try:
@@ -2493,7 +2996,7 @@ def _do_handle_quality_check(args, **kw):
 
     data_path = args["data_path"]
     register_source_path(data_path)
-    output_path = args.get("output_path") or _derive_work_dir(data_path)
+    output_path = args.get("output_path") or resolve_work_dir(data_path)
     work_dir = Path(output_path) if output_path else Path.cwd()
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2513,7 +3016,7 @@ def _do_handle_quality_check(args, **kw):
         work_dir=str(work_dir),
         stage="qc",
         input_path=None if (work_dir / "middle_process" / "inputs_routing.json").is_file() else str(data_path),
-        timeout=int(args.get("timeout", 450)),
+        timeout=_resolve_timeout(args.get("timeout")),
     )
     if result["ok"]:
         _clear_autofix_stage(str(work_dir), "quality_check")
@@ -2539,7 +3042,7 @@ def _do_handle_quality_check(args, **kw):
             work_dir=str(work_dir),
             stage="vis",
             input_path=None if (work_dir / "middle_process" / "inputs_routing.json").is_file() else str(data_path),
-            timeout=int(args.get("vis_timeout", args.get("timeout", 900))),
+            timeout=_resolve_timeout(args.get("vis_timeout") or args.get("timeout")),
         )
         if vis_result["ok"]:
             _clear_autofix_stage(str(work_dir), "quality_check_vis")
@@ -2698,7 +3201,7 @@ def _handle_save_processed(args, **kw):
 
     data_path = args["data_path"]
     register_source_path(data_path)
-    output_path = args.get("output_path") or _derive_work_dir(data_path)
+    output_path = args.get("output_path") or resolve_work_dir(data_path)
     work_dir = Path(output_path) if output_path else Path.cwd()
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2735,6 +3238,40 @@ def _handle_save_processed(args, **kw):
         data_info = args.get("data_info") or {}
         events = data_info.get("events") or []
         label_config = args.get("label_config")
+
+        # Deliverables gate (mirrors codegen): if the confirmed deliverables do
+        # not include ai_ready, build_ai_ready.py was intentionally not
+        # generated at Step 8 — regenerating here would just be rejected by
+        # generate_code. Report the honest reason instead of the misleading
+        # "no events" message.
+        _deliverables = None
+        try:
+            from easybci_lib.tools.neural_processing.preprocess.deliverables import (
+                resolve_deliverables as _resolve_deliverables,
+            )
+            _marker_p = work_dir / "middle_process" / "proposal.confirmed"
+            _marker_obj = None
+            if _marker_p.is_file():
+                _marker_obj = json.loads(_marker_p.read_text(encoding="utf-8"))
+            _deliverables = _resolve_deliverables(
+                _marker_obj if isinstance(_marker_obj, dict) else None,
+                work_dir=work_dir,
+            )
+        except Exception:  # noqa: BLE001
+            _deliverables = None
+        if _deliverables is not None and "ai_ready" not in _deliverables:
+            return json.dumps({
+                "success": False,
+                "skipped": True,
+                "reason": "not_requested",
+                "detail": (
+                    "AI-ready not in the confirmed deliverables (default is "
+                    "preprocessed/NWB only) — build_ai_ready.py was not generated. "
+                    "Re-confirm with deliverables including 'ai_ready' if the user "
+                    "wants training epochs."
+                ),
+            })
+
         if not events and not label_config:
             return json.dumps({
                 "success": False,
@@ -2774,7 +3311,7 @@ def _handle_save_processed(args, **kw):
         work_dir=str(work_dir),
         stage="build_ai_ready",
         input_path=None if (work_dir / "middle_process" / "inputs_routing.json").is_file() else str(data_path),
-        timeout=int(args.get("timeout", 450)),
+        timeout=_resolve_timeout(args.get("timeout")),
     )
     if result["ok"]:
         _clear_autofix_stage(str(work_dir), "save_processed")
@@ -2821,6 +3358,7 @@ def _handle_suggest_pipeline(args, **kw):
     paradigm = args.get("paradigm", "default")
     user_intent = args.get("user_intent", "")
     fingerprint = args.get("fingerprint")
+    inspection_report = args.get("inspection_report") or {}
 
     # --- Proven pipeline matching ---
     proven_matches = []
@@ -2997,26 +3535,73 @@ def _handle_suggest_pipeline(args, **kw):
         _entry_goal = (best.entry.analysis_goal or "").strip().lower()
         _goal_ok = bool(_query_goal) and bool(_entry_goal) and _query_goal == _entry_goal
         if best.similarity > 0.6 and best.entry.steps and _goal_ok:
-            result["proven_recommendation"] = {
-                "name": best.entry.name,
-                "steps": best.entry.steps,
-                "similarity": round(best.similarity, 2),
-                "analysis_goal": best.entry.analysis_goal,
-                "reuse_contract": "full_flow_required",
-                "reuse_note": (
-                    "PROVEN PIPELINE MATCHED. Open pipeline/SKILL.md "
-                    "Step 2.0 'PROVEN-PIPELINE REUSE CONTRACT' for the hard rules. "
-                    "Lock steps + params + analysis_goal + web_evidence from this skill, "
-                    "but Steps 0, 1, 1.5(verify), 5, 6, 6b, 7, 8, 9(patch reuse history), 10 "
-                    "MUST run in full. Per-Step Rationale must be passed verbatim to "
-                    "export_repo's `reasoning` arg — do NOT regenerate it."
-                ),
-                "note": (
-                    f"Proven pipeline '{best.entry.name}' (similarity "
-                    f"{best.similarity:.0%}) available as locked reference. "
-                    f"Steps: {' → '.join(best.entry.steps)}"
-                ),
-            }
+            _is_reference = (
+                getattr(best.entry, "source_kind", "") == "reference_import"
+                and getattr(best.entry, "adaptation_slots", None)
+            )
+            if _is_reference and isinstance(inspection_report, dict) and inspection_report:
+                from easybci_lib.tools.neural_processing.proven_adapt import adapt_pipeline
+                _adapted = adapt_pipeline(
+                    best.entry.steps, best.entry.adaptation_slots, inspection_report,
+                    gold_n_channels=best.entry.n_channels,
+                    gold_modality=best.entry.modality,
+                )
+                if _adapted.out_of_range:
+                    result["proven_reuse_out_of_range"] = {
+                        "name": best.entry.name,
+                        "similarity": round(best.similarity, 2),
+                        "reasons": _adapted.out_of_range_reasons,
+                        "note": ("Reference skill matched on similarity but this "
+                                 "recording is out of adaptation range — fall back "
+                                 "to New-Plan Mode or ask the user to confirm."),
+                    }
+                else:
+                    result["proven_recommendation"] = {
+                        "name": best.entry.name,
+                        "steps": _adapted.steps,
+                        "similarity": round(best.similarity, 2),
+                        "analysis_goal": best.entry.analysis_goal,
+                        "reuse_contract": "adaptive_reference",
+                        "source_kind": "reference_import",
+                        "reference_origin": getattr(best.entry, "reference_origin", ""),
+                        "adaptation_report": _adapted.self_report,
+                        "qc_baselines": getattr(best.entry, "qc_baselines", {}),
+                        "reuse_note": (
+                            "ADAPTIVE REFERENCE REUSE. Step KINDS + ORDER are anchored "
+                            "to this proven skill; numeric params (bad channels, notch "
+                            "freqs, resample target, reject segments) were recomputed "
+                            "from THIS recording's deep_inspect — see adaptation_report. "
+                            "Pass adaptation_report through to proposal.json/reasoning.md "
+                            "verbatim (原值→实测→采用) for auditability. Do NOT copy the "
+                            "gold standard's raw numeric values."
+                        ),
+                        "note": (
+                            f"Adaptive reference '{best.entry.name}' (similarity "
+                            f"{best.similarity:.0%}): skeleton locked, values adapted. "
+                            f"Steps: {' → '.join(_adapted.steps)}"
+                        ),
+                    }
+            else:
+                result["proven_recommendation"] = {
+                    "name": best.entry.name,
+                    "steps": best.entry.steps,
+                    "similarity": round(best.similarity, 2),
+                    "analysis_goal": best.entry.analysis_goal,
+                    "reuse_contract": "full_flow_required",
+                    "reuse_note": (
+                        "PROVEN PIPELINE MATCHED. Open pipeline/SKILL.md "
+                        "Step 2.0 'PROVEN-PIPELINE REUSE CONTRACT' for the hard rules. "
+                        "Lock steps + params + analysis_goal + web_evidence from this skill, "
+                        "but Steps 0, 1, 1.5(verify), 5, 6, 6b, 7, 8, 9(patch reuse history), 10 "
+                        "MUST run in full. Per-Step Rationale must be passed verbatim to "
+                        "export_repo's `reasoning` arg — do NOT regenerate it."
+                    ),
+                    "note": (
+                        f"Proven pipeline '{best.entry.name}' (similarity "
+                        f"{best.similarity:.0%}) available as locked reference. "
+                        f"Steps: {' → '.join(best.entry.steps)}"
+                    ),
+                }
         elif best.similarity > 0.6 and best.entry.steps:
             # Similarity passes but goal mismatch / missing — surface a clear
             # downgrade reason so reasoning.md can explain why we fell back
@@ -3080,6 +3665,17 @@ def _handle_suggest_pipeline(args, **kw):
     _neg_block = args.get("_negatives_block")
     if _neg_block:
         result["negatives_hint"] = _neg_block
+
+    # Additive guidance: after suggest, the next step is propose_pipeline
+    # (which stages a proposal for user confirmation). Reduces re-suggest loops.
+    if result.get("success") and "next_action" not in result:
+        result["next_action"] = {
+            "next_tool": "propose_pipeline",
+            "hint": (
+                "Recommendations ready. Call propose_pipeline to stage a "
+                "concrete proposal for the user — no need to re-run suggest."
+            ),
+        }
 
     return json.dumps(result)
 
@@ -3419,6 +4015,8 @@ def _handle_propose_pipeline_evidence(args, **kw):
         "modality": modality,
         "paradigm": paradigm,
         "analysis_goal": analysis_goal,
+        "scenario": args.get("scenario") or "research",
+        "deliverables": args.get("deliverables") or ["preprocessed"],
         "registry_version": registry_version,
         "steps": [
             {
@@ -3436,12 +4034,16 @@ def _handle_propose_pipeline_evidence(args, **kw):
     # can recognize Reuse Mode from plan/proposal.json downstream. Only written
     # when non-empty — New-Plan Mode leaves the key absent (guard fail-opens).
     _reuse_source = (args.get("reuse_source") or "").strip()
-    if _reuse_source:
-        proposal["reuse_source"] = _reuse_source
+    _adaptation_report = args.get("adaptation_report") or None
+    _assemble_reuse_provenance(
+        proposal, reuse_source=_reuse_source, adaptation_report=_adaptation_report
+    )
     proposal_json_text = json.dumps(proposal, indent=2, default=str, ensure_ascii=False)
 
     goal_json_text = json.dumps({
         "analysis_goal": analysis_goal,
+        "scenario": args.get("scenario") or "research",
+        "deliverables": args.get("deliverables") or ["preprocessed"],
         "modality": modality,
         "paradigm": paradigm,
     }, indent=2, ensure_ascii=False)
@@ -3531,6 +4133,8 @@ def _handle_propose_pipeline_evidence(args, **kw):
         "modality": modality,
         "paradigm": paradigm,
         "analysis_goal": analysis_goal,
+        "scenario": args.get("scenario") or "research",
+        "deliverables": args.get("deliverables") or ["preprocessed"],
         "web_evidence": _evidence_payload,
         "root_files": {},
         "plan_files": {
@@ -3585,6 +4189,22 @@ def _handle_propose_pipeline_evidence(args, **kw):
         "web_evidence": _evidence_payload,
         "proposal": proposal,
         "reasoning_preview": reasoning_md_text,
+        "presentation_block": reasoning_md_text,
+        "presented_steps_expected": [
+            s.get("operator") for s in (proposal.get("steps") or [])
+            if isinstance(s, dict) and s.get("operator")
+        ],
+        "next_action": {
+            "next_tool": "mark_proposal_confirmed",
+            "hint": (
+                "Present the FULL pipeline (presentation_block, every step + "
+                "rationale) to the user and wait for their decision. THEN call "
+                "mark_proposal_confirmed(user_decision=..., presented_steps=<the "
+                "operators you showed, = presented_steps_expected>). Confirmation "
+                "is REJECTED if presented_steps doesn't match — do NOT re-propose "
+                "unless the user asks for changes."
+            ),
+        },
         "viz": {
             "type": "pipeline_flow",
             "steps": _viz_steps,
@@ -3593,12 +4213,14 @@ def _handle_propose_pipeline_evidence(args, **kw):
             "Proposal STAGED at middle_process/proposal.staged.json. "
             "plan/ will materialize only after mark_proposal_confirmed("
             "user_decision='confirm'). BEFORE calling mark_proposal_confirmed "
-            "you MUST present the FULL pipeline to the user in chat: enumerate "
-            "every step from the `viz.steps` field (or `proposal.steps`) as a "
-            "numbered list — each with its operator, params, and rationale — "
-            "then ask them to confirm / modify / abort. Never ask for "
-            "confirmation without showing the steps; the expert cannot judge a "
-            "pipeline they cannot see."
+            "you MUST present the FULL pipeline to the user in chat: paste the "
+            "`presentation_block` (or enumerate every step from `viz.steps` / "
+            "`proposal.steps`) as a numbered list — each with its operator, "
+            "params, and rationale — then ask them to confirm / modify / abort. "
+            "Never ask for confirmation without showing the steps; the expert "
+            "cannot judge a pipeline they cannot see. When you confirm, you MUST "
+            "pass presented_steps (= presented_steps_expected) as PROOF you "
+            "showed the full pipeline, or confirmation is rejected."
         ),
     }, default=str)
 
@@ -3671,10 +4293,9 @@ def _handle_propose_pipeline(args, **kw):
 
     if not output_path:
         from pathlib import Path as _Path
-        data_parent = _Path(data_path).parent
         input_stem = _Path(data_path).stem
-        work_dir = str(data_parent.parent / f"{data_parent.name}_preprocess_work_dir")
-        output_path = str(data_parent.parent / f"{data_parent.name}_preprocess_work_dir" / "results" / f"{input_stem}_preprocessed.{chosen_format}")
+        work_dir = resolve_work_dir(data_path)
+        output_path = str(_Path(work_dir) / "results" / f"{input_stem}_preprocessed.{chosen_format}")
     else:
         from pathlib import Path as _Path
         # Reverse-engineer work_dir from the agent-supplied output_path. Three
@@ -3740,6 +4361,8 @@ def _handle_propose_pipeline(args, **kw):
     # reasoning.md banner), but the on-disk file appears post-confirm only.
     _goal_payload = {
         "analysis_goal": analysis_goal,
+        "scenario": args.get("scenario") or "research",
+        "deliverables": args.get("deliverables") or ["preprocessed"],
         "modality": modality,
         "paradigm": paradigm,
         "output_cleanup_applied": bool(_output_cleanup_applied),
@@ -3803,6 +4426,8 @@ def _handle_propose_pipeline(args, **kw):
         "modality": modality,
         "paradigm": paradigm,
         "analysis_goal": analysis_goal,
+        "scenario": args.get("scenario") or "research",
+        "deliverables": args.get("deliverables") or ["preprocessed"],
         "subject_id": subject_id,
         "steps": _proposal_steps,
         "rationale": rationale,
@@ -3833,6 +4458,8 @@ def _handle_propose_pipeline(args, **kw):
         "modality": modality,
         "paradigm": paradigm,
         "analysis_goal": analysis_goal,
+        "scenario": args.get("scenario") or "research",
+        "deliverables": args.get("deliverables") or ["preprocessed"],
         "web_evidence": _evidence_payload,
         "root_files": {
             "pipeline.yaml": yaml_str,
@@ -3905,6 +4532,24 @@ def _handle_propose_pipeline(args, **kw):
     })
 
 
+def _assemble_reuse_provenance(proposal: dict, *, reuse_source: str,
+                               adaptation_report: list | None) -> dict:
+    """Persist reuse provenance into the proposal dict.
+
+    Keeps `reuse_source` a plain string (layout_repair.py:936 reads it as such).
+    The per-slot adaptive-reference self-report goes under a separate
+    `reuse_adaptation` key so the audit trail (原值→实测→采用) is machine-readable.
+    """
+    if reuse_source:
+        proposal["reuse_source"] = reuse_source
+    if adaptation_report:
+        proposal["reuse_adaptation"] = {
+            "contract": "adaptive_reference",
+            "slots": list(adaptation_report),
+        }
+    return proposal
+
+
 def _handle_plan_pipeline(args, **kw):
     """Unified pipeline planning: dispatches to suggest or propose mode."""
     start_stage_if_active("plan")
@@ -3929,22 +4574,24 @@ def _do_handle_plan_pipeline(args, **kw):
     # but server-side enforcement isn't guaranteed across LLM transports —
     # validate here so misuse fails loudly with a useful message instead of
     # silently degrading to "generic" downstream.
+    # Derive the accepted goal set from the REGISTRY (single source of truth,
+    # includes third-party goals) so this never drifts from the schema enum.
+    from easybci_lib.tools.neural_processing.preprocess.analysis_goals import (
+        REGISTRY as _GOAL_REGISTRY,
+    )
+    allowed_goals = set(_GOAL_REGISTRY.keys())
     goal = args.get("analysis_goal")
     if not goal or not isinstance(goal, str) or not goal.strip():
         return json.dumps({
             "success": False,
             "error": (
-                "analysis_goal is required (one of: classification, "
-                "source_localization, feature_extraction, clinical_screening, "
-                "exploratory, generic). Infer from the user's natural-language "
-                "intent; use 'generic' when the user gave no signal."
+                "analysis_goal is required (one of: "
+                + ", ".join(sorted(allowed_goals))
+                + "). Infer from the user's natural-language intent; "
+                "use 'generic' when the user gave no signal."
             ),
             "field": "analysis_goal",
         })
-    allowed_goals = {
-        "classification", "source_localization", "feature_extraction",
-        "clinical_screening", "exploratory", "generic",
-    }
     goal = goal.strip()
     args["analysis_goal"] = goal
     if goal not in allowed_goals:
@@ -3953,6 +4600,36 @@ def _do_handle_plan_pipeline(args, **kw):
             "error": f"analysis_goal={goal!r} not in {sorted(allowed_goals)}",
             "field": "analysis_goal",
         })
+
+    # Normalise + validate the two orthogonal axes (both optional). scenario
+    # defaults to research; deliverables defaults to ["preprocessed"]. Unknown
+    # values are rejected here (same contract as analysis_goal) so a bad value
+    # never reaches the proposal builders. This runs BEFORE mode dispatch so a
+    # bad scenario/deliverable fails loudly regardless of suggest/propose path.
+    from easybci_lib.tools.neural_processing.preprocess.scenario import (
+        is_valid_scenario as _is_valid_scenario,
+        DEFAULT_SCENARIO as _DEFAULT_SCENARIO,
+    )
+    from easybci_lib.tools.neural_processing.preprocess.deliverables import (
+        normalize_deliverables as _normalize_deliverables,
+    )
+    _scenario = (args.get("scenario") or _DEFAULT_SCENARIO).strip() or _DEFAULT_SCENARIO
+    if not _is_valid_scenario(_scenario):
+        return json.dumps({
+            "success": False,
+            "error": f"scenario={_scenario!r} not one of: research, clinical, deployment",
+            "field": "scenario",
+        })
+    args["scenario"] = _scenario
+    try:
+        args["deliverables"] = _normalize_deliverables(args.get("deliverables"))
+    except ValueError as exc:
+        return json.dumps({
+            "success": False,
+            "error": str(exc),
+            "field": "deliverables",
+        })
+
     mode = args.get("mode")
     if mode is None:
         # Auto-detect: if steps are provided, user wants propose mode
@@ -3968,11 +4645,30 @@ def _do_handle_plan_pipeline(args, **kw):
     # ``plan/proposal.json:web_evidence`` + reasoning.md banner.
     available, reason = _research_preprocessing_available()
     if available:
-        try:
-            evidence = _call_research_preprocessing(_build_research_question(args))
-        except Exception as exc:
-            logger.warning("research_preprocessing raised; treating as unavailable: %s", exc)
-            evidence = {"status": "unavailable", "reason": f"call failed: {exc}"}
+        _research_args = _build_research_question(args)
+        # Reliability over latency (user directive): the planning path is where
+        # web_evidence.json is persisted into the finalized plan, so it must
+        # carry REAL evidence — never a "pending" placeholder that later goes
+        # stale. A prior background prewarm (deep_inspect C-2) may have already
+        # warmed the SearchCache for this (modality, paradigm, goal); if so we
+        # use it synchronously with zero wait. On a cache miss we BLOCK on the
+        # research call rather than backgrounding it: the whole chain is already
+        # bounded by web.research.total_budget_seconds (60s) + per-hop timeouts
+        # + a cooperative interrupt, so this waits at most ~budget seconds and
+        # then either returns evidence or a bounded "unavailable" — both of
+        # which are honest, durable states (unlike "pending", which had no
+        # writer to ever resolve it: the next plan/propose call re-derived the
+        # key and, when paradigm/goal drifted, missed the freshly-written entry,
+        # leaving web_evidence.json stuck on the placeholder).
+        _cached = _research_cache_probe(_research_args)
+        if _cached is not None:
+            evidence = _cached
+        else:
+            try:
+                evidence = _call_research_preprocessing(_research_args)
+            except Exception as exc:
+                logger.warning("research_preprocessing raised; treating as unavailable: %s", exc)
+                evidence = {"status": "unavailable", "reason": f"call failed: {exc}"}
     else:
         evidence = {"status": "unavailable", "reason": reason}
         # Attach per-provider diagnostics so the downstream payload shaping
@@ -4043,6 +4739,16 @@ def _shape_web_evidence_payload(evidence: dict, *, question: str = "") -> dict:
         if diags:
             out["diagnostics"] = diags
         return out
+    # "pending": research is running in the background (C-1). Distinct from
+    # "unavailable" — the pipeline uses registry defaults NOW and a later call
+    # will surface the completed evidence from cache. Passed through so
+    # reasoning.md / pipeline_record.json record it honestly.
+    if evidence.get("status") == "pending":
+        return {
+            "status": "pending",
+            "reason": evidence.get("reason", "web research running in background"),
+            "question": question or evidence.get("question", ""),
+        }
     if not evidence.get("success") and evidence.get("status") != "ok":
         out = {
             "status": "unavailable",
@@ -4137,10 +4843,16 @@ def _build_research_question(args: dict) -> dict:
         "SOTA recommendations for bandpass / notch / ICA / artifact rejection / segmentation"
     )
     question = "; ".join(bits)
+    # Stable cache key: only the semantic dimensions that change the ANSWER
+    # (modality + paradigm + analysis_goal). Volatile fields (n_channels, fs)
+    # are deliberately excluded so two runs on the same paradigm/goal that
+    # differ only in channel count / sampling rate share one cache entry.
+    cache_key = f"goal={goal}"
     return {
         "question": question,
         "modality": modality,
         "paradigm": paradigm,
+        "cache_key": cache_key,
         "context": {
             "fingerprint": fingerprint,
             "analysis_goal": goal,
@@ -4148,29 +4860,157 @@ def _build_research_question(args: dict) -> dict:
     }
 
 
+def _research_config_seconds(key: str, default: float) -> float:
+    """Read a ``web.research.<key>`` timeout/budget (seconds) from config.
+
+    Mirrors :func:`_sources_per_query`'s read pattern — the sole config
+    entry point is ``load_config()`` and every failure falls back to the
+    empirical default so a malformed config never blocks research.
+    """
+    try:
+        from easybci_cli.config import load_config
+        research = ((load_config() or {}).get("web") or {}).get("research") or {}
+        return max(0.0, float(research.get(key, default)))
+    except Exception:  # noqa: BLE001
+        return default
+
+
 def _call_research_preprocessing(call_args: dict) -> dict:
     """Invoke ``research_preprocessing`` via the registry and parse the
     JSON envelope. Errors return ``{"status": "unavailable", "reason": ...}``
     so the caller never has to wrap in try/except.
+
+    The whole research chain (query planning + web search + per-citation
+    extraction + synthesis) is bounded by ``web.research.total_budget_seconds``
+    (default 60s). On budget exhaustion the same ``status=="unavailable"``
+    envelope is returned — indistinguishable from any other research failure,
+    so ``suggest``/``propose`` fall back to registry defaults via the existing
+    empty-results contract. The handler runs in a single worker thread; on
+    timeout we signal that thread's cooperative interrupt (honoured by
+    ``exa/provider.py`` search/extract and by each hop's own short timeout)
+    and return without joining, so a wedged endpoint can never block the
+    agent past the budget.
     """
     entry = registry.get_entry("research_preprocessing")
     if entry is None or entry.handler is None:
         return {"status": "unavailable", "reason": "tool not registered"}
-    try:
+
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
+
+    from easybci_lib.tools.interrupt import set_interrupt
+
+    # Reliability over latency (user directive): with the citation-extraction
+    # cap raised to 10 (8 concurrent → up to 2 extraction waves) plus the
+    # aggregate synthesis call, the worst-case chain can approach the old 60s
+    # ceiling — and this budget is a HARD cutoff that discards ALL evidence on
+    # exhaustion. Raised to 120s so a richer batch has room to finish instead of
+    # being truncated to "unavailable". Override via web.research.total_budget_seconds.
+    budget = _research_config_seconds("total_budget_seconds", 120.0)
+
+    worker_tid: dict = {}
+
+    def _run() -> dict:
+        worker_tid["id"] = threading.current_thread().ident
         raw = entry.handler(call_args)
-    except Exception as exc:
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except (ValueError, TypeError) as exc:
+                return {"status": "unavailable", "reason": f"non-JSON response: {exc}"}
+        return {"status": "unavailable", "reason": "unrecognised response type"}
+
+    # max_workers=1, never joined on timeout — the worker's per-hop timeouts
+    # (P0-2/P0-4/P0-5) plus the cooperative interrupt guarantee it converges.
+    ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="research")
+    fut = ex.submit(_run)
+    try:
+        result = fut.result(timeout=budget)
+    except _FutureTimeout:
+        tid = worker_tid.get("id")
+        if tid is not None:
+            set_interrupt(True, thread_id=tid)
+        ex.shutdown(wait=False)
+        return {
+            "status": "unavailable",
+            "reason": f"research budget exceeded ({budget:.0f}s)",
+        }
+    except Exception as exc:  # noqa: BLE001 — mirror the legacy handler-raised path
+        ex.shutdown(wait=False)
         return {"status": "unavailable", "reason": f"handler raised: {exc}"}
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
+    else:
+        ex.shutdown(wait=False)
+        return result
+
+
+# Tracks background research threads by cache_key so we never launch a second
+# thread for a key already in flight (dedup within a process). Threads are
+# daemon + fire-and-forget; the SearchCache file is the only durable handoff.
+_RESEARCH_INFLIGHT: "set[str]" = set()
+_RESEARCH_INFLIGHT_LOCK = threading.Lock()
+
+
+def _research_cache_probe(call_args: dict) -> dict | None:
+    """Return the cached research payload for these args, or None on miss.
+
+    Uses the SAME (modality, paradigm, cache_key) the synchronous handler
+    checks, so a background prewarm and a later foreground call rendezvous on
+    one entry. Never raises.
+    """
+    try:
+        from easybci_lib.tools.neural_processing.research.search_cache import SearchCache
+        cache = SearchCache()
+        cached = cache.get(
+            call_args.get("modality", ""),
+            call_args.get("paradigm", ""),
+            call_args.get("question", ""),
+            cache_key=call_args.get("cache_key") or None,
+        )
+        if cached:
+            return {"success": True, "from_cache": True, **cached}
+    except Exception as exc:  # noqa: BLE001 — probe is best-effort
+        logger.debug("research cache probe failed: %s", exc)
+    return None
+
+
+def _start_background_research(call_args: dict) -> bool:
+    """Fire-and-forget: run research on a daemon thread that writes SearchCache.
+
+    Returns True if a thread was launched (or one is already in flight for
+    this key), False if research is unavailable / can't be backgrounded. The
+    result is picked up later via :func:`_research_cache_probe` — this call
+    never blocks. Deduped by cache_key within the process.
+    """
+    key = "|".join((
+        (call_args.get("modality") or "").lower(),
+        (call_args.get("paradigm") or "").lower(),
+        (call_args.get("cache_key") or call_args.get("question") or "").lower(),
+    ))
+    with _RESEARCH_INFLIGHT_LOCK:
+        if key in _RESEARCH_INFLIGHT:
+            return True
+        _RESEARCH_INFLIGHT.add(key)
+
+    def _run() -> None:
         try:
-            return json.loads(raw)
-        except (ValueError, TypeError) as exc:
-            return {
-                "status": "unavailable",
-                "reason": f"non-JSON response: {exc}",
-            }
-    return {"status": "unavailable", "reason": "unrecognised response type"}
+            _call_research_preprocessing(call_args)  # writes SearchCache internally
+        except Exception as exc:  # noqa: BLE001 — daemon thread must never raise out
+            logger.debug("background research failed: %s", exc)
+        finally:
+            with _RESEARCH_INFLIGHT_LOCK:
+                _RESEARCH_INFLIGHT.discard(key)
+
+    try:
+        threading.Thread(
+            target=_run, name="research-bg", daemon=True,
+        ).start()
+        return True
+    except Exception as exc:  # noqa: BLE001 — thread spawn failure is non-fatal
+        logger.debug("could not start background research thread: %s", exc)
+        with _RESEARCH_INFLIGHT_LOCK:
+            _RESEARCH_INFLIGHT.discard(key)
+        return False
 
 
 def _handle_list_data(args, **kw):
@@ -4182,6 +5022,7 @@ def _handle_list_data(args, **kw):
         ".nwb", ".h5", ".hdf5",
         ".mat",
         ".csv", ".tsv",
+        ".21e",
     }
 
     dir_path = Path(directory).expanduser().resolve()
@@ -4311,21 +5152,69 @@ def _do_handle_generate_code(args, **kw):
             ),
         })
 
-    from easybci_lib.tools.neural_processing.preprocess.analysis_goals import REGISTRY
+    from easybci_lib.tools.neural_processing.preprocess.deliverables import (
+        normalize_deliverables as _normalize_deliverables,
+    )
 
     events = data_info.get("events") or []
     has_events = bool(events) and len(events) > 0
-    has_labels = bool(label_config)
-    _goal_spec = REGISTRY.get(analysis_goal)
-    _goal_allows_ai_ready = _goal_spec.produces_ai_ready if _goal_spec else True
+    # The LLM's data_info.events fingerprint is often empty even when BIDS
+    # sidecar event files exist on disk. deep_inspect records the discovered
+    # sidecar in the routing table's events_path — treat that as authoritative
+    # evidence of events too, so event-locked epoching is not silently
+    # downgraded to sliding windows.
+    if not has_events and work_dir:
+        try:
+            from easybci_lib.tools.neural_processing.io.routing_table import (
+                load_routing_table as _load_routing_table,
+            )
 
-    # preprocessed/ is NWB-only — output_format is no longer a meaningful
-    # branch point. We keep the variable around as informational metadata
-    # (echoed into pipeline_record), but codegen no longer consumes it.
-    needs_ai_ready = (has_events or has_labels) and _goal_allows_ai_ready
+            _rt = _load_routing_table(work_dir)
+            if _rt is not None and any(
+                getattr(e, "events_path", None) for e in _rt.inputs
+            ):
+                has_events = True
+        except Exception:  # noqa: BLE001
+            pass
+    has_labels = bool(label_config)
+
+    # Deliverables drive beyond-NWB generation (was goal.produces_ai_ready).
+    # Ground truth is the confirm marker (Phase 1 → Phase 2 gate); the LLM's
+    # arg is a fallback only. NWB (preprocessed) is always produced regardless.
+    deliverables = None
+    try:
+        _marker_obj = json.loads(marker.read_text(encoding="utf-8"))
+        if isinstance(_marker_obj, dict) and isinstance(_marker_obj.get("deliverables"), list):
+            deliverables = _marker_obj["deliverables"]
+    except Exception:  # noqa: BLE001
+        pass
+    if deliverables is None:
+        deliverables = args.get("deliverables")
+    try:
+        deliverables = _normalize_deliverables(deliverables)
+    except ValueError:
+        deliverables = ["preprocessed"]
+
+    wants_ai_ready = "ai_ready" in deliverables
+    needs_ai_ready = wants_ai_ready and (has_events or has_labels)
     ai_ready_skipped_reason = None
-    if (has_events or has_labels) and not _goal_allows_ai_ready:
-        ai_ready_skipped_reason = "goal_not_ai_ready"
+    if wants_ai_ready and not (has_events or has_labels):
+        return json.dumps({
+            "success": False,
+            "error": (
+                "deliverables requested 'ai_ready' but the data has no events "
+                "and no label_config — AI-ready epochs need labels to segment on."
+            ),
+            "fix_hint": (
+                "Either supply label_config / an events file for this input, or "
+                "re-confirm with deliverables=['preprocessed'] (NWB only) if the "
+                "user does not actually need AI-ready training data."
+            ),
+        })
+    if not wants_ai_ready and (has_events or has_labels):
+        # events exist but the user did not ask for AI-ready — this is the new
+        # default. Record why, so reasoning/README can explain the skip.
+        ai_ready_skipped_reason = "not_requested"
 
     # Load inspection_report (path validated by the gate above). Fail open if
     # the file is empty/malformed (e.g. the internal regen path passes a stub
@@ -4454,6 +5343,7 @@ def _do_handle_generate_code(args, **kw):
         "written": written,
         "code_dir": str(code_dir),
         "has_build_ai_ready": needs_ai_ready,
+        "deliverables": deliverables,
         "analysis_goal": analysis_goal,
         "work_dir": str(work_dir),
         **_lint_generated_pipeline(code_dir / "pipeline.py"),
@@ -4572,6 +5462,24 @@ def _handle_export_repo(args, **kw):
             }
             _data_info = {k: v for k, v in recovered.items() if v not in (None, "", [])}
 
+    # scenario/deliverables passthrough: prefer the confirm marker (ground
+    # truth), then the LLM arg. build_mini_repo also falls back to
+    # pipeline_record / plan/goal.json, so this is belt-and-suspenders — it
+    # just lets the marker win when both exist.
+    _exp_scenario = args.get("scenario")
+    _exp_deliverables = args.get("deliverables")
+    try:
+        _marker_p = Path(output_dir) / "middle_process" / "proposal.confirmed"
+        if _marker_p.is_file():
+            _mk = json.loads(_marker_p.read_text(encoding="utf-8"))
+            if isinstance(_mk, dict):
+                if _mk.get("scenario") and _exp_scenario is None:
+                    _exp_scenario = _mk["scenario"]
+                if isinstance(_mk.get("deliverables"), list) and _exp_deliverables is None:
+                    _exp_deliverables = _mk["deliverables"]
+    except Exception:  # noqa: BLE001
+        pass
+
     result = build_mini_repo(
         output_dir=output_dir,
         steps=args["steps"],
@@ -4587,6 +5495,8 @@ def _handle_export_repo(args, **kw):
         force=args.get("force", False),
         label_config=args.get("label_config"),
         split_config=args.get("split_config"),
+        scenario=_exp_scenario,
+        deliverables=_exp_deliverables,
     )
 
     # Fix A-2 — Drain any QC payloads still pending for this work_dir and
@@ -4709,8 +5619,43 @@ def _handle_bin_spikes(args, **kw):
     })
 
 
+def _batch_results_from_status(work_dir: Path) -> list:
+    """Reconstruct per-subject batch results from the produced repo's
+    pipeline_status sidecars, for generate_batch_summary. Reads QC pass/fail
+    from the qc aggregate when present."""
+    mp = work_dir / "middle_process"
+    results: list = []
+    if not mp.is_dir():
+        return results
+    # QC pass/fail keyed by file_id, if a qc aggregate exists.
+    qc_pass: dict = {}
+    qc_agg = mp / "qc_status.json"
+    if qc_agg.is_file():
+        try:
+            qc = json.loads(qc_agg.read_text(encoding="utf-8"))
+            for entry in (qc.get("inputs") or []):
+                if isinstance(entry, dict) and entry.get("file_id"):
+                    qc_pass[entry["file_id"]] = bool(entry.get("qc_passed", True))
+        except (OSError, json.JSONDecodeError):
+            pass
+    for sidecar in sorted(mp.glob("pipeline_status__*.json")):
+        try:
+            s = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        fid = s.get("file_id")
+        results.append({
+            "subject_id": s.get("subject_id", "unknown"),
+            "success": bool(s.get("success")),
+            "qc_passed": qc_pass.get(fid, bool(s.get("success"))),
+            "error": s.get("error", "") or "",
+            "output": s.get("output_file", ""),
+        })
+    return results
+
+
 def _handle_batch_process(args, **kw):
-    from easybci_lib.tools.neural_processing.batch.processor import batch_process
+    from easybci_lib.tools.neural_processing.batch.orchestrate import build_repro_repo
     import glob as _glob
 
     pattern = args["pattern"]
@@ -4753,20 +5698,19 @@ def _handle_batch_process(args, **kw):
     except Exception:
         pass
 
-    result = batch_process(
-        pattern=pattern,
-        steps=steps,
-        output_dir=output_dir,
-        modality=modality,
-        segment_duration=segment_duration,
-        stride=stride,
-        max_workers=max_workers,
+    result = build_repro_repo(
+        matched_files, work_dir=output_dir, modality=modality,
+        analysis_goal=(args.get("analysis_goal") or "generic"),
+        steps=steps, adaptive=False,
+        paradigm=args.get("paradigm", ""),
     )
 
-    # Generate batch summary dashboard with group stats + exclusion recommendations
+    # Generate batch summary dashboard from the produced repo's status sidecars.
     try:
-        from easybci_lib.tools.neural_processing.batch.summary import generate_batch_summary, save_batch_summary
-        batch_results = result.get("results", [])
+        from easybci_lib.tools.neural_processing.batch.summary import (
+            generate_batch_summary, save_batch_summary,
+        )
+        batch_results = _batch_results_from_status(Path(output_dir))
         if batch_results:
             summary_report = generate_batch_summary(
                 batch_results=batch_results,
@@ -4781,6 +5725,326 @@ def _handle_batch_process(args, **kw):
         logger.debug("Batch summary generation failed: %s", exc)
 
     return json.dumps(result, default=str)
+
+
+def _aggregate_batch_label_diagnostics(work_dir: Path) -> dict:
+    """Union unmatched/suspicious reject labels across per-file pipeline_status
+    sidecars written by the generated reject_by_labels op. Replaces the old
+    in-memory aggregate_label_diagnostics now that the run is subprocess-based.
+    """
+    from easybci_lib.tools.neural_processing.preprocess.label_reject import (
+        flag_suspicious_labels,
+    )
+    mp = work_dir / "middle_process"
+    unmatched: set = set()
+    if mp.is_dir():
+        for sidecar in mp.glob("pipeline_status__*.json"):
+            try:
+                data = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            for lab in (data.get("unmatched_labels") or []):
+                unmatched.add(str(lab))
+    suspicious = sorted(set(flag_suspicious_labels(sorted(unmatched))))
+    return {
+        "unmatched_labels": sorted(unmatched),
+        "suspicious_labels": suspicious,
+        "suspicious_count": len(suspicious),
+    }
+
+
+def _handle_batch_process_adaptive(args, **kw):
+    import fnmatch
+    import glob as _glob
+    from easybci_lib.tools.neural_processing.batch.coverage import (
+        _anchor_dir, _is_strict_ancestor, dataset_root_from_output_dir,
+        enumerate_signal_inputs, pattern_extensions,
+    )
+    from easybci_lib.tools.neural_processing.io.loader import filter_signal_files
+    from easybci_lib.tools.neural_processing.proven_match import scan_proven_pipelines
+
+    pattern = args["pattern"]
+    skill_name = args["skill_name"]
+    output_dir = args["output_dir"]
+    modality = args.get("modality", "auto")
+    max_workers = args.get("max_workers", 4)
+    max_duration = args.get("max_duration")
+    source_root = args.get("source_root")
+    exclude_paths = args.get("exclude_paths") or []
+    exclude_globs = args.get("exclude_globs") or []
+    extra_reject_keywords = args.get("extra_reject_keywords") or []
+    confirm = bool(args.get("confirm", False))
+
+    # Enumeration model: source_root (recursive walk + signal extensions) is the
+    # PRIMARY enumerator; `pattern` degrades to an extension/anchor hint. Every
+    # signal file under the scan root is included BY DEFAULT — silent
+    # under-coverage (a pattern one directory-level too shallow dropping a whole
+    # sibling subtree) is architecturally impossible RELATIVE TO THE SCAN ROOT.
+    # But a too-DEEP root has the same failure: if the LLM passes
+    # source_root=.../NKT/EEG2100, a sibling subtree .../SEEG/NKT/EEG2100 is
+    # never walked. So before walking we widen the scan root to the DATASET ROOT
+    # when we can recover it mechanically: the output_dir sits inside the dataset
+    # folder by convention (.../SEEG_ZHU/SEEG_ZHU_preprocess_work_dirs), so
+    # dirname of the *_preprocess_work_dir(s) marker IS the dataset root. This
+    # makes the scan comprehensive at enumeration time — no post-hoc "detect
+    # missed files and add them back" step. The widen is bounded by the dataset
+    # root (never climbs into a sibling dataset) and excludes the work_dir's own
+    # output/archive subtree. When the pattern carries no extension we can't
+    # safely scope a walk, so we fall back to plain glob.glob(pattern).
+    exts = pattern_extensions(pattern)
+    initial_scan = source_root or _anchor_dir(pattern)
+    scan_root = initial_scan
+    widened_from = None
+    dataset_root = dataset_root_from_output_dir(output_dir)
+    # Exclude the whole work_dir container subtree (outputs, _runN archives,
+    # middle_process copies) so a widened walk never re-ingests its own output.
+    exclude_under = [os.path.abspath(output_dir)] if output_dir else []
+    if (exts and dataset_root and os.path.isdir(dataset_root)
+            and _is_strict_ancestor(dataset_root, initial_scan)):
+        wide = enumerate_signal_inputs(dataset_root, exts, exclude_under=exclude_under)
+        narrow = enumerate_signal_inputs(initial_scan, exts, exclude_under=exclude_under)
+        # Only widen when it actually recovers more files (guards degenerate /
+        # oddly-named layouts). Deterministic across the preview and the
+        # confirm=true re-entry — both derive scan_root from the same args.
+        if len(wide) > len(narrow):
+            scan_root, widened_from = dataset_root, initial_scan
+    if exts and scan_root and os.path.isdir(scan_root):
+        candidates = enumerate_signal_inputs(scan_root, exts, exclude_under=exclude_under)
+        enum_mode = "source_root_walk"
+    else:
+        # glob_fallback: pattern has no extension (can't scope a walk). Untouched
+        # by the dataset-root widen — a bare-glob run is the LLM's explicit
+        # narrow choice, and there is no extension to enumerate a wider tree by.
+        raw_matched = _glob.glob(pattern)
+        candidates = filter_signal_files(raw_matched)
+        enum_mode = "glob_fallback"
+    if not candidates:
+        return json.dumps({"success": False,
+                           "error": f"no signal files found (mode={enum_mode}, "
+                                    f"scan_root={scan_root!r}, pattern={pattern!r})"})
+
+    # Apply explicit exclusions (default = include everything under the root).
+    excl_abs = {os.path.abspath(p) for p in exclude_paths}
+    excluded_by_user = []
+    files = []
+    for f in candidates:
+        fa = os.path.abspath(f)
+        if fa in excl_abs or any(fnmatch.fnmatch(f, g) for g in exclude_globs):
+            excluded_by_user.append(f)
+            continue
+        files.append(f)
+    # Report sidecars dropped from what the raw walk/glob saw, for the preview.
+    dropped_companions = []
+    if enum_mode == "glob_fallback":
+        dropped_companions = sorted(set(raw_matched) - set(candidates))
+    for f in files:
+        register_source_path(f)
+    if not files:
+        return json.dumps({"success": False,
+                           "error": "all candidate files were excluded "
+                                    f"({len(excluded_by_user)} via exclude_paths/exclude_globs)"})
+
+    # With source-root enumeration there is no residual coverage gap by
+    # construction; keep a zero-gap dict for the preview/result shape.
+    coverage = {"anchor": scan_root, "extensions": exts, "matched_count": len(files),
+                "uncovered": [], "gap_count": 0, "enum_mode": enum_mode,
+                "excluded_by_user": excluded_by_user, "widened_from": widened_from}
+
+    output_error = check_output_path(output_dir)
+    if output_error:
+        return json.dumps({"success": False, "error": output_error})
+
+    # Resolve the enhanced skill by name.
+    skill = next((e for e in scan_proven_pipelines() if e.name == skill_name), None)
+    if skill is None:
+        return json.dumps({"success": False,
+                           "error": f"proven skill not found: {skill_name}"})
+    if getattr(skill, "source_kind", "") != "reference_import" or not skill.adaptation_slots:
+        return json.dumps({"success": False,
+                           "error": f"skill {skill_name} is not a reference-import "
+                                    "enhanced skill (no adaptation_slots)"})
+
+    from easybci_lib.tools.neural_processing.batch.orchestrate import build_repro_repo
+    goal = args.get("analysis_goal") or getattr(skill, "analysis_goal", "") or "generic"
+
+    # ---- PHASE 1: preview (default) — inspect + adapt + exclusions, no run ----
+    # batch_process_adaptive is otherwise a bypass around the propose→confirm
+    # gate the single-file path enforces. Force the same discipline: the first
+    # call computes the plan (routed count, per-file exclusions + reasons,
+    # resolved steps/modality) WITHOUT scaffolding or running, and returns an
+    # awaiting_confirmation envelope the LLM must present before re-calling with
+    # confirm=true.
+    if not confirm:
+        preview = build_repro_repo(
+            files, work_dir=output_dir, modality=modality, analysis_goal=goal,
+            skill=skill, reject_keywords=extra_reject_keywords, adaptive=True,
+            paradigm=getattr(skill, "paradigm", ""), preview=True,
+        )
+        if not preview.get("success"):
+            return json.dumps(preview, default=str)
+        preview["awaiting_confirmation"] = True
+        preview["n_matched"] = len(files)
+        preview["dropped_companions"] = dropped_companions
+        preview["enum_mode"] = coverage.get("enum_mode")
+        preview["scan_root"] = coverage.get("anchor")
+        preview["excluded_by_user"] = coverage.get("excluded_by_user") or []
+        preview["presentation_block"] = _render_batch_preview_block(
+            preview, dropped_companions, coverage)
+        preview["next_action"] = {
+            "next_tool": "batch_process_adaptive",
+            "must_present": True,
+            "hint": (
+                "Paste the FULL `presentation_block` VERBATIM in chat — the "
+                "numbered steps and n_routed (every signal file under the scan "
+                "root is already included). Do NOT summarize or abbreviate it. "
+                "Do NOT call the `clarify` tool: ask for approval in plain chat "
+                "text and wait for the user's natural reply. When the user "
+                "approves, re-call batch_process_adaptive with the SAME pattern/"
+                "skill_name/output_dir AND confirm=true. If the user names files "
+                "to skip, pass them as exclude_paths=[...] on that same call — "
+                "NEVER narrow the pattern to drop files."),
+        }
+        # Second tool-return-level guard (weak models follow the return, not
+        # SKILL.md prose): the single-file propose flow presents the full plan
+        # in chat and waits for a natural reply — NEVER a clarify popup. The
+        # batch flow is identical. A clarify box only shows its short question
+        # text, dropping the steps, so it is forbidden here.
+        preview["note"] = (
+            "This is a PREVIEW — nothing has run. Every signal file under the "
+            "scan root is ALREADY included (source-root enumeration — no file is "
+            "silently skipped). BEFORE re-calling with confirm=true you MUST "
+            "present the FULL plan to the user in chat: paste `presentation_block` "
+            "verbatim (every numbered step + n_routed), then ask them to confirm "
+            "in plain text and wait for their reply. To skip specific recordings, "
+            "the user names them and you pass exclude_paths=[...] — do NOT narrow "
+            "the pattern. NEVER ask for confirmation via the `clarify` tool or "
+            "without showing the steps. Same discipline as the single-file "
+            "propose→confirm flow."
+        )
+        return json.dumps(preview, default=str)
+
+    # ---- PHASE 2: confirmed — run the full pipeline ------------------------
+    result = build_repro_repo(
+        files, work_dir=output_dir, modality=modality, analysis_goal=goal,
+        skill=skill, reject_keywords=extra_reject_keywords, adaptive=True,
+        paradigm=getattr(skill, "paradigm", ""),
+    )
+    result["dropped_companions"] = dropped_companions
+    result["enum_mode"] = coverage.get("enum_mode")
+    result["scan_root"] = coverage.get("anchor")
+    if coverage.get("excluded_by_user"):
+        result["excluded_by_user"] = coverage["excluded_by_user"]
+    # Surface suspicious unmatched labels loudly: an unfamiliar environment may
+    # label seizures/stim with terms the keyword list doesn't cover yet. The
+    # generated reject_by_labels op records unmatched labels into each file's
+    # pipeline_status sidecar; aggregate + flag the suspicious subset here.
+    diag = _aggregate_batch_label_diagnostics(Path(output_dir))
+    result["label_diagnostics"] = diag
+    if diag.get("suspicious_count"):
+        result["reject_review_needed"] = (
+            f"{diag['suspicious_count']} label(s) went unmatched but look "
+            "clinically suspicious (seizure/stim). Review "
+            f"{diag['suspicious_labels']}; if any are real reject markers, re-run "
+            "with extra_reject_keywords=[...] (and add them to the skill via "
+            "skill_manage patch so the fix persists)."
+        )
+        logger.warning("batch_process_adaptive %s", result["reject_review_needed"])
+    # Source-root enumeration means there is no residual coverage gap by
+    # construction (gap_count is always 0). The old "widen the pattern & re-run"
+    # warning is retired — a weak model can't be relied on to act on prose, so
+    # coverage is now guaranteed by the enumerator, not a post-hoc nudge.
+    result["success"] = bool(result.get("success", True))
+    # Tool-return-level presentation contract (weak models follow the return,
+    # not README/prose): build a human-readable completion block — including the
+    # raw→preprocessed storage footprint — and require the LLM to paste it in the
+    # final chat so the user gets an immediate, visual before/after summary.
+    result["completion_block"] = _render_batch_completion_block(result)
+    result["must_present"] = True
+    result["next_action"] = {
+        "must_present": True,
+        "hint": (
+            "The batch is DONE. Paste the FULL `completion_block` VERBATIM in "
+            "chat as your final message — including the Storage Footprint line "
+            "(raw → preprocessed size + reduction). Do NOT summarize it away; the "
+            "user wants the before/after size at a glance."),
+    }
+    return json.dumps(result, default=str)
+
+
+def _render_batch_completion_block(result):
+    """Human-readable done-summary the LLM must show the user after a run.
+
+    Leads with the raw→preprocessed storage footprint so the user gets an
+    immediate visual before/after (e.g. ``raw 5.6 TB → preprocessed 98 GB``).
+    """
+    lines = ["## Batch preprocessing complete", ""]
+    ok = result.get("success")
+    lines.append(f"**Status:** {'✓ success' if ok else '⚠ finished with issues'}")
+    lines.append(f"**Processed:** {result.get('n_routed', 0)} file(s)"
+                 + (f" (excluded {result.get('n_excluded', 0)})"
+                    if result.get("n_excluded") else ""))
+    if result.get("work_dir"):
+        lines.append(f"**Work dir:** `{result['work_dir']}`")
+    fp = result.get("storage_footprint") or {}
+    if fp.get("raw_size_bytes") or fp.get("output_size_bytes"):
+        raw = fp.get("raw_size_human", "?")
+        out = fp.get("output_size_human", "?")
+        line = f"**Storage footprint:** raw {raw} → preprocessed {out}"
+        if fp.get("reduction_pct") is not None:
+            line += f"  (↓ {fp['reduction_pct']:.1f}%)"
+        lines.append(line)
+    if result.get("excluded_by_user"):
+        lines.append(f"**Excluded by your request:** {len(result['excluded_by_user'])} file(s)")
+    if result.get("reject_review_needed"):
+        lines.append("")
+        lines.append(f"⚠ {result['reject_review_needed']}")
+    return "\n".join(lines)
+
+
+def _render_batch_preview_block(preview, dropped_companions, coverage):
+    """Human-readable plan the LLM must show the user before confirm=true."""
+    lines = ["## Batch preprocessing plan (preview — NOT yet run)", ""]
+    steps = preview.get("steps") or []
+    lines.append(f"**Pipeline** ({preview.get('modality', 'auto')}, "
+                 f"goal={preview.get('analysis_goal', '')}):")
+    for i, s in enumerate(steps, 1):
+        lines.append(f"  {i}. {s}")
+    lines.append("")
+    anchor = coverage.get("anchor")
+    exts = "/".join(coverage.get("extensions") or []) or "signal"
+    widened_from = coverage.get("widened_from")
+    if coverage.get("enum_mode") == "source_root_walk" and anchor:
+        lines.append(f"**Source (all included):** every `{exts}` file under "
+                     f"`{anchor}` — enumerated recursively, none skipped.")
+        if widened_from:
+            lines.append(f"  ↳ scan root auto-widened from `{widened_from}` to the "
+                         "dataset root above it — a sibling subtree held more "
+                         f"`{exts}` files, so the narrower path would have under-"
+                         "covered. All of them are included below.")
+    lines.append(f"**Will process:** {preview.get('n_routed', 0)} file(s)")
+    excluded = preview.get("excluded") or []
+    if excluded:
+        lines.append(f"**Auto-excluded (unreadable/out-of-range):** {len(excluded)} "
+                     "file(s) — will NOT be processed:")
+        for e in excluded:
+            why = e.get("reasons") or e.get("reason") or "?"
+            if isinstance(why, list):
+                why = "; ".join(why)
+            lines.append(f"  - {e.get('data_path', '?')} — {why}")
+    user_excl = coverage.get("excluded_by_user") or []
+    if user_excl:
+        lines.append(f"**Excluded by your request:** {len(user_excl)} file(s):")
+        for p in user_excl:
+            lines.append(f"  - {p}")
+    if dropped_companions:
+        lines.append(f"**Dropped companions/sidecars:** {len(dropped_companions)} "
+                     "(e.g. .21E/.LOG next to .EEG — not signal inputs)")
+    lines.append("")
+    lines.append("Everything above is INCLUDED by default. To skip any file, tell "
+                 "me which and I'll re-run with them in `exclude_paths` — do not "
+                 "narrow the pattern.")
+    lines.append("Re-call with `confirm=true` to run this plan.")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -4814,6 +6078,26 @@ registry.register(
     handler=_handle_deep_inspect,
     check_fn=_check_neural_requirements,
     emoji="\U0001f50d",
+)
+
+# 1d. import_reference — ingest a gold-standard reference project into a skill
+registry.register(
+    name="import_reference",
+    toolset="neural",
+    schema=IMPORT_REFERENCE_SCHEMA,
+    handler=_handle_import_reference,
+    check_fn=_check_neural_requirements,
+    emoji="\U0001f4da",  # 📚
+)
+
+# 1d. register_io_loader — agent-authored loader plugins for unsupported formats
+registry.register(
+    name="register_io_loader",
+    toolset="neural",
+    schema=REGISTER_IO_LOADER_SCHEMA,
+    handler=_handle_register_io_loader,
+    check_fn=_check_neural_requirements,
+    emoji="\U0001f50c",  # 🔌
 )
 
 # 1c. mark_proposal_confirmed — Phase 1 → Phase 2 hand-off marker
@@ -4968,6 +6252,16 @@ registry.register(
     toolset="neural",
     schema=BATCH_PROCESS_SCHEMA,
     handler=_handle_batch_process,
+    check_fn=_check_neural_requirements,
+    emoji="\U0001f504",
+)
+
+# 10b. batch_process_adaptive — reference-driven adaptive batch (coexists)
+registry.register(
+    name="batch_process_adaptive",
+    toolset="neural",
+    schema=BATCH_PROCESS_ADAPTIVE_SCHEMA,
+    handler=_handle_batch_process_adaptive,
     check_fn=_check_neural_requirements,
     emoji="\U0001f504",
 )
@@ -5128,10 +6422,13 @@ def _handle_research_preprocessing(args, **kw):
     modality = args.get("modality", "")
     paradigm = args.get("paradigm", "")
     context = args.get("context", {})
+    # Stable semantic key (excludes volatile n_channels/fs); None → legacy
+    # question-based keying, preserving behaviour for callers that don't set it.
+    cache_key = args.get("cache_key") or None
 
     # Check cache first
     cache = SearchCache()
-    cached = cache.get(modality, paradigm, question)
+    cached = cache.get(modality, paradigm, question, cache_key=cache_key)
     if cached:
         return json.dumps({"success": True, "from_cache": True, **cached})
 
@@ -5210,7 +6507,7 @@ def _handle_research_preprocessing(args, **kw):
     }
 
     # Cache the result
-    cache.put(modality, paradigm, question, result)
+    cache.put(modality, paradigm, question, result, cache_key=cache_key)
 
     return json.dumps(result, default=str)
 
@@ -5359,7 +6656,22 @@ def _enrich_with_extracted_content(results: list) -> None:
         if not top_urls:
             return
 
-        documents = extract_provider.extract(top_urls)
+        # Best-effort, short-bounded: enrichment is purely additive (the
+        # synthesizer handles a missing "extracted_content"), so a slow/hung
+        # extract must never eat into the research budget. Bound it on a worker
+        # thread; a timeout raises into the outer handler and skips silently.
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
+
+        _enrich_budget = _research_config_seconds("search_timeout_seconds", 15.0)
+        _ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="enrich")
+        try:
+            documents = _ex.submit(extract_provider.extract, top_urls).result(
+                timeout=_enrich_budget if _enrich_budget > 0 else None
+            )
+        except _FutureTimeout:
+            raise TimeoutError(f"extract enrichment exceeded {_enrich_budget:.0f}s")
+        finally:
+            _ex.shutdown(wait=False)
         # Map URL -> extracted text for assignment back onto the result sets.
         by_url: dict[str, str] = {}
         for doc in documents or []:

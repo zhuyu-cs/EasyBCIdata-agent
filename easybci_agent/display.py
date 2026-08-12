@@ -803,6 +803,14 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
         _peek = safe_json_loads(result)
         if isinstance(_peek, dict) and _peek.get("status") == "approval_required":
             return False, ""
+        # An explicit ``success: true`` is authoritative — the tool ran fine.
+        # Without this, the generic substring heuristic below trips on benign
+        # fields like ``"error": null`` / ``"fix_hint": null`` (the ``"error"``
+        # KEY is present even though the VALUE is null), flagging successful
+        # calls as failures and spamming them into errors.log at WARNING
+        # (e.g. register_io_loader's success envelope).
+        if isinstance(_peek, dict) and _peek.get("success") is True:
+            return False, ""
         # A soft-suppressed result (e.g. Reuse Mode auto-suppresses the research
         # tools) is a deliberate skip, not a failure — even though it carries
         # success=false + error_kind for the LLM. Treat it as a non-failure so

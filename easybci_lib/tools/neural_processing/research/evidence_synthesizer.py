@@ -22,9 +22,8 @@ from .citation_extractor import extract_citation
 from .confidence import compute_evidence_confidence
 
 # Breadth defaults. Kept config-driven because widening costs latency/tokens
-# on the weak aux model. max_sources = kept citations (was hard 5); the weak
-# endpoint is protected by the low _MAX_EXTRACT_WORKERS below, not by a small K.
-_MAX_SOURCES_DEFAULT = 10
+# on the weak aux model. Citation-count defaults live next to the resolvers
+# below (``_MAX_EXTRACT_CITATIONS_DEFAULT`` / ``_MAX_SOURCES_LEGACY_DEFAULT``).
 
 
 def _load_research_cfg() -> dict:
@@ -44,16 +43,67 @@ def _load_research_cfg() -> dict:
 
 
 def _resolve_max_sources() -> int:
+    # ``max_extract_citations`` is the latency-focused override (default 4):
+    # it caps how many citations get a per-citation LLM extraction. Falls back
+    # to the legacy ``max_sources`` key, then the built-in default, so an
+    # existing config setting either key still works.
+    cfg = _load_research_cfg()
     try:
-        val = int(_load_research_cfg().get("max_sources", _MAX_SOURCES_DEFAULT))
+        val = int(cfg.get("max_extract_citations", cfg.get("max_sources", _MAX_EXTRACT_CITATIONS_DEFAULT)))
     except (TypeError, ValueError):
-        val = _MAX_SOURCES_DEFAULT
+        val = _MAX_EXTRACT_CITATIONS_DEFAULT
     return max(1, val)
-# Per-citation extractions run concurrently (blocking LLM calls). Kept low
-# (2) so the weak custom aux endpoint (deepseek-v4-pro) isn't overloaded —
-# 5 concurrent heavy requests measurably raised its truncation / "not
-# relevant" rate. The on-disk cache makes repeats free.
-_MAX_EXTRACT_WORKERS = 2
+
+
+def _resolve_llm_timeout(default: float = 25.0) -> float:
+    """SHORT per-call timeout for research synthesis/extraction LLM calls,
+    overriding the 360s ``auxiliary.web_extract.timeout`` these would inherit."""
+    try:
+        return max(0.0, float(_load_research_cfg().get("llm_timeout_seconds", default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolve_synthesis_max_tokens(default: int = 16384) -> int:
+    """Output-token ceiling for the aggregate synthesis LLM call.
+
+    The synthesis answer itself (confidence + ~8 step strings + a params dict +
+    a 2-3 sentence rationale + caveats) is small — a few hundred tokens. But the
+    auxiliary model may be a REASONING model (DeepSeek-R1, Qwen-QwQ, gpt-5-class
+    thinking), which spends the budget on thinking tokens BEFORE emitting the
+    JSON. A tight 2048 ceiling let the thinking phase consume the budget and cut
+    the JSON off mid-structure — the truncation-repair path then salvaged valid
+    JSON but silently dropped the tail (``recommended_steps`` / ``parameters`` /
+    ``rationale``), producing weak or empty ``web_evidence``. A generous default
+    leaves room for the answer to complete after reasoning; heavy-reasoning
+    setups can raise it further via ``web.research.synthesis_max_tokens``.
+    """
+    try:
+        val = int(_load_research_cfg().get("synthesis_max_tokens", default))
+    except (TypeError, ValueError):
+        return default
+    return max(1024, val)
+
+
+# Legacy default retained for the ``max_sources`` fallback path.
+_MAX_SOURCES_LEGACY_DEFAULT = 10
+# Per-citation extraction cap: how many of the top-ranked citations get a
+# per-citation LLM extraction AND survive into the final web_evidence.json
+# (see the ``all_citations[:_resolve_max_sources()]`` slice below). This is the
+# PRIMARY control over how much evidence lands in the plan — a tight cap made
+# web_evidence feel thin (only the top few sources, the rest silently dropped;
+# a level-3 run discarded ~30 candidates to keep 4). Raised to 10 for richer,
+# more reliable evidence per the user directive (reliability over latency):
+# extractions run concurrently and each carries its own short timeout, and the
+# on-disk cache makes repeats free, so the added sources cost little wall-clock.
+# Override per-scenario via ``web.research.max_extract_citations``.
+_MAX_EXTRACT_CITATIONS_DEFAULT = 10
+# Per-citation extractions run concurrently (blocking LLM calls). Kept in step
+# with the citation cap so all extractions still complete in a single batch
+# instead of serialising into waves — bounded by the citation cap, each call
+# carries its own short timeout so the weak endpoint can't wedge the batch. The
+# on-disk cache makes repeats free.
+_MAX_EXTRACT_WORKERS = 8
 
 
 @dataclass
@@ -350,9 +400,10 @@ def _synthesize_with_llm(
         response = call_llm_with_overflow_retry(
             call_llm=call_llm,
             task="web_extract",
+            timeout=_resolve_llm_timeout(),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
-            max_tokens=2048,
+            max_tokens=_resolve_synthesis_max_tokens(),
             fallback_input_chars=64_000,
         )
         text = extract_content_or_reasoning(response)

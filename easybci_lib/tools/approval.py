@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 import unicodedata
-from typing import Optional
+from typing import Callable, Optional
 from easybci_cli.config import cfg_get
 
 from easybci_lib.utils import is_truthy_value
@@ -305,6 +305,26 @@ _SOURCE_DATA_MUTATING_COMMANDS = re.compile(
 _SOURCE_DATA_DD_PATTERN = re.compile(r'\bdd\b[^\n]*\bof=([^\s;|&]+)', re.IGNORECASE)
 _SOURCE_DATA_REDIRECT_PATTERN = re.compile(r'>\s*([^\s;|&]+)')
 
+# Redirect targets that discard output rather than write a file. `2>/dev/null`
+# is the ubiquitous stderr-discard suffix on read-only commands (ls/find/cat …);
+# treating its `>` as a "write" made the mutating-command fallback below
+# false-block harmless reads that merely *mention* a protected dir. fd-dups like
+# `2>&1` already fail the pattern (the `&` is excluded from the target class).
+_DISCARD_REDIRECT_TARGETS = {"/dev/null"}
+
+
+def _has_write_redirect_to_real_target(command: str) -> bool:
+    """True if the command redirects output to a real filesystem path (not
+    /dev/null). Used to decide whether a command that defeats structured
+    parsing 'looks mutating'. A real target (incl. `2>/some/file`) still
+    counts — only pure discards are exempt — so stderr-into-a-source-file is
+    NOT let through."""
+    for _m in _SOURCE_DATA_REDIRECT_PATTERN.finditer(command):
+        _tgt = _m.group(1).strip("'\"")
+        if _tgt and _tgt not in _DISCARD_REDIRECT_TARGETS:
+            return True
+    return False
+
 
 def check_source_data_command(command: str) -> tuple:
     """Detect shell commands that would modify registered source data files
@@ -363,7 +383,7 @@ def check_source_data_command(command: str) -> tuple:
     _path_boundary = r"(?=/|$|[^A-Za-z0-9._\-])"
     if (not targets
             and (write_verb_anywhere.search(normalized)
-                 or _SOURCE_DATA_REDIRECT_PATTERN.search(normalized))):
+                 or _has_write_redirect_to_real_target(normalized))):
         for d in protected_dirs:
             if _re.search(_re.escape(d) + _path_boundary, normalized):
                 return (True, f"shell command references protected source dir: {d}")
@@ -387,6 +407,225 @@ def check_source_data_command(command: str) -> tuple:
         for path in _extract_path_arguments(normalized):
             if _path_matches_source(path, protected_files):
                 return (True, f"mutating command targets source data: {path}")
+
+    return (False, None)
+
+
+# =========================================================================
+# Preprocess work_dir material protection (confirmable, not a hard block)
+# =========================================================================
+# The agent occasionally deletes or moves deliverable materials inside a
+# *_preprocess_work_dir/ (plan/, code/, preprocessed_output/, pipeline_record
+# .json, README.md, …). These are recoverable-but-costly: re-running the
+# pipeline can regenerate them, but a silent `rm` mid-batch loses work the
+# user cares about. Unlike source data (absolute block), these go through the
+# normal approval prompt so the user can confirm. middle_process/ is scratch
+# and always exempt — Step 14 cleanup and layout sweeps target it routinely.
+
+_WORKDIR_MUTATING_VERBS = frozenset({"rm", "mv", "shred", "truncate"})
+_WORKDIR_SUFFIX = "_preprocess_work_dir"
+
+
+def _workdir_relpath(target: str) -> Optional[tuple]:
+    """If *target* lives inside a ``*_preprocess_work_dir/``, return
+    ``(work_dir_name, rel_posix)`` where rel is POSIX-normalised relative to
+    the work_dir root (empty string when target IS the work_dir). Otherwise
+    None."""
+    norm = target.replace("\\", "/").rstrip("/")
+    parts = norm.split("/")
+    for i, part in enumerate(parts):
+        if part.endswith(_WORKDIR_SUFFIX):
+            rel = "/".join(parts[i + 1:])
+            return (part, rel)
+    return None
+
+
+def _is_middle_process_rel(rel: str) -> bool:
+    """True when *rel* (a work_dir-relative POSIX path) is the middle_process
+    scratch subtree, which is exempt from the material guard."""
+    return rel == "middle_process" or rel.startswith("middle_process/")
+
+
+# Shell connectors that split a command line into sequentially-run segments.
+# Only ``&&`` guarantees the previous command SUCCEEDED before the next runs —
+# so only ``&&`` lets a preceding ``cd <abs>`` guarantee the CWD of a following
+# ``rm``. Every other connector (``;`` ``&`` ``|`` ``||`` newline) runs the next
+# command REGARDLESS of whether the cd succeeded: a failed cd then misdirects a
+# relative ``rm`` to whatever the real CWD is ("炸"). Those must be confirmed.
+_SEGMENT_SPLIT_RE = None  # lazily compiled in _split_shell_segments
+
+
+def _split_shell_segments(command: str):
+    """Split *command* into ``[(tokens, connector_before), ...]``.
+
+    ``connector_before`` is the connector token that preceded this segment
+    (``""`` for the first segment, else one of ``&&`` ``||`` ``;`` ``|`` ``&``
+    ``\\n``). Segments that fail to tokenise are skipped. Best-effort: a
+    connector char inside a quoted path may mis-split, but that errs toward
+    flagging (fail-safe), which is the intended direction here.
+    """
+    import re as _re
+    global _SEGMENT_SPLIT_RE
+    if _SEGMENT_SPLIT_RE is None:
+        # Order matters: match two-char connectors before their one-char prefix.
+        _SEGMENT_SPLIT_RE = _re.compile(r"(&&|\|\||;|\||&|\n)")
+
+    import shlex as _shlex
+
+    raw_parts = _SEGMENT_SPLIT_RE.split(command)
+    segments = []
+    connector = ""
+    for idx, part in enumerate(raw_parts):
+        if idx % 2 == 1:
+            # This is a captured connector; it precedes the NEXT segment.
+            connector = part
+            continue
+        seg = part.strip()
+        if not seg:
+            continue
+        try:
+            tokens = _shlex.split(seg, posix=True)
+        except ValueError:
+            tokens = seg.split()
+        if tokens:
+            segments.append((tokens, connector))
+        connector = ""
+    return segments
+
+
+def _strip_cmd_quotes(tok: str) -> str:
+    if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ("'", '"'):
+        return tok[1:-1]
+    return tok
+
+
+def check_workdir_material_command(command: str) -> tuple:
+    """Detect commands that delete/move deliverable materials inside a
+    ``*_preprocess_work_dir/`` — including the CWD-dependent ``cd X && rm Y``
+    form that static write-target extraction alone cannot resolve.
+
+    Returns ``(True, description)`` when a deletion-class command (rm/mv/shred/
+    truncate) touches a non-``middle_process/`` path inside a work_dir, OR when
+    a ``cd`` into a work_dir is chained to such a command by a connector that
+    does NOT short-circuit on cd-failure (``;`` ``&`` ``|`` ``||``) — because a
+    failed cd would then misdirect the delete to an unknown directory. Returns
+    ``(False, None)`` otherwise. This is a *confirmable* signal (approval
+    prompt), NOT an unconditional block.
+
+    ``middle_process/`` (and its subtree) is exempt ONLY when the target can be
+    proven to land there — an absolute middle_process path, or a relative one
+    under a ``cd <abs>/middle_process &&`` that guarantees the CWD. A relative
+    middle_process delete reached through a non-``&&`` connector is still
+    flagged, since a failed cd makes even that dangerous.
+    """
+    if not command or not command.strip():
+        return (False, None)
+
+    # Fast pre-filter: a deletion-class verb must appear somewhere. A benign
+    # `cp x work_dir/plan/y` (which only *adds* a file) never prompts.
+    import re as _re
+
+    verb_re = _re.compile(
+        r"(?:^|[;&|\n`]|\$\()\s*(?:sudo\s+(?:-[^\s]+\s+)*)?(rm|mv|shred|truncate)\b",
+        _re.IGNORECASE,
+    )
+    if not verb_re.search(command):
+        return (False, None)
+
+    segments = _split_shell_segments(command)
+
+    # CWD guaranteed by a preceding `cd <abs> &&`. None when unknown.
+    guaranteed_cwd: Optional[str] = None
+    # A `cd` into a work_dir reached via a NON-`&&` connector: a subsequent
+    # relative delete cannot be proven safe (failed cd misdirects it).
+    cd_into_workdir_unsafe = False
+
+    for tokens, connector_before in segments:
+        # A connector other than `&&` before this segment breaks any CWD
+        # guarantee carried from the previous `cd`.
+        if connector_before and connector_before != "&&":
+            guaranteed_cwd = None
+
+        verb = tokens[0].lstrip("-").lower()
+        args = tokens[1:]
+
+        if verb == "cd":
+            positional = [
+                _strip_cmd_quotes(a) for a in args
+                if a and not a.startswith("-")
+            ]
+            target = positional[0] if positional else ""
+            if target and os.path.isabs(target):
+                resolved = os.path.normpath(target)
+            elif target and guaranteed_cwd:
+                resolved = os.path.normpath(os.path.join(guaranteed_cwd, target))
+            else:
+                resolved = None  # relative cd with unknown base
+            continue_unsafe = _workdir_relpath(resolved) is not None if resolved else False
+            # The connector AFTER this cd is the connector_before of the NEXT
+            # segment; we decide guarantee there. Here we only record intent.
+            guaranteed_cwd = resolved
+            # If this cd targets a work_dir and it will be followed by a
+            # non-&& connector, later relative deletes are unsafe. We can't see
+            # the trailing connector from here, so record the workdir-ness and
+            # let the delete branch check whether a guarantee survived.
+            if continue_unsafe:
+                cd_into_workdir_unsafe = True
+            continue
+
+        if verb in _WORKDIR_MUTATING_VERBS:
+            positional = [
+                _strip_cmd_quotes(a) for a in args
+                if a and not a.startswith("-")
+            ]
+            # chmod/chown-style leading mode arg does not apply to these verbs.
+            for raw in positional:
+                if os.path.isabs(raw):
+                    resolved = os.path.normpath(raw)
+                    hit = _workdir_relpath(resolved)
+                    if hit is None:
+                        continue
+                    work_dir_name, rel = hit
+                    if _is_middle_process_rel(rel):
+                        continue
+                    shown = rel if rel else work_dir_name
+                    return (
+                        True,
+                        f"delete/move of preprocess work_dir material: {shown} "
+                        f"(inside {work_dir_name})",
+                    )
+                else:
+                    # Relative delete target.
+                    if guaranteed_cwd is not None:
+                        # CWD guaranteed by `cd <abs> &&`: resolve & match.
+                        resolved = os.path.normpath(
+                            os.path.join(guaranteed_cwd, raw)
+                        )
+                        hit = _workdir_relpath(resolved)
+                        if hit is None:
+                            continue
+                        work_dir_name, rel = hit
+                        if _is_middle_process_rel(rel):
+                            continue
+                        shown = rel if rel else work_dir_name
+                        return (
+                            True,
+                            f"delete/move of preprocess work_dir material: "
+                            f"{shown} (inside {work_dir_name})",
+                        )
+                    elif cd_into_workdir_unsafe:
+                        # A `cd` into a work_dir was chained by a connector that
+                        # does not short-circuit on cd-failure. If that cd fails
+                        # this relative delete runs in the wrong directory — we
+                        # cannot prove it is safe, so require confirmation.
+                        return (
+                            True,
+                            "delete inside a preprocess work_dir via `cd … ; rm` "
+                            "(unguarded cd — a failed cd would misdirect the "
+                            "delete); confirm the target path",
+                        )
+                    # else: no work_dir context; leave generic `rm -rf *` to the
+                    # recursive-delete DANGEROUS_PATTERN.
 
     return (False, None)
 
@@ -644,7 +883,9 @@ class _ApprovalEntry:
 
 
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
-_gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
+# session_key → callable(approval_data). Typed as Callable so the call site is
+# not flagged; only callables are ever stored (see register_gateway_notify).
+_gateway_notify_cbs: dict[str, Callable] = {}
 
 
 def register_gateway_notify(session_key: str, cb) -> None:
@@ -1011,7 +1252,7 @@ Respond with exactly one word: APPROVE, DENY, or ESCALATE"""
             task="approval",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=16,
+            max_tokens=4096,
         )
 
         answer = (response.choices[0].message.content or "").strip().upper()
@@ -1240,7 +1481,12 @@ def check_all_command_guards(command: str, env_type: str,
     # inspect the explanation and approve if they understand the risk.
     if tirith_result["action"] in {"block", "warn"}:
         findings = tirith_result.get("findings") or []
-        rule_id = findings[0].get("rule_id", "unknown") if findings else "unknown"
+        # findings come from parsing the tirith binary's JSON stdout, so an
+        # element is *usually* a dict but a malformed run could yield a string
+        # or other scalar. Guard the .get() so a bad finding degrades rule_id
+        # to "unknown" instead of raising AttributeError mid-approval.
+        first = findings[0] if findings else None
+        rule_id = first.get("rule_id", "unknown") if isinstance(first, dict) else "unknown"
         tirith_key = f"tirith:{rule_id}"
         tirith_desc = _format_tirith_description(tirith_result)
         if not is_approved(session_key, tirith_key):
@@ -1249,6 +1495,15 @@ def check_all_command_guards(command: str, env_type: str,
     if is_dangerous:
         if not is_approved(session_key, pattern_key):
             warnings.append((pattern_key, description, False))
+
+    # Preprocess work_dir material protection — deleting/moving deliverable
+    # materials (plan/, code/, preprocessed_output/, …) is confirmable.
+    # middle_process/ is exempt. This is an approvable warning, not a block.
+    material_flagged, material_desc = check_workdir_material_command(command)
+    if material_flagged:
+        material_key = "workdir-material-delete"
+        if not is_approved(session_key, material_key):
+            warnings.append((material_key, material_desc, False))
 
     # Nothing to warn about
     if not warnings:
@@ -1355,9 +1610,12 @@ def check_all_command_guards(command: str, env_type: str,
                 timeout = 300
 
             try:
-                from easybci_lib.tools.environments.base import touch_activity_if_due
+                from easybci_lib.tools.environments.base import (
+                    touch_activity_if_due as _imported_touch,
+                )
+                _touch_cb: Optional[Callable] = _imported_touch
             except Exception:  # pragma: no cover
-                touch_activity_if_due = None
+                _touch_cb = None
 
             _now = time.monotonic()
             _deadline = _now + max(timeout, 0)
@@ -1373,8 +1631,8 @@ def check_all_command_guards(command: str, env_type: str,
                 if entry.event.wait(timeout=min(1.0, _remaining)):
                     resolved = True
                     break
-                if touch_activity_if_due is not None:
-                    touch_activity_if_due(
+                if _touch_cb is not None:
+                    _touch_cb(
                         _activity_state, "waiting for user approval"
                     )
 

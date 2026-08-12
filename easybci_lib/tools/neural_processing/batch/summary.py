@@ -17,6 +17,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from easybci_lib.tools.neural_processing.batch.streaming_stats import (
+    compute_streaming_metrics,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -264,13 +268,29 @@ def _populate_subject_metrics(
     try:
         path = Path(output_path)
         if path.suffix == ".nwb":
+            # Stream metrics directly off the lazy h5py Dataset — never load the
+            # whole recording (a single sEEG NWB is ~7 GB; the old data[:]/.T
+            # here OOM-killed the host mid-batch). The IO context must stay open
+            # for the whole reduction (h5py reads are lazy). See streaming_stats.
             from pynwb import NWBHDF5IO
             with NWBHDF5IO(str(path), "r") as _io:
                 _nwb = _io.read()
                 _acq = _nwb.acquisition
                 _es_name = "preprocessed" if "preprocessed" in _acq else next(iter(_acq))
-                data = np.asarray(_acq[_es_name].data[:]).T
-        elif path.suffix == ".pkl":
+                _dset = _acq[_es_name].data  # h5py.Dataset, (n_samp, n_ch), lazy
+                metrics = compute_streaming_metrics(_dset)
+            subject.channel_variance_mean = metrics.channel_variance_mean
+            subject.channel_variance_std = metrics.channel_variance_std
+            subject.n_channels = metrics.n_channels
+            subject.snr_db = metrics.snr_db
+            subject.artifact_ratio = metrics.artifact_ratio
+            _populate_bad_channels_from_qc(subject, path)
+            return
+
+        # .pkl / .npz hold already-epoched arrays, usually far smaller than raw
+        # NWB. Load them (best-effort) and route through the same numeric core
+        # via a transposed view so results stay consistent with the NWB path.
+        if path.suffix == ".pkl":
             import pickle
             with open(path, "rb") as f:
                 data_dict = pickle.load(f)
@@ -284,67 +304,38 @@ def _populate_subject_metrics(
         if data is None:
             return
 
+        data = np.asarray(data)
         if data.ndim < 2:
             return
+        if data.ndim == 3:
+            data = data.reshape(-1, data.shape[-1])
 
-        # Channel variance
-        ch_vars = np.var(data, axis=-1)
-        if ch_vars.ndim > 1:
-            ch_vars = ch_vars.mean(axis=0)
-        subject.channel_variance_mean = float(np.mean(ch_vars))
-        subject.channel_variance_std = float(np.std(ch_vars))
-        subject.n_channels = data.shape[0] if data.ndim == 2 else data.shape[1]
-
-        # SNR estimate (signal power / noise power, using high-pass residual as noise proxy)
-        subject.snr_db = _estimate_snr_db(data)
-
-        # Artifact ratio (proportion of time points exceeding 5*MAD)
-        subject.artifact_ratio = _estimate_artifact_ratio(data)
+        # data is (n_channels, n_samples); streaming source wants (n_samp, n_ch).
+        metrics = compute_streaming_metrics(np.ascontiguousarray(data.T))
+        subject.channel_variance_mean = metrics.channel_variance_mean
+        subject.channel_variance_std = metrics.channel_variance_std
+        subject.n_channels = metrics.n_channels
+        subject.snr_db = metrics.snr_db
+        subject.artifact_ratio = metrics.artifact_ratio
 
         # Also try to read QC result from json
-        qc_path = path.parent / "qc_result.json"
-        if qc_path.exists():
-            try:
-                qc_data = json.loads(qc_path.read_text(encoding="utf-8"))
-                bad_chs = qc_data.get("bad_channels", [])
-                if bad_chs:
-                    subject.bad_channels = bad_chs[:10]
-            except (json.JSONDecodeError, OSError):
-                pass
+        _populate_bad_channels_from_qc(subject, path)
 
     except Exception as exc:
         logger.debug("Failed to compute metrics for %s: %s", subject.subject_id, exc)
 
 
-def _estimate_snr_db(data: np.ndarray) -> float:
-    """Estimate SNR in dB using variance ratio (signal vs high-frequency noise)."""
-    if data.ndim == 3:
-        data = data.reshape(-1, data.shape[-1])
-
-    total_var = np.var(data)
-    # Estimate noise as high-frequency component (diff approximation)
-    noise_var = np.var(np.diff(data, axis=-1)) / 2.0
-    signal_var = max(total_var - noise_var, 1e-12)
-
-    if noise_var < 1e-12:
-        return 30.0  # effectively noiseless
-
-    snr = signal_var / noise_var
-    return float(10 * np.log10(max(snr, 1e-6)))
-
-
-def _estimate_artifact_ratio(data: np.ndarray) -> float:
-    """Estimate artifact ratio as fraction of samples exceeding 5*MAD."""
-    if data.ndim == 3:
-        data = data.reshape(-1, data.shape[-1])
-
-    median = np.median(data, axis=-1, keepdims=True)
-    mad = np.median(np.abs(data - median), axis=-1, keepdims=True)
-    mad = np.maximum(mad, 1e-12)
-
-    threshold = 5.0 * mad
-    artifacts = np.abs(data - median) > threshold
-    return float(np.mean(artifacts))
+def _populate_bad_channels_from_qc(subject: SubjectQCSummary, path: Path) -> None:
+    """Read sibling qc_result.json (if present) for a bad-channel list."""
+    qc_path = path.parent / "qc_result.json"
+    if qc_path.exists():
+        try:
+            qc_data = json.loads(qc_path.read_text(encoding="utf-8"))
+            bad_chs = qc_data.get("bad_channels", [])
+            if bad_chs:
+                subject.bad_channels = bad_chs[:10]
+        except (json.JSONDecodeError, OSError):
+            pass
 
 
 def _compute_group_stats(subjects: List[SubjectQCSummary]) -> GroupStats:
@@ -592,3 +583,60 @@ def save_batch_summary(
         pass
 
     return result
+
+
+def summarize_adaptive(batch_result: dict) -> dict:
+    """Build an auditable summary for an adaptive batch run.
+
+    Per-file: QC grade + baseline status/warnings + which slots were adapted +
+    success/out-of-range. Aggregate: counts. Advisory only — baseline warnings
+    do NOT change pass/fail (design 04: no hard gate).
+    """
+    results = batch_result.get("results", []) or []
+    per_file: list = []
+    n_warn = n_oor = 0
+    for r in results:
+        if not r.get("success"):
+            oor = bool(r.get("out_of_range"))
+            n_oor += 1 if oor else 0
+            per_file.append({
+                "input": r.get("input", "?"), "status": "failed",
+                "out_of_range": oor,
+                "reasons": r.get("reasons") or ([r["error"]] if r.get("error") else []),
+            })
+            continue
+        base = r.get("baseline", {}) or {}
+        status = base.get("status", "no_baseline")
+        warns = base.get("warnings", []) or []
+        if status == "baseline_warning":
+            n_warn += 1
+        per_file.append({
+            "input": r.get("input", "?"), "status": "ok",
+            "grade": r.get("grade", "?"),
+            "baseline_status": status,
+            "baseline_warnings": [w.get("note", "") for w in warns],
+            "adapted_slots": [s.get("param") for s in (r.get("adaptation_report") or [])],
+            "output": r.get("output", ""),
+        })
+    n_passed = int(batch_result.get("passed", sum(1 for r in results if r.get("success"))))
+    n_failed = int(batch_result.get("failed", len(results) - n_passed))
+    lines = [
+        f"Adaptive batch: skill={batch_result.get('skill', '?')}",
+        f"  total={batch_result.get('total', len(results))} "
+        f"passed={n_passed} failed={n_failed}",
+        f"  baseline_warnings={n_warn} out_of_range={n_oor}",
+    ]
+    for row in per_file:
+        if row["status"] == "failed":
+            lines.append(f"  ✗ {row['input']}: {'; '.join(row.get('reasons', []))}")
+        else:
+            tag = "⚠ " if row["baseline_status"] == "baseline_warning" else "  "
+            lines.append(
+                f"{tag}{row['input']}: grade={row['grade']} "
+                f"baseline={row['baseline_status']} "
+                f"adapted={','.join(x for x in row['adapted_slots'] if x)}")
+    return {
+        "per_file": per_file, "n_passed": n_passed, "n_failed": n_failed,
+        "n_baseline_warnings": n_warn, "n_out_of_range": n_oor,
+        "summary_text": "\n".join(lines),
+    }

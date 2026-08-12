@@ -56,6 +56,17 @@ class ProvenPipelineEntry:
     # mismatch (e.g. a feature_extraction pipeline being reused for
     # online_inference). See proven_match_dimensions._score_analysis_goal.
     analysis_goal: str = ""
+    # Reference-import extension blocks (P2 writes them into frontmatter
+    # metadata; empty on all non-reference / legacy skills). Surfaced here so
+    # the P3 adaptive-reuse layer can recompute numeric params per recording.
+    source_kind: str = ""
+    reference_origin: str = ""
+    adaptation_slots: List[Dict[str, Any]] = field(default_factory=list)
+    qc_baselines: Dict[str, Any] = field(default_factory=dict)
+    # Gold reject keywords (reference_import only) — drive the reject_by_labels
+    # step so labelled windows are excised per recording instead of dropping the
+    # whole file. Empty on non-reference / legacy skills.
+    reject_keywords: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -73,6 +84,10 @@ class ProvenPipelineEntry:
             "contributed_at": self.contributed_at,
             "cohort_tag": self.cohort_tag,
             "analysis_goal": self.analysis_goal,
+            "source_kind": self.source_kind,
+            "reference_origin": self.reference_origin,
+            "adaptation_slots": self.adaptation_slots,
+            "qc_baselines": self.qc_baselines,
         }
 
 
@@ -90,57 +105,103 @@ class MatchResult:
         return d
 
 
-def find_proven_pipelines_dir() -> Optional[Path]:
-    """Locate the proven-pipelines directory. Checks multiple locations."""
-    # 1. Relative to this file (inside the repo)
-    repo_dir = Path(__file__).resolve().parent.parent.parent / "skills" / "proven-pipelines"
-    if repo_dir.is_dir():
-        return repo_dir
+def find_all_proven_pipelines_dirs() -> List[Path]:
+    """Return every existing proven-pipelines directory, in scan order.
 
-    # 2. Under EASYBCI_HOME
+    Crystallized skills are written by ``skill_manager_tool`` with
+    ``category="proven-pipelines"`` to ``$EASYBCI_HOME/skills/proven-pipelines``
+    (see ``_resolve_skill_dir``). The repo also bundles a seed directory at
+    ``easybci_lib/skills/proven-pipelines`` (holds only ``DESCRIPTION.md``).
+
+    Historically this function returned the *first* existing candidate, so the
+    always-present repo seed dir shadowed the user-space directory and 100% of
+    crystallized skills were invisible to ``scan_proven_pipelines`` /
+    ``match_proven_pipelines`` / ``batch_process_adaptive``. We now collect
+    *all* existing candidates and scan the union.
+    """
+    candidates: List[Path] = []
+
+    # 1. User-space crystallize target — where import_reference / crystallize
+    #    actually write (get_skills_dir()/proven-pipelines, no "bci/" segment).
     try:
         from easybci_lib.constants import get_skills_dir
-        home_dir = get_skills_dir() / "bci" / "proven-pipelines"
-        if home_dir.is_dir():
-            return home_dir
+        candidates.append(get_skills_dir() / "proven-pipelines")
+        # Legacy/alternate layout kept for back-compat with older writes.
+        candidates.append(get_skills_dir() / "bci" / "proven-pipelines")
     except ImportError:
         pass
 
-    # 3. Try skills/bci/proven-pipelines relative to repo
-    alt_dir = Path(__file__).resolve().parent.parent.parent / "skills" / "bci" / "proven-pipelines"
-    if alt_dir.is_dir():
-        return alt_dir
+    # 2. Repo-bundled seed directory (relative to this file).
+    repo_root = Path(__file__).resolve().parent.parent.parent / "skills"
+    candidates.append(repo_root / "proven-pipelines")
+    candidates.append(repo_root / "bci" / "proven-pipelines")
 
-    return None
+    seen: set = set()
+    dirs: List[Path] = []
+    for cand in candidates:
+        try:
+            resolved = cand.resolve()
+        except OSError:
+            resolved = cand
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if cand.is_dir():
+            dirs.append(cand)
+    return dirs
+
+
+def find_proven_pipelines_dir() -> Optional[Path]:
+    """Locate a proven-pipelines directory (first existing candidate).
+
+    Prefer :func:`find_all_proven_pipelines_dirs` — this single-dir variant is
+    kept for back-compat. Ordering now puts the user-space crystallize target
+    first so crystallized skills are no longer shadowed by the repo seed dir.
+    """
+    dirs = find_all_proven_pipelines_dirs()
+    return dirs[0] if dirs else None
 
 
 def scan_proven_pipelines(directory: Optional[Path] = None) -> List[ProvenPipelineEntry]:
-    """Scan the proven-pipelines directory and parse all entries.
+    """Scan the proven-pipelines directory/directories and parse all entries.
 
     Parameters
     ----------
     directory : Path, optional
-        Override directory to scan. If None, auto-discovers.
+        Override directory to scan. If None, auto-discovers and scans *every*
+        existing proven-pipelines location (see
+        :func:`find_all_proven_pipelines_dirs`), de-duplicating by skill name
+        (first occurrence wins).
 
     Returns
     -------
     List of ProvenPipelineEntry with metadata extracted from YAML frontmatter.
     """
-    if directory is None:
-        directory = find_proven_pipelines_dir()
-    if directory is None or not directory.is_dir():
+    if directory is not None:
+        scan_dirs = [directory] if directory.is_dir() else []
+    else:
+        scan_dirs = find_all_proven_pipelines_dirs()
+    if not scan_dirs:
         return []
 
     entries = []
-    for md_file in sorted(directory.glob("**/*.md")):
-        if md_file.name in ("DESCRIPTION.md", "README.md"):
-            continue
-        entry = _parse_proven_file(md_file)
-        if entry is None:
-            continue
-        entries.append(entry)
+    seen_names: set = set()
+    for scan_dir in scan_dirs:
+        for md_file in sorted(scan_dir.glob("**/*.md")):
+            if md_file.name in ("DESCRIPTION.md", "README.md"):
+                continue
+            entry = _parse_proven_file(md_file)
+            if entry is None:
+                continue
+            if entry.name in seen_names:
+                continue
+            seen_names.add(entry.name)
+            entries.append(entry)
 
-    logger.debug("Scanned %d proven pipeline entries from %s", len(entries), directory)
+    logger.debug(
+        "Scanned %d proven pipeline entries from %s",
+        len(entries), [str(d) for d in scan_dirs],
+    )
     return entries
 
 
@@ -164,7 +225,7 @@ def _parse_proven_file(filepath: Path) -> Optional[ProvenPipelineEntry]:
         file_path=str(filepath),
         description=frontmatter.get("description", ""),
         modality=_first_item(metadata.get("modalities", [])),
-        paradigm=_first_item(metadata.get("paradigms", [])),
+        paradigm=_first_item(metadata.get("paradigm") or metadata.get("paradigms", [])),
         proven_date=str(metadata.get("proven_date", "")),
         source_format=str(metadata.get("source_format", "")),
         qc_passed=bool(metadata.get("qc_passed", True)),
@@ -174,11 +235,18 @@ def _parse_proven_file(filepath: Path) -> Optional[ProvenPipelineEntry]:
         contributed_at=str(metadata.get("contributed_at", "")),
         cohort_tag=str(metadata.get("cohort_tag", "")),
         analysis_goal=str(metadata.get("analysis_goal", "")).strip(),
+        source_kind=str(metadata.get("source_kind", "")).strip(),
+        reference_origin=str(metadata.get("reference_origin", "")).strip(),
+        adaptation_slots=list(metadata.get("adaptation_slots", []) or []),
+        qc_baselines=dict(metadata.get("qc_baselines", {}) or {}),
+        reject_keywords=[str(k) for k in (metadata.get("reject_keywords", []) or [])],
     )
 
     # Extract n_channels, frequency from body
-    entry.n_channels = _extract_int_from_body(body, r"Channels:\s*(\d+)")
-    entry.frequency_hz = _extract_float_from_body(body, r"Sampling:\s*([\d.]+)\s*Hz")
+    entry.n_channels = _extract_int_from_body(body, r"Channels:\s*\*{0,2}(\d+)")
+    entry.frequency_hz = _extract_float_from_body(
+        body, r"Sampling(?:\s*rate)?:\s*\*{0,2}([\d.]+)\s*Hz"
+    )
     entry.duration_s = _extract_float_from_body(body, r"Duration:\s*([\d.]+)\s*s")
 
     # Extract pipeline steps from body

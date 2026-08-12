@@ -578,10 +578,10 @@ async def _process_large_content_chunked(
         try:
             chunk_info = f"[Processing chunk {chunk_idx + 1} of {len(chunks)}]"
             summary = await _call_summarizer_llm(
-                chunk_content, 
-                context_str, 
-                model, 
-                max_tokens=10000,
+                chunk_content,
+                context_str,
+                model,
+                max_tokens=16384,
                 is_chunk=True,
                 chunk_info=chunk_info
             )

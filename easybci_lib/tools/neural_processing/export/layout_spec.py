@@ -91,12 +91,22 @@ class ResolvedLayoutSpec:
 CANONICAL = LayoutSpec()
 
 
-def resolve_for_goal(analysis_goal: str | None) -> ResolvedLayoutSpec:
+def resolve_for_goal(
+    analysis_goal: str | None,
+    deliverables: "list[str] | None" = None,
+) -> ResolvedLayoutSpec:
     """Return a ResolvedLayoutSpec with conditional files/flags flattened.
 
     Unknown or missing goals fall back to the safe default (no figures /
     no AI_ready), matching ``generic`` semantics. This is the same fallback
     ``check_contract`` already uses.
+
+    ``deliverables`` (when provided) is the SOURCE OF TRUTH for the AI-ready
+    expectation — it OVERRIDES the goal's legacy ``produces_ai_ready`` hint.
+    This is what decouples "does the method usually want epochs" (goal) from
+    "did the user actually ask for AI-ready this run" (deliverables). When
+    ``deliverables`` is None (legacy callers), we fall back to the goal hint so
+    behaviour is unchanged.
     """
     goal = (analysis_goal or "").strip() or "generic"
 
@@ -107,6 +117,12 @@ def resolve_for_goal(analysis_goal: str | None) -> ResolvedLayoutSpec:
         if spec is not None:
             produces_figures = bool(getattr(spec, "produces_figures", False))
             produces_ai_ready = bool(getattr(spec, "produces_ai_ready", False))
+
+    # deliverables overrides the goal's AI-ready hint (the whole point of the
+    # goal × deliverables decoupling): NWB is always produced; ai_ready is only
+    # expected when explicitly in the confirmed deliverables.
+    if deliverables is not None:
+        produces_ai_ready = "ai_ready" in deliverables
 
     code_required = list(CANONICAL.code_files_always)
     for name, flag_attr in CANONICAL.code_files_conditional.items():

@@ -24,30 +24,16 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from easybci_lib.tools.neural_processing._seed import EASYBCI_SEED
+from easybci_lib.tools.neural_processing.preprocess.operator_vocab import (
+    engine_operators as _engine_operators,
+)
 
 logger = logging.getLogger(__name__)
 
-AVAILABLE_STEPS = [
-    "pick_channels",        # Select channels by name/type/regex
-    "drop_bads",            # Remove bad channels
-    "drop_nondata_channels", # Remove marker/misc/physio (non-data) channels
-    "interpolate_bads",     # Spherical spline interpolation of bad channels
-    "car",                  # Common average reference
-    "bipolar_ref",          # Bipolar referencing (sEEG)
-    "notch",                # Notch filter + harmonics
-    "bandpass",             # Band-pass filter
-    "hilbert",              # Hilbert envelope
-    "ica",                  # ICA artifact removal (EOG/ECG)
-    "resample",             # Resample to target frequency
-    "scale",                # RobustScaler / StandardScaler / factor
-    "clip",                 # Clamp to max absolute value
-    "fill_nan",             # Replace non-finite values
-    # Feature extraction steps (require epoched 3D data)
-    "extract_psd_bands",    # PSD band power features
-    "extract_csp",          # Common Spatial Pattern features
-    "extract_tfr",          # Time-frequency representation
-    "extract_connectivity", # Functional connectivity
-]
+# Derived from the single source of truth (operator_vocab.OPERATOR_EXECUTORS),
+# NOT hand-maintained — this is what keeps the engine vocabulary from drifting
+# away from the codegen bundle's. Add/rename operators in operator_vocab only.
+AVAILABLE_STEPS = _engine_operators()
 
 STEP_FULL_NAMES = {
     "pick_channels": "Pick Channels (Channel Selection)",
@@ -66,6 +52,7 @@ STEP_FULL_NAMES = {
     "scale": "Amplitude Scaling (Normalization)",
     "clip": "Amplitude Clipping",
     "fill_nan": "Fill NaN/Inf Values",
+    "reject_by_labels": "Reject Labelled Time Segments (seizure/stim/IID)",
     "spike_sorting": "Spike Detection and Sorting",
     "extract_psd_bands": "PSD Band Power Feature Extraction",
     "extract_csp": "Common Spatial Pattern (CSP) Feature Extraction",
@@ -159,6 +146,21 @@ def preprocess(
     step_states: List[Dict[str, Any]] = [] if record_states else None
 
     for step_str in steps:
+        # Normalize operator name before dispatch: known synonyms
+        # (highpass/lowpass/bad_channels/...) are rewritten to canonical form so
+        # they are never silently skipped; truly unknown names fail loud below.
+        try:
+            from easybci_lib.tools.neural_processing.preprocess.operator_vocab import (
+                normalize_step as _normalize_step,
+                UnknownOperatorError as _UnknownOperatorError,
+            )
+            step_str, _ = _normalize_step(step_str)
+        except _UnknownOperatorError:
+            raise
+        except Exception:
+            # operator_vocab unavailable — fall back to raw name (legacy behaviour).
+            pass
+
         parts = step_str.split(":", 1)
         step_name = parts[0].strip()
         step_param = parts[1].strip() if len(parts) > 1 else ""
@@ -191,6 +193,8 @@ def preprocess(
             data_dict = _step_clip(data_dict, step_param)
         elif step_name == "fill_nan":
             data_dict = _step_fill_nan(data_dict, step_param)
+        elif step_name == "reject_by_labels":
+            data_dict = _step_reject_by_labels(data_dict, step_param, **kwargs)
         elif step_name == "pick_channels":
             data_dict = _step_pick_channels(data_dict, step_param, **kwargs)
         elif step_name == "drop_bads":
@@ -202,11 +206,14 @@ def preprocess(
         elif step_name.startswith("extract_"):
             data_dict = _step_feature_extract(data_dict, step_name, step_param, **kwargs)
         else:
-            logger.warning(
-                "Unknown step '%s' (skipping). Available: %s",
-                step_name, AVAILABLE_STEPS,
+            # Defense-in-depth backstop: names are normalized above, so
+            # reaching here means a canonical operator this engine does not
+            # implement (or a name that bypassed normalization). Fail loud —
+            # NEVER silently drop a step, which is the bug this replaces.
+            raise ValueError(
+                f"Unknown/unsupported step {step_name!r} in the runtime engine. "
+                f"Engine-supported: {AVAILABLE_STEPS}"
             )
-            continue
 
         applied.append(step_str)
 
@@ -469,6 +476,73 @@ def _step_fill_nan(d: Dict, param: str) -> Dict:
     if n_bad > 0:
         logger.warning("Replacing %d non-finite values with %s", n_bad, fill_val)
         d["data"] = np.nan_to_num(data, nan=fill_val, posinf=fill_val, neginf=fill_val)
+    return d
+
+
+def _step_reject_by_labels(d: Dict, param: str, **kwargs) -> Dict:
+    """Excise event-labelled time windows (seizure/stim/IID) from the data.
+
+    Unlike the gold workflow, which discards the ENTIRE recording when any
+    label matches, this keeps the clean remainder. Keywords are the UNION of
+    (a) the ``param`` comma-list, (b) an ``extra_reject_keywords`` kwarg the
+    agent supplies per environment, and (c) a multilingual built-in floor —
+    the floor is a starting point, never authoritative. A ``reject_pad_s``
+    kwarg (default 1.0 s) widens each excised window.
+
+    Observability: labels the union did NOT match are written to
+    ``meta['unmatched_labels']``, and the clinically suspicious subset (by
+    multilingual seizure/stim word-roots) to ``meta['suspicious_labels']`` —
+    so an unknown environment surfaces for review instead of silently passing.
+    """
+    from easybci_lib.tools.neural_processing.preprocess.label_reject import (
+        DEFAULT_REJECT_KEYWORDS,
+        merge_keywords,
+        label_reject_mask,
+        collect_unmatched_labels,
+        flag_suspicious_labels,
+    )
+    param_kws = [k.strip() for k in (param or "").split(",") if k.strip()]
+    extra_kws = kwargs.get("extra_reject_keywords") or []
+    keywords = merge_keywords(param_kws, extra_kws, DEFAULT_REJECT_KEYWORDS)
+    if not keywords:
+        return d
+    data = d["data"]
+    if data is None or data.ndim < 2:
+        return d
+    sfreq = float(d.get("frequency") or 0.0)
+    n_samples = int(data.shape[1])
+    annotations = (d.get("meta") or {}).get("annotations")
+    pad_s = float(kwargs.get("reject_pad_s", 1.0))
+
+    keep = label_reject_mask(annotations, keywords, sfreq, n_samples, pad_s=pad_s)
+    n_reject = int(n_samples - int(keep.sum()))
+    meta = d.setdefault("meta", {})
+
+    # Observability: surface labels the union missed + the suspicious subset.
+    descriptions = (annotations or {}).get("description") or []
+    unmatched = collect_unmatched_labels(descriptions, keywords)
+    suspicious = flag_suspicious_labels(unmatched)
+    meta["unmatched_labels"] = unmatched
+    meta["suspicious_labels"] = suspicious
+    if suspicious:
+        logger.warning(
+            "reject_by_labels: %d unmatched label(s) look clinically suspicious "
+            "(review + extend keywords?): %s", len(suspicious), suspicious,
+        )
+
+    if n_reject > 0:
+        d["data"] = data[:, keep]
+        meta["rejected_samples"] = n_reject
+        meta["rejected_seconds"] = round(n_reject / sfreq, 3) if sfreq else 0
+        # INFO, not WARNING: excising labelled windows is the operator working
+        # as intended (not an anomaly), and it fires per-file — a WARNING here
+        # floods errors.log during batch runs.
+        logger.info(
+            "reject_by_labels: excised %d samples (%.1f s) matching keywords",
+            n_reject, (n_reject / sfreq if sfreq else 0),
+        )
+    else:
+        meta.setdefault("rejected_samples", 0)
     return d
 
 

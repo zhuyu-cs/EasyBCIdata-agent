@@ -12,6 +12,11 @@ from typing import Dict, List, Optional, Sequence, TYPE_CHECKING
 
 import numpy as np
 
+from easybci_lib.tools.neural_processing.quality.plot_style import (
+    QC_DPI_SAVE,
+    apply_qc_style,
+)
+
 if TYPE_CHECKING:
     from easybci_lib.tools.neural_processing.quality.final_view import FinalDataView
 
@@ -126,6 +131,7 @@ def _plot_timeseries_comparison(
     """
     import matplotlib.pyplot as plt
 
+    apply_qc_style()
     display_seconds = 5.0
     n_ch = before.shape[0]
     b_samples = min(before.shape[1], int(before_freq * display_seconds))
@@ -148,11 +154,12 @@ def _plot_timeseries_comparison(
         ax_top.plot(t_before, centered_b[i] + offsets_b[i],
                     color="#3b82f6", linewidth=0.4, alpha=0.8)
 
-    ax_top.set_ylabel("Channels", fontsize=10)
-    ax_top.set_title("BEFORE Preprocessing (Raw Signal)", fontsize=11,
+    ax_top.set_ylabel("Channels")
+    ax_top.set_title("BEFORE Preprocessing (Raw Signal)",
                      fontweight="bold", color="#1e40af")
     ax_top.set_yticks(offsets_b)
-    ax_top.set_yticklabels(channels[:n_ch], fontsize=max(5, 8 - n_ch // 16))
+    _ytick = plt.rcParams["ytick.labelsize"]
+    ax_top.set_yticklabels(channels[:n_ch], fontsize=max(5, _ytick - n_ch // 16))
     ax_top.set_xlim(0, display_seconds)
     ax_top.grid(True, alpha=0.2, axis="x")
 
@@ -169,12 +176,13 @@ def _plot_timeseries_comparison(
         ax_bot.plot(t_after, centered_a[i] + offsets_a[i],
                     color="#000000", linewidth=0.4, alpha=0.8)
 
-    ax_bot.set_xlabel("Time (s)", fontsize=10)
-    ax_bot.set_ylabel("Channels", fontsize=10)
-    ax_bot.set_title("AFTER Preprocessing (Processed Signal)", fontsize=11,
+    ax_bot.set_xlabel("Time (s)")
+    ax_bot.set_ylabel("Channels")
+    ax_bot.set_title("AFTER Preprocessing (Processed Signal)",
                      fontweight="bold", color="#000000")
     ax_bot.set_yticks(offsets_a)
-    ax_bot.set_yticklabels(channels[:n_ch_after], fontsize=max(5, 8 - n_ch_after // 16))
+    ax_bot.set_yticklabels(channels[:n_ch_after],
+                           fontsize=max(5, _ytick - n_ch_after // 16))
     ax_bot.set_xlim(0, display_seconds)
     ax_bot.grid(True, alpha=0.2, axis="x")
 
@@ -184,7 +192,7 @@ def _plot_timeseries_comparison(
         if len(removed_channels) > 6:
             preview += f", … (+{len(removed_channels) - 6})"
         suptitle += f"\nRemoved {len(removed_channels)} channel(s): {preview}"
-    fig.suptitle(suptitle, fontsize=12, fontweight="bold", y=1.01)
+    fig.suptitle(suptitle, fontweight="bold", y=1.01)
     fig.tight_layout()
     return _fig_to_bytes(fig)
 
@@ -193,7 +201,7 @@ def _fig_to_bytes(fig) -> bytes:
     """Convert matplotlib figure to PNG bytes."""
     import matplotlib.pyplot as plt
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+    fig.savefig(buf, format="png", dpi=QC_DPI_SAVE, bbox_inches="tight",
                 facecolor="white", edgecolor="none")
     plt.close(fig)
     buf.seek(0)

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # File role definitions by extension/pattern
 _SIGNAL_EXTENSIONS = {
-    ".edf", ".bdf", ".gdf", ".fif", ".set", ".cnt", ".vhdr", ".eeg",
+    ".edf", ".bdf", ".gdf", ".fif", ".set", ".cnt", ".vhdr", ".eeg", ".21e",
     ".ncs", ".nev", ".ns2", ".ns3", ".ns5", ".ns6", ".plx", ".nex",
     ".xdf", ".xdfz", ".snirf", ".nirs",
     ".mat", ".h5", ".hdf5",
@@ -191,12 +191,16 @@ def _extract_identifiers(stem: str) -> Dict[str, str]:
     """
     result: Dict[str, str] = {"subject": "", "session": "", "run": ""}
 
-    # BIDS-style: sub-XX, ses-XX, run-XX
-    sub_match = re.search(r"sub[_-]?(\w+?)(?=[_\-\.]|$)", stem, re.IGNORECASE)
+    # BIDS-style: sub-XX, ses-XX, run-XX. The separator is REQUIRED — BIDS is
+    # always `sub-<label>` / `ses-<label>`. Making it optional (`sub[_-]?`) plus
+    # a lazy `\w+?` misfires on plain words: "subaru" -> "aru",
+    # "subject01" -> "ject01", "session1" -> "sion1". Word/no-separator forms
+    # (S01 / subject01 / session1) are handled by the numeric fallbacks below.
+    sub_match = re.search(r"sub[_-]([A-Za-z0-9]+)", stem, re.IGNORECASE)
     if sub_match:
         result["subject"] = sub_match.group(1)
 
-    ses_match = re.search(r"ses[_-]?(\w+?)(?=[_\-\.]|$)", stem, re.IGNORECASE)
+    ses_match = re.search(r"ses[_-]([A-Za-z0-9]+)", stem, re.IGNORECASE)
     if ses_match:
         result["session"] = ses_match.group(1)
 
@@ -204,13 +208,22 @@ def _extract_identifiers(stem: str) -> Dict[str, str]:
     if run_match:
         result["run"] = run_match.group(1)
 
-    # Fallback: S01/P01/subject01 patterns
+    # Fallback: S01/P01/subject01/subj01 patterns (no BIDS separator). \d+ so we
+    # capture the number, not a word tail: "subject01" -> "01".
     if not result["subject"]:
         fallback = re.search(
-            r"(?:^|[_\-])(S|P|sub|subj|subject)\s*(\d+)", stem, re.IGNORECASE
+            r"(?:^|[_\-])(?:subject|subj|sub|S|P)\s*(\d+)", stem, re.IGNORECASE
         )
         if fallback:
-            result["subject"] = fallback.group(2)
+            result["subject"] = fallback.group(1)
+
+    # Fallback: session1 / sess-2 word forms (no BIDS separator).
+    if not result["session"]:
+        ses_fb = re.search(
+            r"(?:^|[_\-])(?:session|sess)\s*[_\-]?(\d+)", stem, re.IGNORECASE
+        )
+        if ses_fb:
+            result["session"] = ses_fb.group(1)
 
     # Fallback: leading number pattern (01_, 001_)
     if not result["subject"]:

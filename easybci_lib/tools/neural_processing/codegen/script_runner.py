@@ -196,7 +196,7 @@ def run_script(
     work_dir: str,
     stage: Stage,
     input_path: Optional[str] = None,
-    timeout: int = 900,
+    timeout: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run the generated stage script and return a structured result.
 
@@ -205,7 +205,23 @@ def run_script(
 
     Legacy single-file mode: ``input_path=<raw>`` → ``python <stage>.py
     <raw> <work_dir>``. Script processes that one file.
+
+    ``timeout`` is a wall-clock cap on the subprocess. ``None`` / ``<=0`` →
+    unlimited (aligns with the gateway's ``EASYBCI_AGENT_TIMEOUT=0`` default;
+    long BCI batches must not be hard-killed). Set ``EASYBCI_SCRIPT_TIMEOUT_MAX``
+    for an environment-wide ceiling.
     """
+    if timeout is not None and timeout <= 0:
+        timeout = None
+    _env_cap = os.environ.get("EASYBCI_SCRIPT_TIMEOUT_MAX")
+    if _env_cap:
+        try:
+            cap = int(_env_cap)
+            if cap > 0 and (timeout is None or timeout > cap):
+                timeout = cap
+        except ValueError:
+            pass
+
     wd = Path(work_dir)
     script = wd / "code" / f"{stage}.py"
 

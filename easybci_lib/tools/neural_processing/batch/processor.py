@@ -1,5 +1,15 @@
 """Batch processor — multi-subject parallel pipeline execution.
 
+.. deprecated::
+    ``batch_process`` / ``_process_one_file`` here write a partial layout
+    (``preprocessed_output/{sub}/{ses}`` + comparison figures) with NO
+    ``code/``/``plan/``/QC/README, so their output was not reproducible. The
+    ``batch_process`` tool handler now routes through
+    ``batch/orchestrate.py:build_repro_repo`` (standard mini-repo). The pure
+    helpers ``_infer_subject_id``/``_infer_session_id``/``_expand_braces`` and
+    the checkpoint helpers are still imported elsewhere and remain supported;
+    ``batch_process``/``_process_one_file`` are retained for reference/tests.
+
 Supports:
 - Glob patterns (sub-*/eeg.fif)
 - Brace expansion ({edf,fif,set})

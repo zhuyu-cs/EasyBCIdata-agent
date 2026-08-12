@@ -190,7 +190,11 @@ def save_nwb(
     if meas_date is None:
         meas_date = _info_get(info, "meas_date")
     if meas_date is None:
-        logger.warning(
+        # INFO, not WARNING: many raw formats (e.g. Nihon Kohden) legitimately
+        # carry no recording date, and this fires once per saved file — a
+        # per-file WARNING floods errors.log during batch runs. Downgraded so
+        # it stops polluting the error log; the 1970 fallback is expected.
+        logger.info(
             "save_nwb: meas_date not found in meta or mne_info — using "
             "1970-01-01 UTC. Set raw.info['meas_date'] upstream (or pass meta["
             "'meas_date']) to get a real timestamp."

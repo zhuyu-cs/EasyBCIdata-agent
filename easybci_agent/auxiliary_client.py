@@ -1168,7 +1168,10 @@ def _try_openrouter(explicit_api_key: str = None) -> Tuple[Optional[OpenAI], Opt
     if pool_present:
         or_key = explicit_api_key or _pool_runtime_api_key(entry)
         if not or_key:
-            _mark_provider_unhealthy("openrouter", ttl=60)
+            _mark_provider_unhealthy(
+                "openrouter", ttl=60,
+                reason="no credentials configured", level=logging.DEBUG,
+            )
             return None, None
         base_url = _pool_runtime_base_url(entry, OPENROUTER_BASE_URL) or OPENROUTER_BASE_URL
         logger.debug("Auxiliary client: OpenRouter via pool")
@@ -1177,7 +1180,10 @@ def _try_openrouter(explicit_api_key: str = None) -> Tuple[Optional[OpenAI], Opt
 
     or_key = explicit_api_key or os.getenv("OPENROUTER_API_KEY")
     if not or_key:
-        _mark_provider_unhealthy("openrouter", ttl=60)
+        _mark_provider_unhealthy(
+            "openrouter", ttl=60,
+            reason="no credentials configured", level=logging.DEBUG,
+        )
         return None, None
     logger.debug("Auxiliary client: OpenRouter")
     return OpenAI(api_key=or_key, base_url=OPENROUTER_BASE_URL,
@@ -1554,23 +1560,43 @@ def _normalize_chain_label(provider: str) -> str:
     return _AUX_UNHEALTHY_LABEL_ALIASES.get(p, p)
 
 
-def _mark_provider_unhealthy(provider: str, ttl: Optional[float] = None) -> None:
-    """Mark ``provider`` as recently-402'd, hidden from chain iteration
-    until the TTL expires. Called from the payment-fallback branches in
-    ``call_llm`` and ``acall_llm`` after a confirmed payment error.
+def _mark_provider_unhealthy(
+    provider: str,
+    ttl: Optional[float] = None,
+    *,
+    reason: str = "payment / credit error",
+    level: int = logging.WARNING,
+) -> None:
+    """Mark ``provider`` unhealthy, hidden from chain iteration until the TTL
+    expires. Called from the payment-fallback branches in ``call_llm`` /
+    ``acall_llm`` after a confirmed 402 (default reason + WARNING), and from
+    ``_try_openrouter`` when the provider simply has no credentials configured
+    (``reason="no credentials configured"``, ``level=logging.DEBUG``) — a config
+    state, not a failure, so it must NOT surface as a payment warning.
+
+    Dedups on ``_aux_unhealthy_logged_at`` so a provider that is skipped on
+    every aux call in a bursty session logs at most once per 60s per label,
+    regardless of level.
     """
     label = _normalize_chain_label(provider)
     if not label:
         return
-    expires_at = time.time() + (ttl if ttl is not None else _AUX_UNHEALTHY_TTL_SECONDS)
+    ttl_secs = ttl if ttl is not None else _AUX_UNHEALTHY_TTL_SECONDS
+    expires_at = time.time() + ttl_secs
     _aux_unhealthy_until[label] = expires_at
-    logger.warning(
-        "Auxiliary: marking %s unhealthy for %ds (payment / credit error). "
-        "Subsequent auxiliary calls will skip it until %s.",
-        label,
-        int(ttl if ttl is not None else _AUX_UNHEALTHY_TTL_SECONDS),
-        time.strftime("%H:%M:%S", time.localtime(expires_at)),
-    )
+    now = time.time()
+    last = _aux_unhealthy_logged_at.get(label, 0.0)
+    if now - last >= 60:
+        _aux_unhealthy_logged_at[label] = now
+        logger.log(
+            level,
+            "Auxiliary: marking %s unhealthy for %ds (%s). "
+            "Subsequent auxiliary calls will skip it until %s.",
+            label,
+            int(ttl_secs),
+            reason,
+            time.strftime("%H:%M:%S", time.localtime(expires_at)),
+        )
 
 
 def _is_provider_unhealthy(label: str) -> bool:

@@ -494,9 +494,19 @@ export function useConversation() {
                 // overwrite `progress` (which carries stage-scope data).
                 const newEta = (payload as { eta_seconds?: number | null }).eta_seconds;
                 const conf = (payload as { confidence?: StageProgress["confidence"] }).confidence ?? "unknown";
+                // Phase-boundary re-anchor (plan / codegen stage start): the
+                // backend sends `reanchor: true` so we DISCARD the previous
+                // smoothed value and jump cleanly to the new anchor instead of
+                // EWMA-blending it with the ticked-down remainder. The floor
+                // (~10min) lives solely backend-side — no `Math.max(...)` here,
+                // so CLI and WebUI render the identical value.
+                const reanchor = (payload as { reanchor?: boolean }).reanchor === true;
                 if (typeof newEta === "number" && newEta > 0) {
                   setLatestTurnEta((prev) => ({
-                    smoothedSeconds: Math.max(240, applyEwma(newEta, prev?.smoothedSeconds ?? null)),
+                    smoothedSeconds: applyEwma(
+                      newEta,
+                      reanchor ? null : (prev?.smoothedSeconds ?? null),
+                    ),
                     emittedAtMs: Date.now(),
                     confidence: conf,
                   }));

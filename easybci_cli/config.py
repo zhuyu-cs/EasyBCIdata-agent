@@ -413,6 +413,10 @@ DEFAULT_CONFIG = {
         # The agent can run indefinitely as long as it's actively calling
         # tools or receiving API responses.  Only fires when the agent has
         # been completely idle for this duration.  0 = unlimited.
+        # For a wall-clock ceiling on generated preprocessing subprocesses
+        # (pipeline.py/qc.py/vis.py/build_ai_ready.py), set the env var
+        # EASYBCI_SCRIPT_TIMEOUT_MAX (seconds); default: unlimited, matching
+        # this gateway_timeout=0 policy.
         "gateway_timeout": 1800,
         # Graceful drain timeout for gateway stop/restart (seconds).
         # The gateway stops accepting new work, waits for running agents

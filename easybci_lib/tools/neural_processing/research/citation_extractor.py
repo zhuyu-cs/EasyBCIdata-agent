@@ -106,6 +106,38 @@ def _resolve_aux_model_id() -> str:
         return "unknown"
 
 
+def _resolve_llm_timeout(default: float = 25.0) -> float:
+    """SHORT per-call timeout for the per-citation extraction LLM call,
+    overriding the 360s ``auxiliary.web_extract.timeout`` it would inherit."""
+    try:
+        from easybci_cli.config import load_config
+
+        research = ((load_config() or {}).get("web") or {}).get("research") or {}
+        return max(0.0, float(research.get("llm_timeout_seconds", default)))
+    except Exception:  # noqa: BLE001 — config read shouldn't be fatal
+        return default
+
+
+def _resolve_extract_max_tokens(default: int = 16384) -> int:
+    """Output-token ceiling for the per-citation extraction LLM call.
+
+    The extracted JSON (a handful of parameter strings + a short quote per
+    citation) is small, but the aux model may be a REASONING model that spends
+    the budget thinking BEFORE emitting the JSON. The old 1024 ceiling let the
+    thinking phase consume it and cut the JSON mid-structure — the repair path
+    then salvaged valid JSON but dropped the tail, so citations contributed no
+    parameters to the evidence. A generous default leaves room for the answer
+    to complete after reasoning; override via ``web.research.extract_max_tokens``.
+    """
+    try:
+        from easybci_cli.config import load_config
+
+        research = ((load_config() or {}).get("web") or {}).get("research") or {}
+        return max(1024, int(research.get("extract_max_tokens", default)))
+    except Exception:  # noqa: BLE001 — config read shouldn't be fatal
+        return default
+
+
 def _parse_extract_response(text: str) -> dict | None:
     """Best-effort parse of the LLM's JSON response, reusing the robust
     parser from evidence_synthesizer."""
@@ -191,9 +223,10 @@ def extract_citation(
         response = call_llm_with_overflow_retry(
             call_llm=call_llm,
             task="web_extract",
+            timeout=_resolve_llm_timeout(),
             messages=messages,
             temperature=0.1,
-            max_tokens=1024,
+            max_tokens=_resolve_extract_max_tokens(),
             fallback_input_chars=64_000,
         )
     except Exception as exc:  # noqa: BLE001 — propagate as structured error

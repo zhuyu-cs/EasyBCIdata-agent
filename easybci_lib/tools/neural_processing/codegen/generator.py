@@ -16,6 +16,9 @@ from typing import Any, Dict, List, Optional
 
 from easybci_lib.tools.neural_processing._seed import EASYBCI_SEED
 from easybci_lib.tools.neural_processing.output.format_policy import is_invasive
+from easybci_lib.tools.neural_processing.preprocess.operator_vocab import (
+    normalize_steps as _normalize_steps,
+)
 
 try:
     from easybci_lib.tools.neural_processing.preprocess.analysis_goals import (
@@ -265,7 +268,7 @@ _PIPELINE_SCRIPT_TEMPLATE = '''"""Auto-generated preprocessing pipeline.
 EASYBCI_STEPS: {steps_repr}
 EASYBCI_GOAL: {analysis_goal}
 EASYBCI_MODALITY: {modality}
-EASYBCI_VERSION: 3
+EASYBCI_VERSION: 4
 EASYBCI_CODE_STANDARD: 0.0.1
 
 Standalone script — runs on a plain `pip install mne numpy scipy scikit-learn`
@@ -274,6 +277,7 @@ without any easybci_* dependency. See CODE_STANDARD.md Rule 15.
 Run: python pipeline.py <input_path> <work_dir>
 """
 
+import gc
 import json
 import os as _os
 import pickle
@@ -300,18 +304,113 @@ _MNE_EXTS = {{
 }}
 
 
-def _load_input(path):
-    """Return a dict with keys: data (n_ch, n_samples float32), frequency, channels, meta."""
+def _easybci_home():
+    """Locate EASYBCI_HOME the same way the app does, WITHOUT importing easybci
+    (CODE_STANDARD Rule 15 — generated scripts stay self-contained). Env var
+    wins (set by the batch orchestrator / CLI); falls back to ~/.easybci."""
+    import os
+    h = os.environ.get("EASYBCI_HOME")
+    return Path(h) if h else (Path.home() / ".easybci")
+
+
+def _discover_io_plugin(path):
+    """Return (load_callable, name) for the first registered io_loader plugin
+    whose matches(path) is True, else (None, None).
+
+    Mirrors easybci's loader_registry.find(): the agent may have written a
+    loader for a format the built-ins can't read (e.g. Nihon Kohden .EEG). The
+    generated pipeline MUST prefer it over a partial built-in reader, so the
+    reproducible repo reads data the same way the interactive session did.
+    A repo-local ``code/io_loaders/`` (bundled at export) is scanned FIRST so
+    the repo is portable, then the machine-global ``~/.easybci/io_loaders/``.
+    Each plugin file is imported in isolation; a broken one is skipped."""
+    import importlib.util as _ilu
+    _dirs = []
+    _self = globals().get("__file__")
+    if _self:
+        _dirs.append(Path(_self).resolve().parent / "io_loaders")
+    _dirs.append(_easybci_home() / "io_loaders")
+    for d in _dirs:
+        if not d.is_dir():
+            continue
+        for py in sorted(d.glob("*.py")):
+            if py.name.startswith("_"):
+                continue
+            _mod_name = "_ebci_io_" + py.stem
+            try:
+                spec = _ilu.spec_from_file_location(_mod_name, str(py))
+                mod = _ilu.module_from_spec(spec)
+                # Register BEFORE exec so decorators that resolve the owning
+                # module (e.g. @dataclass -> sys.modules[cls.__module__]) work.
+                sys.modules[_mod_name] = mod
+                try:
+                    spec.loader.exec_module(mod)
+                    matches = getattr(mod, "matches", None)
+                    load = getattr(mod, "load", None)
+                    if callable(matches) and callable(load) and bool(matches(str(path))):
+                        return load, py.stem
+                finally:
+                    sys.modules.pop(_mod_name, None)
+            except Exception:
+                continue
+    return None, None
+
+
+def _call_plugin_load(load, path, target_hz):
+    """Call a plugin's load(), passing target_hz only if its signature accepts
+    it (v1 plugins are load(path, inspect_only=False))."""
+    import inspect as _insp
+    kwargs = {{}}
+    if target_hz is not None:
+        try:
+            params = _insp.signature(load).parameters
+            if "target_hz" in params or any(
+                pp.kind == _insp.Parameter.VAR_KEYWORD for pp in params.values()):
+                kwargs["target_hz"] = target_hz
+        except (ValueError, TypeError):
+            pass
+    return load(str(path), **kwargs)
+
+
+def _load_input(path, target_hz=None):
+    """Return a dict with keys: data (n_ch, n_samples float32), frequency, channels, meta.
+
+    A registered io_loader plugin that matches `path` is tried FIRST (so custom
+    formats read correctly and load-time decimation to `target_hz` applies);
+    built-in MNE/npz/csv/pkl/nwb branches are the fallback."""
     p = Path(path)
     ext = p.suffix.lower()
+
+    _plugin_load, _plugin_name = _discover_io_plugin(p)
+    if _plugin_load is not None:
+        _res = _call_plugin_load(_plugin_load, p, target_hz)
+        if isinstance(_res, dict) and "data" in _res:
+            _res.setdefault("meta", {{}}).setdefault("loaded_by_plugin", _plugin_name)
+            return _res
+        # Plugin returned something unusable — fall through to built-ins.
+
     if ext in _MNE_EXTS or (p.is_dir() and p.suffix == ".ds"):
         import mne
         raw = mne.io.read_raw(str(p), preload=True, verbose="ERROR")
+        _meta = {{"format": "mne", "source_file": str(p)}}
+        # Carry channel types (drop_bads scaling / QC) and annotations
+        # (event markers) so per-file operators like reject_by_labels can
+        # act on them at runtime — mirrors io/loader.py.
+        try:
+            _meta["ch_types"] = list(raw.get_channel_types())
+        except Exception:
+            pass
+        if raw.annotations is not None and len(raw.annotations) > 0:
+            _meta["annotations"] = {{
+                "onset": raw.annotations.onset.tolist(),
+                "duration": raw.annotations.duration.tolist(),
+                "description": list(raw.annotations.description),
+            }}
         return {{
             "data": raw.get_data().astype(np.float32),
             "frequency": float(raw.info["sfreq"]),
             "channels": list(raw.ch_names),
-            "meta": {{"format": "mne", "source_file": str(p)}},
+            "meta": _meta,
             "_mne_info": raw.info,
         }}
     if ext in (".npz", ".npy"):
@@ -372,8 +471,21 @@ def _load_input(path):
             _nwb = _io_nwb.read()
             _es_name = "preprocessed" if "preprocessed" in _nwb.acquisition else next(iter(_nwb.acquisition))
             _es = _nwb.acquisition[_es_name]
-            _data_arr = np.asarray(_es.data[:]).T.astype(np.float32)
+            _dset_v = _es.data
             _fs = float(_es.rate)
+            # Zero-copy memmap onto the contiguous HDF5 region (chunks/compression
+            # None, float32); falls back to a full read for older chunked files.
+            _mm_v = None
+            try:
+                _off_v = _dset_v.id.get_offset()
+                if (_off_v is not None and _dset_v.chunks is None
+                        and _dset_v.compression is None
+                        and _dset_v.dtype == np.dtype("float32")):
+                    _mm_v = np.memmap(str(p), dtype=np.float32, mode="r",
+                                      offset=int(_off_v), shape=tuple(_dset_v.shape))
+            except Exception:
+                _mm_v = None
+            _data_arr = _mm_v.T if _mm_v is not None else np.asarray(_dset_v[:]).T.astype(np.float32)
             try:
                 _df = _nwb.electrodes.to_dataframe()
                 _ch_names_v = list(_df["channel_name"]) if "channel_name" in _df.columns else ["Ch{{}}".format(i) for i in range(_data_arr.shape[0])]
@@ -411,17 +523,66 @@ def _from_mne_raw(raw, prev_meta):
     }}
 
 
+def _detect_powerline_hz(data, fs):
+    """Detect mains frequency + harmonics from this file's PSD.
+
+    Mirrors easybci deep_inspect._psd_summary: 48-62 Hz band, peak must be
+    >6 dB above the median floor; harmonics ×2/3/4 under Nyquist. Returns a
+    list of notch frequencies (base + harmonics) or [] when none detected.
+    """
+    from scipy.signal import welch
+    arr = np.asarray(data, dtype=np.float64)
+    if arr.ndim != 2 or fs <= 0 or arr.shape[1] < int(fs * 4):
+        return []
+    nperseg = max(64, int(fs / 0.5))
+    avg = arr.mean(axis=0)
+    freqs, pxx = welch(avg, fs=fs, nperseg=min(nperseg, len(avg)))
+    pxx_db = 10 * np.log10(pxx + 1e-20)
+    median_db = float(np.median(pxx_db))
+    band = (freqs >= 48) & (freqs <= 62)
+    if not band.any():
+        return []
+    idx = int(np.argmax(pxx_db[band]))
+    peak_hz = float(freqs[band][idx])
+    if float(pxx_db[band][idx] - median_db) <= 6.0:
+        return []
+    out = [peak_hz]
+    for k in (2, 3, 4):
+        h = peak_hz * k
+        if h >= freqs[-1]:
+            break
+        i = int(np.argmin(np.abs(freqs - h)))
+        if pxx_db[i] - median_db > 6.0:
+            out.append(round(float(freqs[i]), 1))
+    return out
+
+
 def op_notch(d, param):
-    freq = float(param) if param else 50.0
+    """Notch filter. param='auto' detects this file's mains freq + harmonics
+    at runtime (per-file power-line detection); a numeric param notches that
+    fixed frequency. 'auto' with no detectable line noise falls back to 50 Hz.
+    """
+    if (param or "").strip().lower() == "auto":
+        freqs = _detect_powerline_hz(d["data"], float(d.get("frequency") or 0.0))
+        if not freqs:
+            freqs = [50.0]
+    else:
+        freqs = [float(param) if param else 50.0]
     raw = _to_mne_raw(d)
-    raw.notch_filter(freqs=[freq], verbose="ERROR")
+    raw.notch_filter(freqs=freqs, verbose="ERROR")
     return _from_mne_raw(raw, d.get("meta", {{}}))
 
 
 def op_bandpass(d, param):
+    # Single-sided aware, matching the runtime engine: an empty side means
+    # "no bound on that side" (None), NOT a hard-coded default. This is what
+    # lets ``highpass:X`` / ``lowpass:X`` normalize safely to ``bandpass:X,`` /
+    # ``bandpass:,X`` without silently turning into a 1-40 Hz band-pass.
     parts = (param or "").split(",")
-    lo = float(parts[0]) if len(parts) >= 1 and parts[0] else 1.0
-    hi = float(parts[1]) if len(parts) >= 2 and parts[1] else 40.0
+    lo = float(parts[0]) if len(parts) >= 1 and parts[0] else None
+    hi = float(parts[1]) if len(parts) >= 2 and parts[1] else None
+    if lo is None and hi is None:
+        return d
     raw = _to_mne_raw(d)
     raw.filter(l_freq=lo, h_freq=hi, verbose="ERROR")
     return _from_mne_raw(raw, d.get("meta", {{}}))
@@ -441,8 +602,34 @@ def op_lowpass(d, param):
     return _from_mne_raw(raw, d.get("meta", {{}}))
 
 
+_RESAMPLE_COMMON_TARGETS = [1000.0, 500.0, 512.0, 256.0, 250.0, 200.0, 128.0, 100.0]
+
+
+def _largest_safe_target(src_sfreq):
+    """Largest common resample target strictly below src (Nyquist-safe)."""
+    below = [t for t in _RESAMPLE_COMMON_TARGETS if t < src_sfreq]
+    return max(below) if below else float(int(src_sfreq))
+
+
 def op_resample(d, param):
-    target = float(param) if param else 256.0
+    """Resample. param='auto' clamps to the largest common target strictly
+    below this file's source rate (Nyquist-safe, per-file). A numeric target
+    that is >= this file's source rate is likewise clamped down rather than
+    upsampled. Mirrors easybci proven_adapt nyquist_bounded.
+    """
+    src = float(d.get("frequency") or 0.0)
+    if (param or "").strip().lower() == "auto":
+        target = _largest_safe_target(src) if src > 0 else 256.0
+    else:
+        target = float(param) if param else 256.0
+        # Only clamp DOWN when the requested target strictly exceeds source
+        # (can't upsample). target == src is a genuine no-op — critical when
+        # the loader already decimated to this exact rate at load time, so we
+        # don't accidentally drop it a second time (500==500 must NOT → 256).
+        if src > 0 and target > src:
+            target = _largest_safe_target(src)
+    if src > 0 and abs(target - src) < 1e-6:
+        return dict(d)  # already at target — skip the resample entirely
     raw = _to_mne_raw(d)
     raw.resample(sfreq=target, verbose="ERROR")
     return _from_mne_raw(raw, d.get("meta", {{}}))
@@ -510,11 +697,35 @@ def op_drop_bads(d, param):
         keep.append(i)
     if not keep:
         return dict(d)
+    kept_data = data[keep, :].astype(np.float32)
+    kept_channels = [channels[i] for i in keep]
+    # Surviving channels may still carry NaN (<=50% NaN passed the drop
+    # threshold). Interpolate those in place so NaN never propagates into
+    # later MNE-based ops. The 50% DROP threshold above is unchanged; this only
+    # cleans channels we chose to keep.
+    nan_cleaned = []
+    for r in range(kept_data.shape[0]):
+        row = kept_data[r]
+        bad = np.isnan(row)
+        if not bad.any():
+            continue
+        good = ~bad
+        if good.any():
+            xs = np.flatnonzero(good)
+            row[bad] = np.interp(np.flatnonzero(bad), xs, row[good])
+        else:
+            row[bad] = 0.0
+        kept_data[r] = row
+        nan_cleaned.append(kept_channels[r])
     out = dict(d)
-    out["data"] = data[keep, :].astype(np.float32)
-    out["channels"] = [channels[i] for i in keep]
+    out["data"] = kept_data
+    out["channels"] = kept_channels
     out["meta"] = dict(d.get("meta", {{}}))
     out["meta"]["dropped_channels"] = list(out["meta"].get("dropped_channels", [])) + dropped
+    if nan_cleaned:
+        out["meta"]["nan_interpolated_channels"] = list(
+            out["meta"].get("nan_interpolated_channels", [])
+        ) + nan_cleaned
     out.pop("_mne_info", None)  # channel set changed; rebuild on next op
     return out
 
@@ -599,6 +810,112 @@ def op_fill_nan(d, param):
     return out
 
 
+# Multilingual reject-keyword floor — frozen copy of easybci
+# DEFAULT_REJECT_KEYWORDS so the operator is self-contained. Always union'd
+# with keywords baked into the step param.
+_DEFAULT_REJECT_KEYWORDS = [
+    "Seiz", "Seizure", "Ictal", "SZ\\b", "pre-ictal", "post-ictal",
+    "epilep", "convuls",
+    "IID", "spike", "sharp wave", "polyspike", "discharge",
+    "Stim", "stimulat", "electrical stim",
+    "发作", "癫", "痫", "刺激", "电刺激", "痉挛",
+]
+
+
+def _reject_compile(keywords):
+    """Compile keywords into one word-START-boundary case-insensitive regex."""
+    parts = []
+    for kw in keywords:
+        kw = str(kw).strip()
+        if not kw:
+            continue
+        if "\\b" in kw:
+            parts.append(kw)
+        else:
+            parts.append(r"(?<![0-9A-Za-z])" + _re.escape(kw))
+    if not parts:
+        return None
+    return _re.compile("|".join(parts), _re.IGNORECASE)
+
+
+def op_reject_by_labels(d, param):
+    """Excise labelled time windows (seizure / stim / discharge) ± 1 s pad.
+
+    param is a comma-joined keyword list; it is union'd with the built-in
+    multilingual floor. Reads meta['annotations'] (onset/duration/description),
+    carried from the raw file by _load_input. No-op when a recording has no
+    annotations or no matching labels. Records rejected_seconds +
+    unmatched/suspicious labels into meta for batch diagnostics.
+    """
+    meta = dict(d.get("meta") or {{}})
+    annotations = meta.get("annotations")
+    param_kws = [k.strip() for k in (param or "").split(",") if k.strip()]
+    seen = set()
+    keywords = []
+    for kw in list(param_kws) + list(_DEFAULT_REJECT_KEYWORDS):
+        kw = str(kw).strip()
+        if kw and kw.lower() not in seen:
+            seen.add(kw.lower())
+            keywords.append(kw)
+    data = np.asarray(d["data"])
+    if not annotations or data.ndim < 2 or not keywords:
+        out = dict(d)
+        out["meta"] = meta
+        meta.setdefault("rejected_samples", 0)
+        return out
+    sfreq = float(d.get("frequency") or 0.0)
+    n_samples = int(data.shape[1])
+    pad_s = 1.0
+    rx = _reject_compile(keywords)
+    keep = np.ones(n_samples, dtype=bool)
+    # Excised windows in ORIGINAL SECONDS (time-base invariant). Downstream
+    # epoching (build_ai_ready) must remap event onsets across these gaps;
+    # seconds survive a later resample where sample indices would not. See
+    # _remap_events_after_reject.
+    rejected_intervals_s = []
+    if rx is not None and sfreq > 0:
+        onsets = annotations.get("onset") or []
+        durations = annotations.get("duration") or []
+        descriptions = annotations.get("description") or []
+        for i, desc in enumerate(descriptions):
+            if rx.search(str(desc)) is None:
+                continue
+            onset = float(onsets[i]) if i < len(onsets) else 0.0
+            dur = float(durations[i]) if i < len(durations) else 0.0
+            start = max(0, int(np.floor((onset - pad_s) * sfreq)))
+            stop = min(n_samples, int(np.ceil((onset + dur + pad_s) * sfreq)))
+            if stop > start:
+                keep[start:stop] = False
+    # Derive merged excised intervals from the final keep-mask (adjacent /
+    # overlapping windows collapse into one), expressed in seconds so the map
+    # is correct even after a subsequent resample changes the sample rate.
+    if sfreq > 0 and not keep.all():
+        flip = np.diff(np.concatenate(([1], keep.view(np.int8), [1])))
+        starts = np.where(flip == -1)[0]
+        stops = np.where(flip == 1)[0]
+        rejected_intervals_s = [
+            [round(float(s) / sfreq, 6), round(float(e) / sfreq, 6)]
+            for s, e in zip(starts, stops)
+        ]
+    # Observability: labels the keyword union missed.
+    descriptions = (annotations or {{}}).get("description") or []
+    unmatched = sorted({{str(l) for l in descriptions
+                        if rx is None or rx.search(str(l)) is None}})
+    meta["unmatched_labels"] = unmatched
+    n_reject = int(n_samples - int(keep.sum()))
+    out = dict(d)
+    if n_reject > 0:
+        out["data"] = data[:, keep]
+        meta["rejected_samples"] = n_reject
+        meta["rejected_seconds"] = round(n_reject / sfreq, 3) if sfreq else 0
+        meta["rejected_intervals"] = rejected_intervals_s
+        out.pop("_mne_info", None)  # sample count changed; rebuild on next op
+    else:
+        meta.setdefault("rejected_samples", 0)
+    out["meta"] = meta
+    return out
+
+
 def op_threshold_spike(d, param):
     """MAD-based extracellular spike detection.
 
@@ -677,8 +994,6 @@ def op_mua_binning(d, param):
 _OPS = {{
     "notch": op_notch,
     "bandpass": op_bandpass,
-    "highpass": op_highpass,
-    "lowpass": op_lowpass,
     "resample": op_resample,
     "car": op_car,
     "ica": op_ica,
@@ -687,6 +1002,7 @@ _OPS = {{
     "scale": op_scale,
     "clip": op_clip,
     "fill_nan": op_fill_nan,
+    "reject_by_labels": op_reject_by_labels,
     "threshold_spike": op_threshold_spike,
     "mua_binning": op_mua_binning,
 }}
@@ -703,11 +1019,33 @@ def _apply_step(d, step):
     param = param.strip()
     fn = _OPS.get(op_name)
     if fn is None:
-        print("[pipeline] WARNING: unknown step {{!r}} — skipping".format(step), file=sys.stderr)
-        return d
+        # Fail loud — steps are normalized to canonical names before this script
+        # is generated, so an unknown op here means a hand-edit introduced a name
+        # this bundle cannot run. NEVER silently skip a core preprocessing step.
+        raise ValueError(
+            "[pipeline] unknown/unsupported step {{!r}} — refusing to silently "
+            "skip. Supported: {{}}".format(step, sorted(_OPS))
+        )
     if op_name in _NO_PARAM_OPS:
         return fn(d)
     return fn(d, param)
+
+
+def _resample_target_from_steps(steps):
+    """Return the concrete resample target (Hz) from the step list, or None.
+    ``resample:auto`` has no fixed target → None (loader reads native)."""
+    for s in steps:
+        if not isinstance(s, str):
+            continue
+        kind, _, param = s.partition(":")
+        if kind.strip() == "resample":
+            param = param.strip().lower()
+            if param and param != "auto":
+                try:
+                    return float(param)
+                except ValueError:
+                    return None
+    return None
 
 
 def _session_id_from_path(p):
@@ -764,6 +1102,190 @@ def _load_inputs(work_dir, argv):
     }}]
 
 
+# --------------------------------------------------------------------------
+# Cross-instance memory gate (stdlib-only inline copy of
+# batch/global_gate.py — Rule 15: generated code is self-contained). Reserves a
+# file's estimated peak footprint in a machine-wide ledger BEFORE loading, so
+# two independent easybci instances on one host cannot both load a ~30 GB
+# recording and OOM the machine. Keep in sync with global_gate.py.
+# --------------------------------------------------------------------------
+def _gate_ledger_path():
+    return _easybci_home() / "batch" / "mem_ledger.json"
+
+
+def _gate_budget_mb():
+    import os
+    env = os.environ.get("EASYBCI_MEMORY_BUDGET_MB")
+    if env:
+        try:
+            v = float(env)
+            if v > 0:
+                return v * 0.7
+        except ValueError:
+            pass
+    total = None
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1]) / 1024  # kB -> MB
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
+    if total is None:
+        total = 8000.0
+    return total * 0.7
+
+
+def _gate_stale_s():
+    import os
+    env = os.environ.get("EASYBCI_GATE_STALE_S")
+    if env:
+        try:
+            v = float(env)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return 3600.0
+
+
+def _gate_pid_alive(pid):
+    import os
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _gate_peak_mb(n_channels, frequency, duration_s, has_ica, target_hz=None):
+    n_ch = int(n_channels or 0)
+    fs = float(frequency or 0.0)
+    dur = float(duration_s or 0.0)
+    if n_ch <= 0 or fs <= 0 or dur <= 0:
+        return 0.0
+    eff_fs = fs
+    if target_hz and target_hz > 0 and target_hz < fs:
+        eff_fs = float(target_hz)
+    overhead = 8.0 if has_ica else 3.0
+    return (n_ch * eff_fs * dur * 4 * overhead) / (1024 * 1024)  # float32
+
+
+def _gate_try_reserve(peak_mb, file_id, token, now):
+    import fcntl
+    import os
+    p = _gate_ledger_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = p.with_suffix(".json.lock")
+    fd = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ledger = {{}}
+        if p.is_file():
+            try:
+                _d = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(_d, dict):
+                    ledger = _d
+            except Exception:
+                ledger = {{}}
+        stale = _gate_stale_s()
+        kept = {{}}
+        for _tk, _r in ledger.items():
+            if not isinstance(_r, dict):
+                continue
+            _rpid = int(_r.get("pid", 0) or 0)
+            _rts = float(_r.get("ts", 0.0) or 0.0)
+            if _rpid and not _gate_pid_alive(_rpid):
+                continue
+            if now - _rts > stale:
+                continue
+            kept[_tk] = _r
+        ledger = kept
+        budget = _gate_budget_mb()
+        reserved = sum(float(_r.get("reserved_mb", 0.0) or 0.0)
+                       for _r in ledger.values() if isinstance(_r, dict))
+        admitted = False
+        # Admit if it fits, OR if nothing else is reserved (anti-starvation: a
+        # file bigger than the whole budget was already vetted upstream).
+        if reserved + peak_mb <= budget or not ledger:
+            ledger[token] = {{"pid": os.getpid(),
+                             "reserved_mb": round(float(peak_mb), 1),
+                             "ts": now, "file_id": file_id}}
+            admitted = True
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(ledger, indent=2), encoding="utf-8")
+        tmp.replace(p)
+        return admitted
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+
+def _gate_acquire(peak_mb, file_id="", timeout=None):
+    """Block until peak_mb fits the machine budget; return an opaque token.
+
+    Fail-open: if the gate infra errors or the wait exceeds ``timeout``, return
+    "" and let processing proceed rather than deadlock the batch. The lock is
+    held only during each brief sweep+admit attempt; the wait is lock-free."""
+    import os
+    import time
+    if peak_mb <= 0:
+        return ""
+    token = "{{}}-{{}}-{{}}".format(os.getpid(), int(time.time() * 1000), file_id)
+    start = time.time()
+    while True:
+        try:
+            if _gate_try_reserve(peak_mb, file_id, token, time.time()):
+                return token
+        except Exception:
+            return ""  # gate unavailable — fail open
+        if timeout is not None and (time.time() - start) >= timeout:
+            print("[pipeline] memory gate: waited {{:.0f}}s for ~{{:.0f}} MB "
+                  "(file_id={{}}); proceeding".format(timeout, peak_mb, file_id),
+                  file=sys.stderr)
+            return ""
+        print("[pipeline] memory gate: ~{{:.0f}} MB not yet available for "
+              "file_id={{}} — waiting for another instance to finish".format(
+                  peak_mb, file_id), file=sys.stderr)
+        time.sleep(2.0)
+
+
+def _gate_release(token):
+    """Drop the reservation for ``token``. Idempotent; never raises."""
+    import fcntl
+    if not token:
+        return
+    p = _gate_ledger_path()
+    lock_path = p.with_suffix(".json.lock")
+    try:
+        fd = open(lock_path, "a+", encoding="utf-8")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            ledger = {{}}
+            if p.is_file():
+                try:
+                    _d = json.loads(p.read_text(encoding="utf-8"))
+                    if isinstance(_d, dict):
+                        ledger = _d
+                except Exception:
+                    ledger = {{}}
+            if token in ledger:
+                del ledger[token]
+                tmp = p.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(ledger, indent=2), encoding="utf-8")
+                tmp.replace(p)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+    except Exception:
+        pass
+
+
 def _process_one(work_dir, inp, steps):
     """Process a single input, writing all artefacts under its (sub, ses) bucket."""
     data_path = inp["data_path"]
@@ -795,57 +1317,121 @@ def _process_one(work_dir, inp, steps):
             "output_file": str(out_file), "success": True, "skipped": True,
         }}
 
-    print("Loading: {{}}  (sub={{}} ses={{}} file_id={{}})".format(data_path, sub_id, ses, file_id))
-    data_dict = _load_input(data_path)
-    n_ch_in = len(data_dict.get("channels", []))
-    fs_in = float(data_dict.get("frequency", 0.0))
-    print("  Channels in: {{}}, fs: {{}} Hz".format(n_ch_in, fs_in))
+    # Load-time decimation hint: a concrete resample:<N> step lets the loader
+    # decimate on the fly (huge sEEG never materializes at native rate). Any
+    # subsequent resample:<N> step is then a no-op (src == target).
+    _load_target = _resample_target_from_steps(steps)
 
-    print("Steps: {{}}".format(steps))
-    for step in steps:
-        data_dict = _apply_step(data_dict, step)
+    # Read the deep_inspect fingerprint ONCE up front — used both for the
+    # cross-instance memory gate (peak estimate, before loading) and the
+    # post-load channel-count sanity check. inspection_report_path is relative
+    # to work_dir.
+    _exp_nch, _exp_fs, _exp_dur = 0, 0.0, 0.0
+    _irp = inp.get("inspection_report_path")
+    if _irp:
+        try:
+            _rp = Path(_irp)
+            if not _rp.is_absolute():
+                _rp = work_dir / _irp
+            _fp = json.loads(_rp.read_text(encoding="utf-8")).get("fingerprint", {{}})
+            _exp_nch = int(_fp.get("n_channels") or 0)
+            _exp_fs = float(_fp.get("sampling_freq_hz") or 0.0)
+            _exp_dur = float(_fp.get("duration_s") or 0.0)
+        except Exception:
+            _exp_nch, _exp_fs, _exp_dur = 0, 0.0, 0.0
 
-    n_ch_out = len(data_dict.get("channels", []))
-    fs_out = float(data_dict.get("frequency", 0.0))
-    print("  Channels out: {{}}, fs: {{}} Hz".format(n_ch_out, fs_out))
+    # Cross-instance memory gate: reserve this file's estimated peak footprint
+    # in the machine-wide ledger BEFORE loading. If another easybci instance (a
+    # second tmux session) is already holding a large recording, we block here
+    # until it releases, rather than both loading ~30 GB and OOM-killing the
+    # host. Fail-open: an empty token means the gate was unavailable/timed out.
+    _has_ica = any(isinstance(_s, str) and _s.split(":", 1)[0].strip() == "ica"
+                   for _s in steps)
+    _peak_mb = _gate_peak_mb(_exp_nch, _exp_fs, _exp_dur, _has_ica,
+                             target_hz=_load_target)
+    _gate_token = _gate_acquire(_peak_mb, file_id=file_id)
+    try:
+        print("Loading: {{}}  (sub={{}} ses={{}} file_id={{}}, target_hz={{}})".format(
+            data_path, sub_id, ses, file_id, _load_target))
+        data_dict = _load_input(data_path, target_hz=_load_target)
+        n_ch_in = len(data_dict.get("channels", []))
+        fs_in = float(data_dict.get("frequency", 0.0))
+        print("  Channels in: {{}}, fs: {{}} Hz".format(n_ch_in, fs_in))
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+        # Defense-in-depth against a silent misread (e.g. a 15GB Nihon Kohden
+        # .EEG read as 1-channel BrainVision garbage that still "passes" QC).
+        # Compare the loaded channel count against what deep_inspect recorded; a
+        # gross mismatch means the wrong reader was used — fail LOUD, never emit
+        # a Pass NWB.
+        if (_exp_nch > 0 and n_ch_in > 0 and
+                ((n_ch_in == 1 and _exp_nch > 4)
+                 or n_ch_in * 4 < _exp_nch or n_ch_in > _exp_nch * 4)):
+            raise ValueError(
+                "channel-count mismatch: loader returned {{}} channel(s) but "
+                "deep_inspect recorded {{}} — wrong reader for {{}} (refusing to "
+                "write a misread output).".format(n_ch_in, _exp_nch, data_path))
 
-    # NOTE: `_mne_info` is non-picklable but the NWB writer wants it for
-    # meas_date / channel-type fallback, so we keep it on the dict until
-    # after the writer runs.
+        print("Steps: {{}}".format(steps))
+        for step in steps:
+            data_dict = _apply_step(data_dict, step)
 
-    EASYBCI_MODALITY = "{modality}"
-    EASYBCI_GOAL = "{analysis_goal}"
+        n_ch_out = len(data_dict.get("channels", []))
+        fs_out = float(data_dict.get("frequency", 0.0))
+        print("  Channels out: {{}}, fs: {{}} Hz".format(n_ch_out, fs_out))
 
-    _save_nwb_inline(
-        data_dict=data_dict,
-        subject_id=sub_id,
-        out_path=out_file,
-        analysis_goal=EASYBCI_GOAL,
-        modality=EASYBCI_MODALITY,
-    )
-    print("Wrote {{}}".format(out_file))
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    status = {{
-        "file_id": file_id,
-        "subject_id": sub_id,
-        "session_id": ses,
-        "n_channels": n_ch_out,
-        "frequency_hz": fs_out,
-        "n_samples": int(data_dict["data"].shape[-1]) if data_dict["data"].ndim else 0,
-        "dropped_channels": list(data_dict.get("meta", {{}}).get("dropped_channels", [])),
-        "output_file": str(out_file),
-        "success": True,
-    }}
-    mp = work_dir / "middle_process"
-    mp.mkdir(parents=True, exist_ok=True)
-    (mp / "pipeline_status__{{}}.json".format(file_id)).write_text(
-        json.dumps(status, indent=2), encoding="utf-8"
-    )
-    # Legacy single-file root sidecar for back-compat.
-    (mp / "pipeline_status.json").write_text(json.dumps(status, indent=2), encoding="utf-8")
-    return status
+        # NOTE: `_mne_info` is non-picklable but the NWB writer wants it for
+        # meas_date / channel-type fallback, so we keep it on the dict until
+        # after the writer runs.
+
+        EASYBCI_MODALITY = "{modality}"
+        EASYBCI_GOAL = "{analysis_goal}"
+
+        _save_nwb_inline(
+            data_dict=data_dict,
+            subject_id=sub_id,
+            out_path=out_file,
+            analysis_goal=EASYBCI_GOAL,
+            modality=EASYBCI_MODALITY,
+        )
+        print("Wrote {{}}".format(out_file))
+
+        status = {{
+            "file_id": file_id,
+            "subject_id": sub_id,
+            "session_id": ses,
+            "n_channels": n_ch_out,
+            "frequency_hz": fs_out,
+            "n_samples": int(data_dict["data"].shape[-1]) if data_dict["data"].ndim else 0,
+            "dropped_channels": list(data_dict.get("meta", {{}}).get("dropped_channels", [])),
+            "rejected_seconds": data_dict.get("meta", {{}}).get("rejected_seconds"),
+            "unmatched_labels": list(data_dict.get("meta", {{}}).get("unmatched_labels", [])),
+            "output_file": str(out_file),
+            "success": True,
+        }}
+        mp = work_dir / "middle_process"
+        mp.mkdir(parents=True, exist_ok=True)
+        (mp / "pipeline_status__{{}}.json".format(file_id)).write_text(
+            json.dumps(status, indent=2), encoding="utf-8"
+        )
+        # Legacy single-file root sidecar for back-compat.
+        (mp / "pipeline_status.json").write_text(json.dumps(status, indent=2), encoding="utf-8")
+        # Release the large per-file working set (decimated data array ~7GB, plus
+        # MNE _mne_info / intermediate copies) BEFORE returning so it never
+        # accumulates across a serial multi-file batch. `status` holds only scalars
+        # and small lists, so this is safe. Without this, MNE/numpy circular refs
+        # keep each file's ~14GB peak alive into the next iteration and a
+        # multi-hundred-file sEEG batch OOMs a 62GB host mid-run.
+        data_dict.clear()
+        del data_dict
+        gc.collect()
+        return status
+    finally:
+        # Release the ledger reservation AFTER the working set is freed (gc
+        # above) so a waiting instance only sees capacity once this file's peak
+        # is genuinely gone. Idempotent for an empty/fail-open token.
+        _gate_release(_gate_token)
 
 
 {nwb_helpers_block}
@@ -888,6 +1474,11 @@ def main():
             (mp / "pipeline_status__{{}}.json".format(file_id)).write_text(
                 json.dumps(err_payload, indent=2), encoding="utf-8"
             )
+        finally:
+            # Defense-in-depth: force a collection after every file (success OR
+            # failure) so a mid-load exception can't leave a partial ~14GB
+            # working set alive into the next serial iteration.
+            gc.collect()
 
     # Aggregate sidecar so the dispatcher can read one file regardless of how
     # many inputs ran.
@@ -907,11 +1498,19 @@ if __name__ == "__main__":
 
 
 def _override_notch_freq(steps, line_freq: float):
-    """If steps contain a notch op, rewrite its frequency to line_freq."""
+    """If steps contain a notch op, rewrite its frequency to line_freq.
+
+    Steps already set to ``notch:auto`` (adaptive template — per-file
+    runtime detection) are left untouched: baking a single representative
+    frequency would defeat the point of auto-detection.
+    """
     out = []
     for s in steps:
         if isinstance(s, str) and s.startswith("notch:"):
-            out.append(f"notch:{int(round(line_freq))}")
+            if s.split(":", 1)[1].strip().lower() == "auto":
+                out.append(s)
+            else:
+                out.append(f"notch:{int(round(line_freq))}")
         elif isinstance(s, dict) and s.get("operator") == "notch_filter":
             new = dict(s)
             new["params"] = dict(new.get("params") or {})
@@ -920,6 +1519,78 @@ def _override_notch_freq(steps, line_freq: float):
         else:
             out.append(s)
     return out
+
+
+def build_adaptive_steps(skill, *, reject_keywords=None) -> List[str]:
+    """Build a self-adapting step list from a proven skill's step KINDS.
+
+    Codegen analogue of ``proven_adapt.adapt_pipeline``: instead of baking
+    per-file numbers, it emits ``:auto`` markers that the generated operators
+    resolve per-input at runtime, so ONE step list reproduces correctly across
+    a heterogeneous batch. Transforms (mirrors the adaptation slots):
+
+    - ``notch:<n>`` → ``notch:auto`` (runtime power-line detection)
+    - ``resample:<n>`` → ``resample:auto`` (runtime Nyquist clamp)
+    - prepend ``reject_by_labels:<kw>`` when keywords exist (runtime excision)
+    - ``drop_bads`` already resolves per-file at runtime — kept as-is
+
+    Only KINDS/order from the skill are honoured; numeric params are dropped in
+    favour of ``:auto`` so no single file's numbers leak into the shared repo.
+    """
+    slots = {s.get("param") for s in (getattr(skill, "adaptation_slots", []) or [])}
+    kws = [str(k).strip() for k in
+           (reject_keywords if reject_keywords is not None
+            else getattr(skill, "reject_keywords", []) or []) if str(k).strip()]
+    src_steps = list(getattr(skill, "steps", []) or [])
+
+    out: List[str] = []
+    for s in src_steps:
+        if not isinstance(s, str):
+            out.append(s); continue
+        kind = s.split(":", 1)[0].strip()
+        if kind == "notch" and "notch_freqs" in slots:
+            if "notch:auto" not in out:
+                out.append("notch:auto")
+        elif kind == "resample" and "resample_target_hz" in slots:
+            # Keep the CONCRETE gold target (e.g. resample:500), NOT resample:auto.
+            # op_resample already Nyquist-guards a concrete target per file
+            # (clamps down only if it exceeds that file's source), so `auto`
+            # was strictly worse: _largest_safe_target(2000)=1000 deviates from
+            # the proven recipe AND doubles memory. The concrete target also
+            # becomes the load-time decimation hint (see resample_target_hz()).
+            out.append(s)
+        elif kind == "reject_by_labels":
+            continue  # re-added (deduped) below at position 0
+        else:
+            out.append(s)
+    # Prepend reject_by_labels (excise BEFORE filtering) when keywords exist.
+    if kws and "reject_time_segments" in slots:
+        out = ["reject_by_labels:" + ",".join(kws)] + out
+    return out
+
+
+def resample_target_hz(steps) -> Optional[float]:
+    """Return the concrete resample target (Hz) from a step list, or None.
+
+    This is the load-time decimation hint: when a recipe contains
+    ``resample:500`` the loader can decimate on the fly to 500 Hz so a
+    multi-hour high-channel recording never materializes at native rate (261ch/
+    2000Hz float32 ≈ 56 GB peak — OOMs a 62 GB host). ``resample:auto`` returns
+    None (no fixed target known until per-file runtime), so such recipes load
+    native and rely on the OOM guard / crop instead.
+    """
+    for s in steps or []:
+        if not isinstance(s, str):
+            continue
+        kind, _, param = s.partition(":")
+        if kind.strip() == "resample":
+            p = param.strip().lower()
+            if p and p != "auto":
+                try:
+                    return float(p)
+                except ValueError:
+                    return None
+    return None
 
 
 def _format_inspection_hints(report) -> str:
@@ -1136,6 +1807,21 @@ def _save_nwb_inline(*, data_dict, subject_id, out_path,
     region = nwb.create_electrode_table_region(region=list(range(n_ch)), description="All preprocessed channels")
     es = ElectricalSeries(name="preprocessed", data=data_arr.T, electrodes=region, rate=sfreq, starting_time=0.0, description="Continuous post-pipeline signal")
     nwb.add_acquisition(es)
+    # Persist reject_by_labels excised windows (seconds) so build_ai_ready can
+    # remap event onsets across the gaps. Stored as a (n,2) scratch array;
+    # absent when no excision happened.
+    _rej_iv = meta_d.get("rejected_intervals") if isinstance(meta_d, _Mapping_nwb) else None
+    if _rej_iv:
+        try:
+            _rej_arr = np.asarray(_rej_iv, dtype=np.float64)
+            if _rej_arr.ndim == 2 and _rej_arr.shape[1] == 2 and _rej_arr.shape[0] > 0:
+                nwb.add_scratch(
+                    _rej_arr,
+                    name="easybci_rejected_intervals",
+                    description="reject_by_labels excised [onset,offset] windows in seconds",
+                )
+        except Exception:
+            pass
     _mod_l = (modality or "").strip().lower()
     spike_times = data_dict.get("spike_times") if isinstance(data_dict, _Mapping_nwb) else None
     if _mod_l in ("spike", "spikes", "unit", "units") and spike_times:
@@ -1154,13 +1840,25 @@ def _save_nwb_inline(*, data_dict, subject_id, out_path,
 # easybci_lib codebase. pynwb is lazy-installed on first import. The shape of
 # the returned tuple matches what the pickle-era code expected
 # (data, fs, meta, channels) so downstream usage stays mechanical.
+#
+# Memory: the ElectricalSeries data is written contiguously and uncompressed
+# (chunks=None, compression=None — see nwb_writer), so instead of ``data[:]``
+# (which eagerly reads the whole file into RAM — ~7 GB for a 259ch/7.18M-sample
+# sEEG recording, the batch-summary OOM culprit) we memory-map the on-disk
+# region and return a lazy ``(n_channels, n_samples)`` view. Resident memory
+# for the load itself is ~0; the OS pages in only the slices callers touch and
+# can evict them under pressure. Falls back to a full read for chunked /
+# compressed / non-float32 datasets (older files) so the contract is unchanged.
 _NWB_PREPROCESSED_LOADER_BLOCK = '''
 # --- Preprocessed NWB loader (inlined; preprocessed/ is NWB-only) ---
 def _load_preprocessed_nwb(pre_nwb):
     """Read a preprocessed NWB file written by pipeline.py.
 
     Returns (data, fs, meta, channels) where:
-      data:      np.ndarray of shape (n_channels, n_samples), float32
+      data:      np.ndarray of shape (n_channels, n_samples), float32.
+                 A memory-mapped lazy view when the on-disk dataset is
+                 contiguous+uncompressed+float32 (the common case); otherwise
+                 a materialized array (fallback for chunked/compressed files).
       fs:        float, sampling rate in Hz
       meta:      dict (always at least ``{"format": "nwb", "source_file": ...}``)
       channels:  list[str], channel names from the electrode table
@@ -1174,18 +1872,50 @@ def _load_preprocessed_nwb(pre_nwb):
         _sp_nwb.check_call([_sys_nwb.executable, "-m", "pip", "install",
                             "pynwb==3.1.3", "hdmf==4.3.1"])
         from pynwb import NWBHDF5IO
-    with NWBHDF5IO(str(pre_nwb), "r") as _io_nwb:
+    _pre = str(pre_nwb)
+    _mm = None
+    with NWBHDF5IO(_pre, "r") as _io_nwb:
         _nwb = _io_nwb.read()
         _acq = _nwb.acquisition
         _es_name = "preprocessed" if "preprocessed" in _acq else next(iter(_acq))
         _es = _acq[_es_name]
-        _data = np.asarray(_es.data[:]).T.astype(np.float32)
+        _dset = _es.data
         _fs = float(_es.rate)
         try:
             _channels = [str(_n) for _n in _nwb.electrodes["channel_name"][:]]
         except Exception:
-            _channels = ["Ch{}".format(_i) for _i in range(_data.shape[0])]
-        return _data, _fs, {"format": "nwb", "source_file": str(pre_nwb)}, _channels
+            _channels = None
+        # reject_by_labels excised windows (seconds), if the pipeline stashed
+        # them — build_ai_ready remaps event onsets across these gaps.
+        _rej_iv = None
+        try:
+            _sc = _nwb.get_scratch("easybci_rejected_intervals")
+            _rej_iv = np.asarray(_sc).tolist()
+        except Exception:
+            _rej_iv = None
+        # Zero-copy memmap onto the contiguous HDF5 data region. get_offset()
+        # returns None for chunked/compressed datasets → fall back to full read.
+        try:
+            _off = _dset.id.get_offset()
+            if (_off is not None and _dset.chunks is None
+                    and _dset.compression is None
+                    and _dset.dtype == np.dtype("float32")):
+                _mm = np.memmap(_pre, dtype=np.float32, mode="r",
+                                offset=int(_off), shape=tuple(_dset.shape))
+        except Exception:
+            _mm = None
+        if _mm is None:
+            _data = np.asarray(_dset[:]).T.astype(np.float32)
+        else:
+            # on-disk layout is (n_samples, n_channels); .T is a lazy view
+            _data = _mm.T
+        _n_ch = int(_data.shape[0])
+    if _channels is None:
+        _channels = ["Ch{}".format(_i) for _i in range(_n_ch)]
+    _meta = {"format": "nwb", "source_file": _pre}
+    if _rej_iv:
+        _meta["rejected_intervals"] = _rej_iv
+    return _data, _fs, _meta, _channels
 # --- end Preprocessed NWB loader ---
 '''
 
@@ -1217,6 +1947,11 @@ def generate_pipeline_script(
       reading pipeline.py can see why these parameters were chosen
     """
     steps_list = list(steps)
+    # Normalize synonyms to canonical names BEFORE embedding into the generated
+    # script, so the standalone bundle only ever sees canonical operators
+    # (highpass→bandpass:X, etc.). Unknown names fail loud here at generation
+    # time rather than being silently skipped at run time.
+    steps_list, _norm_notes = _normalize_steps(steps_list)
     if inspection_report:
         line_freq = (inspection_report.get("psd_summary") or {}).get("power_line_peak_hz")
         if line_freq:
@@ -1273,9 +2008,67 @@ _MNE_EXTS = {{
 }}
 
 
-def _load_input(path):
+def _qc_easybci_home():
+    import os
+    h = os.environ.get("EASYBCI_HOME")
+    return Path(h) if h else (Path.home() / ".easybci")
+
+
+def _qc_discover_io_plugin(path):
+    """First registered io_loader plugin whose matches(path) is True (see
+    pipeline.py _discover_io_plugin). Ensures qc.py reads the raw side the same
+    way pipeline.py did — same custom loader, same load-time decimation.
+    Scans repo-local ``code/io_loaders/`` first, then the machine-global dir."""
+    import importlib.util as _ilu
+    _dirs = []
+    _self = globals().get("__file__")
+    if _self:
+        _dirs.append(Path(_self).resolve().parent / "io_loaders")
+    _dirs.append(_qc_easybci_home() / "io_loaders")
+    for d in _dirs:
+        if not d.is_dir():
+            continue
+        for py in sorted(d.glob("*.py")):
+            if py.name.startswith("_"):
+                continue
+            _mod_name = "_ebci_qcio_" + py.stem
+            try:
+                spec = _ilu.spec_from_file_location(_mod_name, str(py))
+                mod = _ilu.module_from_spec(spec)
+                sys.modules[_mod_name] = mod
+                try:
+                    spec.loader.exec_module(mod)
+                    matches = getattr(mod, "matches", None)
+                    load = getattr(mod, "load", None)
+                    if callable(matches) and callable(load) and bool(matches(str(path))):
+                        return load, py.stem
+                finally:
+                    sys.modules.pop(_mod_name, None)
+            except Exception:
+                continue
+    return None, None
+
+
+def _load_input(path, target_hz=None):
     p = Path(path)
     ext = p.suffix.lower()
+
+    _pl, _pn = _qc_discover_io_plugin(p)
+    if _pl is not None:
+        import inspect as _insp
+        _kw = {{}}
+        if target_hz is not None:
+            try:
+                _pp = _insp.signature(_pl).parameters
+                if "target_hz" in _pp or any(
+                    x.kind == _insp.Parameter.VAR_KEYWORD for x in _pp.values()):
+                    _kw["target_hz"] = target_hz
+            except (ValueError, TypeError):
+                pass
+        _res = _pl(str(p), **_kw)
+        if isinstance(_res, dict) and "data" in _res:
+            return _res
+
     if ext in _MNE_EXTS or (p.is_dir() and p.suffix == ".ds"):
         import mne
         raw = mne.io.read_raw(str(p), preload=True, verbose="ERROR")
@@ -1366,46 +2159,120 @@ def _psd_welch(data, fs, fmax=80.0):
     return freqs[mask], psd[..., mask]
 
 
-def _compute_metrics(raw_d, proc):
-    rb = np.asarray(raw_d["data"], dtype=np.float64)
-    ra = np.asarray(proc["data"], dtype=np.float64)
+def _stat_window_rows(arr, budget_bytes=128 * 1024 * 1024):
+    """Time-window width (samples) so one (n_ch, w) float64 block fits budget."""
+    n_ch = int(arr.shape[0]) if getattr(arr, "ndim", 0) else 1
+    n_samp = int(arr.shape[-1]) if getattr(arr, "ndim", 0) else int(arr.shape[0])
+    per_col = max(1, n_ch * 8)
+    return max(1, min(n_samp, int(budget_bytes // per_col)))
 
-    def _stats(arr):
-        finite = np.isfinite(arr)
-        if not finite.any():
-            return {{"mean": None, "std": None, "min": None, "max": None, "nan_frac": 1.0}}
-        return {{
-            "mean": float(np.nanmean(arr)),
-            "std": float(np.nanstd(arr)),
-            "min": float(np.nanmin(arr)),
-            "max": float(np.nanmax(arr)),
-            "nan_frac": float((~finite).mean()),
-        }}
+
+def _chunked_stats(arr):
+    """Exact mean/std/min/max/nan_frac without materializing the whole array.
+
+    Reads the (n_channels, n_samples) source in time windows (only one window
+    is float64 in RAM at a time — a memmap view stays on disk otherwise) and
+    accumulates finite sum / sumsq / count and running min/max. The results are
+    bit-equivalent to ``np.nanmean/np.nanstd/np.nanmin/np.nanmax`` over the full
+    array and ``(~np.isfinite(arr)).mean()`` — population std (ddof=0), same as
+    the original full-array path.
+    """
+    a2 = arr if getattr(arr, "ndim", 1) >= 1 else np.asarray(arr)
+    n_samp = int(a2.shape[-1]) if getattr(a2, "ndim", 0) else 0
+    total = float(a2.size) if hasattr(a2, "size") else float(np.asarray(a2).size)
+    if n_samp == 0 or total == 0:
+        return {{"mean": None, "std": None, "min": None, "max": None, "nan_frac": 1.0}}
+    s = 0.0
+    ss = 0.0
+    cnt = 0.0
+    vmin = np.inf
+    vmax = -np.inf
+    w = _stat_window_rows(a2)
+    for t0 in range(0, n_samp, w):
+        blk = np.asarray(a2[..., t0:min(n_samp, t0 + w)], dtype=np.float64)
+        fin = np.isfinite(blk)
+        if fin.any():
+            vals = blk[fin]
+            s += float(vals.sum())
+            ss += float(np.square(vals).sum())
+            cnt += float(vals.size)
+            vmin = min(vmin, float(vals.min()))
+            vmax = max(vmax, float(vals.max()))
+    if cnt == 0.0:
+        return {{"mean": None, "std": None, "min": None, "max": None, "nan_frac": 1.0}}
+    mean = s / cnt
+    var = max(ss / cnt - mean * mean, 0.0)
+    return {{
+        "mean": float(mean),
+        "std": float(np.sqrt(var)),
+        "min": float(vmin),
+        "max": float(vmax),
+        "nan_frac": float((total - cnt) / total),
+    }}
+
+
+def _finite_fraction(arr):
+    """Fraction of finite samples — chunked equivalent of np.isfinite(arr).mean()."""
+    a2 = arr if getattr(arr, "ndim", 1) >= 1 else np.asarray(arr)
+    n_samp = int(a2.shape[-1]) if getattr(a2, "ndim", 0) else 0
+    total = float(a2.size) if hasattr(a2, "size") else float(np.asarray(a2).size)
+    if total == 0:
+        return 0.0
+    fin = 0.0
+    w = _stat_window_rows(a2)
+    for t0 in range(0, n_samp, w):
+        blk = a2[..., t0:min(n_samp, t0 + w)]
+        fin += float(np.count_nonzero(np.isfinite(np.asarray(blk))))
+    return fin / total
+
+
+def _bounded_psd_snr(arr, fs, *, max_seconds=120.0, fmax=80.0):
+    """PSD-based SNR proxy on a bounded leading window (memory-safe).
+
+    The original computed Welch PSD over the ENTIRE recording (float64 copy of
+    the whole array) then took mean/std of the PSD matrix. For a 7 GB memmap
+    that reintroduces the OOM we are removing, so we estimate the same proxy on
+    the first ``max_seconds`` of signal — enough spectral content for a QC
+    sanity score. Only this bounded slice is materialized.
+    """
+    n_samp = int(arr.shape[-1]) if getattr(arr, "ndim", 0) else 0
+    if n_samp == 0:
+        return 0.0
+    win = min(n_samp, max(1, int(fs * max_seconds)))
+    block = np.asarray(arr[..., :win], dtype=np.float64)
+    _, p = _psd_welch(block, fs, fmax=fmax)
+    return float(p.mean()) / (float(p.std()) + 1e-30)
+
+
+def _compute_metrics(raw_d, proc):
+    rb = raw_d["data"]
+    ra = proc["data"]
 
     fs_b = float(raw_d["frequency"])
     fs_a = float(proc["frequency"])
-    _, pb = _psd_welch(rb, fs_b)
-    _, pa = _psd_welch(ra, fs_a)
-    snr_before = float(pb.mean()) / (float(pb.std()) + 1e-30)
-    snr_after = float(pa.mean()) / (float(pa.std()) + 1e-30)
+    snr_before = _bounded_psd_snr(rb, fs_b)
+    snr_after = _bounded_psd_snr(ra, fs_a)
 
+    ra_finite_frac = _finite_fraction(ra)
+    ra_ndim = getattr(ra, "ndim", 0)
     overall_grade = "Pass" if (
-        np.isfinite(ra).mean() > 0.99 and ra.shape[0] > 0 and ra.shape[1] > 0
+        ra_finite_frac > 0.99 and ra_ndim >= 2
+        and int(ra.shape[0]) > 0 and int(ra.shape[-1]) > 0
     ) else "Fail"
 
     return {{
         "before": {{
-            "n_channels": int(rb.shape[0]),
-            "n_samples": int(rb.shape[-1]) if rb.ndim else 0,
+            "n_channels": int(rb.shape[0]) if getattr(rb, "ndim", 0) else 0,
+            "n_samples": int(rb.shape[-1]) if getattr(rb, "ndim", 0) else 0,
             "frequency_hz": fs_b,
-            "stats": _stats(rb),
+            "stats": _chunked_stats(rb),
             "psd_snr_estimate": snr_before,
         }},
         "after": {{
-            "n_channels": int(ra.shape[0]),
-            "n_samples": int(ra.shape[-1]) if ra.ndim else 0,
+            "n_channels": int(ra.shape[0]) if getattr(ra, "ndim", 0) else 0,
+            "n_samples": int(ra.shape[-1]) if getattr(ra, "ndim", 0) else 0,
             "frequency_hz": fs_a,
-            "stats": _stats(ra),
+            "stats": _chunked_stats(ra),
             "psd_snr_estimate": snr_after,
         }},
         "overall": {{"grade": overall_grade}},
@@ -1520,7 +2387,20 @@ def _qc_one(work_dir, inp, steps):
         print("[qc] preprocessed nwb missing for file_id={{}}: {{}}".format(file_id, pre_nwb), file=sys.stderr)
         raise FileNotFoundError(pre_nwb)
 
-    raw_d = _load_input(raw_path)
+    # Load raw at the SAME decimated rate the pipeline used (concrete resample
+    # target), so the before/after comparison is fair and qc.py doesn't OOM
+    # re-reading a huge recording at native rate.
+    _qc_tgt = None
+    for _s in steps:
+        if isinstance(_s, str) and _s.partition(":")[0].strip() == "resample":
+            _pv = _s.partition(":")[2].strip().lower()
+            if _pv and _pv != "auto":
+                try:
+                    _qc_tgt = float(_pv)
+                except ValueError:
+                    _qc_tgt = None
+            break
+    raw_d = _load_input(raw_path, target_hz=_qc_tgt)
     _proc_data, _proc_fs, _proc_meta, _proc_channels = _load_preprocessed_nwb(pre_nwb)
     proc = {{
         "data": _proc_data,
@@ -1611,6 +2491,9 @@ def generate_qc_script_v2(
     the QC reader can see why the pipeline used certain parameters.
     """
     steps_list = list(steps)
+    # Same canonical normalization as generate_pipeline_script — keep the qc
+    # script's EASYBCI_STEPS marker in the canonical vocabulary too.
+    steps_list, _ = _normalize_steps(steps_list)
     if inspection_report:
         line_freq = (inspection_report.get("psd_summary") or {}).get("power_line_peak_hz")
         if line_freq:
@@ -1637,7 +2520,7 @@ def generate_qc_script_v2(
 # Spec: improved_docs/plans/2026-06-22-nwb-visualization-rule-design.md
 
 
-_VIS_INVASIVE_TEMPLATE = '''"""Auto-generated multi-figure visualization (invasive modality — 4 single-state figs).
+_VIS_INVASIVE_TEMPLATE = '''"""Auto-generated multi-figure visualization (invasive modality — 4 single-state figs + per-channel time-frequency).
 
 EASYBCI_GOAL: {analysis_goal}
 EASYBCI_MODALITY: {modality}
@@ -1648,8 +2531,9 @@ Standalone script — runs on `pip install numpy scipy matplotlib pynwb hdmf`.
 
 Run: python vis.py <work_dir>
   - reads preprocessed.nwb from <work_dir>/preprocessed_output/preprocessed/sub-<id>/ses-<ses>/
-  - writes 4 figures to <work_dir>/preprocessed_output/figures/sub-<id>/ses-<ses>/
-    (psd, channel_variance, amplitude_distribution, timeseries)
+  - writes 4 single-state figures + one time-frequency spectrogram PER CHANNEL
+    to <work_dir>/preprocessed_output/figures/sub-<id>/ses-<ses>/
+    (psd, channel_variance, amplitude_distribution, timeseries, <stem>_tf_NNN_<ch>.png)
 
 Per-figure failures do NOT abort the run — errors accumulate into
 middle_process/vis_status.json and the script exits 0 so the chain continues.
@@ -1674,6 +2558,14 @@ _random.seed(EASYBCI_SEED)
 np.random.seed(EASYBCI_SEED)
 
 
+_QC_DPI = 300
+plt.rcParams.update({{
+    "font.size": 9, "axes.titlesize": 11, "axes.labelsize": 10,
+    "xtick.labelsize": 8, "ytick.labelsize": 8, "legend.fontsize": 8,
+    "figure.titlesize": 12,
+}})
+
+
 def _plot_psd(data, fs, channels, out_path, *, n_ch_cap=8):
     n_ch = min(data.shape[0], n_ch_cap)
     if n_ch == 0:
@@ -1688,38 +2580,68 @@ def _plot_psd(data, fs, channels, out_path, *, n_ch_cap=8):
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("PSD")
     ax.set_title("Power Spectral Density (processed)")
-    ax.legend(loc="upper right", fontsize=7, ncol=2)
+    ax.legend(loc="upper right", ncol=2)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=120, facecolor="white", bbox_inches="tight")
+    fig.savefig(str(out_path), dpi=_QC_DPI, facecolor="white", bbox_inches="tight")
     plt.close(fig)
 
 
 def _plot_channel_variance(data, channels, out_path):
     if data.shape[0] == 0:
         raise ValueError("Channel-variance plot needs at least one channel")
-    var = np.var(data, axis=1)
+    # Per-channel variance by time-window accumulation (var = E[x^2] - E[x]^2)
+    # so a memmap source is never fully materialized; bit-equivalent to
+    # np.var(data, axis=1). Only one (n_ch, w) window is resident at a time.
+    n_ch, n_samp = int(data.shape[0]), int(data.shape[1])
+    w = max(1, min(n_samp, int((128 * 1024 * 1024) // max(1, n_ch * 8))))
+    s = np.zeros(n_ch, dtype=np.float64)
+    ss = np.zeros(n_ch, dtype=np.float64)
+    for t0 in range(0, n_samp, w):
+        blk = np.asarray(data[:, t0:min(n_samp, t0 + w)], dtype=np.float64)
+        s += blk.sum(axis=1)
+        ss += np.square(blk).sum(axis=1)
+    mean = s / max(1, n_samp)
+    var = np.maximum(ss / max(1, n_samp) - np.square(mean), 0.0)
     fig, ax = plt.subplots(figsize=(max(6.0, data.shape[0] * 0.3), 3))
     xs = np.arange(data.shape[0])
     labels = [channels[i] if i < len(channels) else "Ch{{}}".format(i)
               for i in range(data.shape[0])]
     ax.bar(xs, var, color="#3b82f6", alpha=0.85)
     ax.set_xticks(xs)
-    ax.set_xticklabels(labels, rotation=75, fontsize=7)
+    ax.set_xticklabels(labels, rotation=75)
     ax.set_ylabel("Variance")
     ax.set_title("Per-channel Variance (processed)")
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=120, facecolor="white", bbox_inches="tight")
+    fig.savefig(str(out_path), dpi=_QC_DPI, facecolor="white", bbox_inches="tight")
     plt.close(fig)
 
 
 def _plot_amplitude_dist(data, out_path):
-    flat = data.flatten()
+    # Reservoir-free bounded sampling: draw up to 100k samples from evenly
+    # spaced time windows instead of flattening the whole array (a memmap would
+    # otherwise be fully paged in). The histogram shape is unchanged.
+    n_ch = int(data.shape[0]) if getattr(data, "ndim", 0) else 0
+    n_samp = int(data.shape[-1]) if getattr(data, "ndim", 0) else 0
+    if n_ch == 0 or n_samp == 0:
+        raise ValueError("Amplitude distribution plot needs samples")
+    target = 100000
+    rng = np.random.default_rng(EASYBCI_SEED)
+    total = n_ch * n_samp
+    if total <= target:
+        flat = np.asarray(data, dtype=np.float32).reshape(-1)
+    else:
+        # sample whole time-columns until we have enough values
+        per_col = n_ch
+        n_cols = max(1, min(n_samp, (target // max(1, per_col)) + 1))
+        cols = np.sort(rng.choice(n_samp, size=n_cols, replace=False))
+        picks = [np.asarray(data[:, c], dtype=np.float32) for c in cols]
+        flat = np.concatenate(picks) if picks else np.asarray([], dtype=np.float32)
+        if flat.size > target:
+            flat = rng.choice(flat, target, replace=False)
     if flat.size == 0:
         raise ValueError("Amplitude distribution plot needs samples")
-    if flat.size > 100000:
-        flat = np.random.default_rng(EASYBCI_SEED).choice(flat, 100000, replace=False)
     fig, ax = plt.subplots(figsize=(6, 3))
     ax.hist(flat, bins=80, color="#3b82f6", alpha=0.85, edgecolor="none")
     ax.set_xlabel("Amplitude")
@@ -1727,7 +2649,7 @@ def _plot_amplitude_dist(data, out_path):
     ax.set_title("Amplitude Distribution (processed)")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=120, facecolor="white", bbox_inches="tight")
+    fig.savefig(str(out_path), dpi=_QC_DPI, facecolor="white", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -1751,10 +2673,65 @@ def _plot_timeseries(data, fs, channels, out_path, *, n_ch_cap=8, secs=5.0):
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Channels (offset)")
     ax.set_title("Processed Signal - first {{:.1f}}s".format(secs))
-    ax.legend(loc="upper right", fontsize=6, ncol=2)
+    ax.legend(loc="upper right", ncol=2)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=120, facecolor="white", bbox_inches="tight")
+    fig.savefig(str(out_path), dpi=_QC_DPI, facecolor="white", bbox_inches="tight")
     plt.close(fig)
+
+
+def _safe_name(name):
+    keep = [c if (c.isalnum() or c in "-_") else "_" for c in str(name)]
+    s = "".join(keep).strip("_")
+    return s or "ch"
+
+
+def _plot_timefreq_per_channel(data, fs, channels, fig_dir, stem):
+    """Per-channel time-frequency spectrograms (invasive modality, no channel cap).
+
+    Each channel is read as a single (n_samp,) vector, turned into a
+    spectrogram, and its figure is closed immediately, so peak memory is one
+    channel + one figure regardless of channel count. Returns written names.
+    """
+    from scipy.signal import spectrogram as _spectrogram
+    from scipy.ndimage import gaussian_filter as _gaussian_filter
+    n_ch, n_samp = int(data.shape[0]), int(data.shape[1])
+    if n_ch == 0 or n_samp == 0:
+        raise ValueError("time-frequency plot needs samples")
+    nperseg = int(min(1024, n_samp))
+    noverlap = int(nperseg * 0.75)
+    high_cut = min(float(fs) / 2.0, 250.0)
+    written = []
+    for ch in range(n_ch):
+        x = np.asarray(data[ch], dtype=np.float32)
+        freqs, times, power = _spectrogram(
+            x, fs=fs, window="hann", nperseg=nperseg, noverlap=noverlap,
+            detrend="constant", scaling="density", mode="psd",
+        )
+        keep = freqs <= high_cut
+        if not np.any(keep):
+            keep = np.ones_like(freqs, dtype=bool)
+        spec = 10.0 * np.log10(power[keep] + 1e-12)
+        spec = _gaussian_filter(spec, sigma=(1.0, 1.0))
+        vmin, vmax = np.nanpercentile(spec, [5, 95])
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin >= vmax:
+            vmin, vmax = float(np.nanmin(spec)), float(np.nanmax(spec) + 1.0)
+        label = channels[ch] if ch < len(channels) else "Ch{{}}".format(ch)
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        im = ax.imshow(
+            spec, aspect="auto", origin="lower",
+            extent=[times[0], times[-1], freqs[keep][0], freqs[keep][-1]],
+            cmap="magma", vmin=vmin, vmax=vmax,
+        )
+        ax.set_title("{{}} time-frequency".format(label))
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Frequency (Hz)")
+        fig.colorbar(im, ax=ax, label="Power (dB)")
+        fig.tight_layout()
+        out_path = fig_dir / "{{}}_tf_{{:03d}}_{{}}.png".format(stem, ch, _safe_name(label))
+        fig.savefig(str(out_path), dpi=_QC_DPI, facecolor="white", bbox_inches="tight")
+        plt.close(fig)
+        written.append(out_path.name)
+    return written
 
 
 def _vis_one(work_dir, inp):
@@ -1814,6 +2791,14 @@ def _vis_one(work_dir, inp):
             errors.append("{{}}: {{}}".format(name, exc))
             print("[vis] {{}}: {{}} for file_id={{}}".format(name, exc, file_id), file=sys.stderr)
             traceback.print_exc()
+
+    # Per-channel time-frequency spectrograms (invasive-only, no channel cap).
+    try:
+        saved.extend(_plot_timefreq_per_channel(data, fs, channels, fig_dir, stem))
+    except Exception as exc:
+        errors.append("timefreq: {{}}".format(exc))
+        print("[vis] timefreq: {{}} for file_id={{}}".format(exc, file_id), file=sys.stderr)
+        traceback.print_exc()
 
     return {{
         "file_id": file_id, "subject_id": sub_id, "session_id": ses,
@@ -1965,6 +2950,14 @@ def _load_raw(path):
     raise ValueError("Unsupported raw format: {{}}".format(p))
 
 
+_QC_DPI = 300
+plt.rcParams.update({{
+    "font.size": 9, "axes.titlesize": 11, "axes.labelsize": 10,
+    "xtick.labelsize": 8, "ytick.labelsize": 8, "legend.fontsize": 8,
+    "figure.titlesize": 12,
+}})
+
+
 def _plot_psd(data, fs, channels, out_path, *, n_ch_cap=8):
     n_ch = min(data.shape[0], n_ch_cap)
     if n_ch == 0:
@@ -1979,38 +2972,68 @@ def _plot_psd(data, fs, channels, out_path, *, n_ch_cap=8):
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("PSD")
     ax.set_title("Power Spectral Density (processed)")
-    ax.legend(loc="upper right", fontsize=7, ncol=2)
+    ax.legend(loc="upper right", ncol=2)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=120, facecolor="white", bbox_inches="tight")
+    fig.savefig(str(out_path), dpi=_QC_DPI, facecolor="white", bbox_inches="tight")
     plt.close(fig)
 
 
 def _plot_channel_variance(data, channels, out_path):
     if data.shape[0] == 0:
         raise ValueError("Channel-variance plot needs at least one channel")
-    var = np.var(data, axis=1)
+    # Per-channel variance by time-window accumulation (var = E[x^2] - E[x]^2)
+    # so a memmap source is never fully materialized; bit-equivalent to
+    # np.var(data, axis=1). Only one (n_ch, w) window is resident at a time.
+    n_ch, n_samp = int(data.shape[0]), int(data.shape[1])
+    w = max(1, min(n_samp, int((128 * 1024 * 1024) // max(1, n_ch * 8))))
+    s = np.zeros(n_ch, dtype=np.float64)
+    ss = np.zeros(n_ch, dtype=np.float64)
+    for t0 in range(0, n_samp, w):
+        blk = np.asarray(data[:, t0:min(n_samp, t0 + w)], dtype=np.float64)
+        s += blk.sum(axis=1)
+        ss += np.square(blk).sum(axis=1)
+    mean = s / max(1, n_samp)
+    var = np.maximum(ss / max(1, n_samp) - np.square(mean), 0.0)
     fig, ax = plt.subplots(figsize=(max(6.0, data.shape[0] * 0.3), 3))
     xs = np.arange(data.shape[0])
     labels = [channels[i] if i < len(channels) else "Ch{{}}".format(i)
               for i in range(data.shape[0])]
     ax.bar(xs, var, color="#3b82f6", alpha=0.85)
     ax.set_xticks(xs)
-    ax.set_xticklabels(labels, rotation=75, fontsize=7)
+    ax.set_xticklabels(labels, rotation=75)
     ax.set_ylabel("Variance")
     ax.set_title("Per-channel Variance (processed)")
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=120, facecolor="white", bbox_inches="tight")
+    fig.savefig(str(out_path), dpi=_QC_DPI, facecolor="white", bbox_inches="tight")
     plt.close(fig)
 
 
 def _plot_amplitude_dist(data, out_path):
-    flat = data.flatten()
+    # Reservoir-free bounded sampling: draw up to 100k samples from evenly
+    # spaced time windows instead of flattening the whole array (a memmap would
+    # otherwise be fully paged in). The histogram shape is unchanged.
+    n_ch = int(data.shape[0]) if getattr(data, "ndim", 0) else 0
+    n_samp = int(data.shape[-1]) if getattr(data, "ndim", 0) else 0
+    if n_ch == 0 or n_samp == 0:
+        raise ValueError("Amplitude distribution plot needs samples")
+    target = 100000
+    rng = np.random.default_rng(EASYBCI_SEED)
+    total = n_ch * n_samp
+    if total <= target:
+        flat = np.asarray(data, dtype=np.float32).reshape(-1)
+    else:
+        # sample whole time-columns until we have enough values
+        per_col = n_ch
+        n_cols = max(1, min(n_samp, (target // max(1, per_col)) + 1))
+        cols = np.sort(rng.choice(n_samp, size=n_cols, replace=False))
+        picks = [np.asarray(data[:, c], dtype=np.float32) for c in cols]
+        flat = np.concatenate(picks) if picks else np.asarray([], dtype=np.float32)
+        if flat.size > target:
+            flat = rng.choice(flat, target, replace=False)
     if flat.size == 0:
         raise ValueError("Amplitude distribution plot needs samples")
-    if flat.size > 100000:
-        flat = np.random.default_rng(EASYBCI_SEED).choice(flat, 100000, replace=False)
     fig, ax = plt.subplots(figsize=(6, 3))
     ax.hist(flat, bins=80, color="#3b82f6", alpha=0.85, edgecolor="none")
     ax.set_xlabel("Amplitude")
@@ -2018,7 +3041,7 @@ def _plot_amplitude_dist(data, out_path):
     ax.set_title("Amplitude Distribution (processed)")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=120, facecolor="white", bbox_inches="tight")
+    fig.savefig(str(out_path), dpi=_QC_DPI, facecolor="white", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -2042,9 +3065,9 @@ def _plot_timeseries(data, fs, channels, out_path, *, n_ch_cap=8, secs=5.0):
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Channels (offset)")
     ax.set_title("Processed Signal - first {{:.1f}}s".format(secs))
-    ax.legend(loc="upper right", fontsize=6, ncol=2)
+    ax.legend(loc="upper right", ncol=2)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=120, facecolor="white", bbox_inches="tight")
+    fig.savefig(str(out_path), dpi=_QC_DPI, facecolor="white", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -2090,7 +3113,7 @@ def _plot_timeseries_before_after(raw_d, proc_d, out_path, *, n_ch_cap=8, secs=2
     fig.suptitle("Before vs After: first {{:.1f}}s, first {{}} channels".format(secs, n_ch),
                  fontweight="bold", y=1.005)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=120, facecolor="white", bbox_inches="tight")
+    fig.savefig(str(out_path), dpi=_QC_DPI, facecolor="white", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -2319,16 +3342,104 @@ def _sliding(data, fs, dur, stride):
     return np.asarray(segs, dtype=np.float32)
 
 
+def _align_continuous_labels(labels, n_samples, fs, dur, stride):
+    """Reduce L3 continuous (per-sample) labels to one label per sliding window.
+
+    L3_continuous labels carry one value PER SAMPLE (length == n_samples). The
+    sliding-window epoching produces far fewer windows, so loading labels.npy
+    verbatim mislabels every epoch. This maps each window to the label of its
+    CENTRE sample — correct for both continuous regression and per-window
+    classification — using the EXACT window geometry of ``_sliding``.
+
+    * length already == n_windows  -> pass through unchanged,
+    * length == n_samples          -> sample the centre of each window,
+    * anything else                -> truncate to n_windows with a loud warning
+      (never silently emit a mismatched-length label array).
+    """
+    labels = np.asarray(labels)
+    win = int(dur * fs)
+    step = max(int(stride * fs), 1)
+    starts = list(range(0, n_samples - win + 1, step))
+    if not starts:
+        starts = [0]
+        win = min(win, n_samples)
+    n_windows = len(starts)
+
+    if labels.shape[0] == n_windows:
+        return labels
+    if labels.shape[0] == n_samples:
+        centers = [min(s + win // 2, n_samples - 1) for s in starts]
+        return labels[np.asarray(centers, dtype=int)]
+    # Neither per-window nor per-sample — do not guess silently.
+    print("[ai_ready] WARNING: continuous label length {{}} matches neither "
+          "n_windows ({{}}) nor n_samples ({{}}); truncating to {{}} to align."
+          .format(labels.shape[0], n_windows, n_samples, n_windows),
+          file=sys.stderr)
+    if labels.shape[0] >= n_windows:
+        return labels[:n_windows]
+    # Fewer than n_windows: pad by repeating the last label.
+    pad = np.full(n_windows - labels.shape[0], labels[-1] if labels.shape[0] else 0)
+    return np.concatenate([labels, pad])
+
+
 def _epoch_from_events(data, fs, events, tmin, tmax):
     win_samples = int((tmax - tmin) * fs)
     pre = int(-tmin * fs)
     epochs = []
+    kept_labels = []
     for ev in events:
         s = int(ev["start"]) - pre
         e = s + win_samples
         if 0 <= s and e <= data.shape[1]:
             epochs.append(data[:, s:e])
-    return np.asarray(epochs, dtype=np.float32)
+            kept_labels.append(ev.get("label", 0))
+    # Return labels aligned to the KEPT epochs. Out-of-bounds events are
+    # dropped from both, so epochs.shape[0] == len(labels) always holds. A
+    # caller that labels all `events` would silently misalign every epoch
+    # after the first dropped event.
+    return (
+        np.asarray(epochs, dtype=np.float32),
+        np.asarray(kept_labels),
+    )
+
+
+def _remap_events_after_reject(events, rejected_intervals, fs):
+    """Remap event onsets across reject_by_labels excised windows.
+
+    reject_by_labels (pipeline.py) deletes samples, so an onset measured on the
+    ORIGINAL time axis no longer points at the right sample post-reject. The
+    excised windows are carried as [onset_s, offset_s] pairs in seconds
+    (time-base invariant — correct even after a later resample). For each event:
+      * drop it if its onset falls inside an excised window,
+      * else shift it left by the total excised time BEFORE it.
+    ``onset_s`` (original seconds) is authoritative; ``start`` is recomputed
+    against the post-reject axis at the current fs.
+    """
+    if not rejected_intervals:
+        return list(events)
+    ivs = sorted((float(a), float(b)) for a, b in rejected_intervals)
+    out = []
+    for ev in events:
+        onset_s = ev.get("onset_s")
+        if onset_s is None:
+            onset_s = (float(ev.get("start", 0)) / fs) if fs else 0.0
+        onset_s = float(onset_s)
+        excised_before = 0.0
+        dropped = False
+        for a, b in ivs:
+            if a <= onset_s < b:
+                dropped = True
+                break
+            if b <= onset_s:
+                excised_before += (b - a)
+        if dropped:
+            continue
+        new_s = onset_s - excised_before
+        ne = dict(ev)
+        ne["onset_s"] = new_s
+        ne["start"] = int(round(new_s * fs)) if fs else int(ev.get("start", 0))
+        out.append(ne)
+    return out
 
 
 def _load_inputs(work_dir, argv):
@@ -2351,17 +3462,37 @@ def _load_inputs(work_dir, argv):
         sys.exit(2)
     pre_nwb = Path(argv[1])
     if not pre_nwb.is_file():
-        # auto-discover under work_dir/preprocessed_output/preprocessed/
+        # No explicit file → auto-discover EVERY preprocessed nwb under the
+        # work_dir and build one input entry per file. Taking only the first
+        # match silently processed a single arbitrary recording in a
+        # multi-subject work_dir.
         base = work_dir / "preprocessed_output" / "preprocessed"
+        discovered = []
         if base.is_dir():
             for sub_dir in sorted(base.glob("sub-*")):
+                if not sub_dir.is_dir():
+                    continue
                 for sess_dir in sorted(sub_dir.iterdir()):
-                    cands = sorted(sess_dir.glob("*_preprocessed.nwb"))
-                    if cands:
-                        pre_nwb = cands[0]
-                        break
-                if pre_nwb.is_file():
-                    break
+                    if not sess_dir.is_dir():
+                        continue
+                    for nwb in sorted(sess_dir.glob("*_preprocessed.nwb")):
+                        discovered.append(nwb)
+        if discovered:
+            entries = []
+            for nwb in discovered:
+                parts = nwb.parts
+                sub_part = next((p for p in parts if p.startswith("sub-")), "sub-unknown")
+                idx = parts.index(sub_part) if sub_part in parts else -1
+                ses_part = parts[idx + 1] if 0 <= idx < len(parts) - 1 else "ses-001"
+                entries.append({{
+                    "data_path": str(nwb),
+                    "stem_safe": nwb.stem.replace("_preprocessed", ""),
+                    "subject_id": sub_part.replace("sub-", ""),
+                    "session_id": ses_part.replace("ses-", ""),
+                    "file_id": "legacy",
+                    "events_path": None,
+                }})
+            return entries
     if not pre_nwb.is_file():
         print("[ai_ready] no preprocessed nwb found", file=sys.stderr)
         sys.exit(3)
@@ -2432,22 +3563,42 @@ def _ai_ready_one(work_dir, inp):
     events = None
     events_path = inp.get("events_path")
     if events_path and Path(events_path).is_file():
-        events = _load_events_csv(events_path)
+        events = _load_events_csv(events_path, fs)
     if not events and isinstance(meta, dict):
         events = meta.get("events") or None
 
+    # reject_by_labels (pipeline.py) excised time windows before this NWB was
+    # written; remap event onsets across those gaps (seconds domain) so epochs
+    # land on the correct post-reject samples. Events inside excised windows
+    # are dropped.
+    if events:
+        rejected_intervals = None
+        if isinstance(meta, dict):
+            rejected_intervals = meta.get("rejected_intervals")
+        if rejected_intervals:
+            n_before = len(events)
+            events = _remap_events_after_reject(events, rejected_intervals, fs)
+            print("[ai_ready] remapped events across {{}} reject_by_labels window(s): "
+                  "{{}} -> {{}} events".format(len(rejected_intervals), n_before, len(events)),
+                  file=sys.stderr)
+
     if EVENTS_PRESENT and events:
-        epochs = _epoch_from_events(data, fs, events, tmin=-0.2, tmax=SEGMENT_DURATION)
-        labels = np.asarray([e.get("label", 0) for e in events])
+        epochs, labels = _epoch_from_events(data, fs, events, tmin=-0.2, tmax=SEGMENT_DURATION)
     else:
         epochs = _sliding(data, fs, SEGMENT_DURATION, STRIDE)
         labels = None
         if LABEL_CONFIG and LABEL_CONFIG.get("label_type") == "L3_continuous":
             lp = LABEL_CONFIG.get("label_path", "labels.npy")
             try:
-                labels = np.load(lp)
+                raw_labels = np.load(lp)
             except OSError:
-                labels = None
+                raw_labels = None
+            if raw_labels is not None:
+                # L3 labels are per-sample; reduce to one-per-window so
+                # len(labels) == epochs.shape[0] (was silently mismatched).
+                labels = _align_continuous_labels(
+                    raw_labels, data.shape[1], fs, SEGMENT_DURATION, STRIDE
+                )
 
     # AI_ready uses bare subject_id (no "sub-" prefix) — ML convention.
     out_dir = work_dir / "preprocessed_output" / "AI_ready" / sub_id / "ses-{{}}".format(ses)
@@ -2480,22 +3631,54 @@ def _ai_ready_one(work_dir, inp):
     }}
 
 
-def _load_events_csv(csv_path):
+def _load_events_csv(csv_path, fs):
+    """Load a sidecar event table into a list of start/code/label dicts.
+
+    Supports two schemas, auto-detected per row:
+
+    * legacy CSV -- comma-separated sample_index / event_code.
+      sample_index is already a sample offset (used verbatim).
+    * BIDS TSV -- tab-separated onset (seconds) / duration / trial_type /
+      value. onset is converted to a sample offset via fs; the label prefers
+      trial_type then falls back to value.
+
+    Separator is chosen by extension (.tsv -> tab, else comma).
+    """
     import csv as _csv
+
+    delimiter = "\t" if str(csv_path).lower().endswith((".tsv", ".tab")) else ","
     out = []
     with open(csv_path, "r", encoding="utf-8") as f:
-        reader = _csv.DictReader(f)
+        reader = _csv.DictReader(f, delimiter=delimiter)
         for row in reader:
-            try:
-                start = int(float(row.get("sample_index") or 0))
-            except (TypeError, ValueError):
-                start = 0
-            code = row.get("event_code", "").strip()
-            out.append({{
-                "start": start,
-                "code": int(code) if code.isdigit() else code,
-                "label": int(code) if code.isdigit() else code,
-            }})
+            onset_s = None
+            if "onset" in row and row.get("onset") not in (None, ""):
+                # BIDS: onset is in seconds → convert to a sample offset.
+                try:
+                    onset_s = float(row["onset"])
+                    start = int(round(onset_s * float(fs)))
+                except (TypeError, ValueError):
+                    start = 0
+                    onset_s = None
+                raw = row.get("trial_type")
+                if raw is None or str(raw).strip() in ("", "n/a"):
+                    raw = row.get("value")
+            else:
+                # Legacy: sample_index is already a sample offset.
+                try:
+                    start = int(float(row.get("sample_index") or 0))
+                    onset_s = (start / float(fs)) if fs else None
+                except (TypeError, ValueError):
+                    start = 0
+                    onset_s = None
+                raw = row.get("event_code")
+
+            code = str(raw).strip() if raw is not None else ""
+            label = int(code) if code.lstrip("-").isdigit() else code
+            # onset_s (original seconds) lets _remap_events_after_reject shift
+            # onsets across reject_by_labels gaps in a time-base-invariant way.
+            out.append({{"start": start, "code": label, "label": label,
+                        "onset_s": onset_s}})
     return out
 
 
@@ -2757,6 +3940,18 @@ def split_data(
     if ratios is None:
         ratios = {ratios_repr}
 
+    # Normalize ratios to sum to 1.0 so the cumsum-threshold logic in the
+    # sequential/temporal splitters partitions correctly even when the caller
+    # passes raw weights (e.g. {{"train": 70, "test": 30}}). Without this the
+    # tail split is silently starved (sum>1) or over-filled (sum<1).
+    _total = float(sum(ratios.values()))
+    if _total > 0:
+        ratios = {{k: (v / _total) for k, v in ratios.items()}}
+    else:
+        # Degenerate all-zero weights: fall back to equal shares.
+        _nk = len(ratios) or 1
+        ratios = {{k: (1.0 / _nk) for k in ratios}}
+
     n = n_items
 
     if method == "random":
@@ -2830,7 +4025,11 @@ def _temporal_split(n, ratios, gap):
     split_names = list(ratios.keys())
     n_gaps = len(split_names) - 1
     total_gap = gap * n_gaps
-    usable = max(n - total_gap, n)
+    # Reserve gap samples so train/test are not temporally adjacent. Guard
+    # against a gap larger than the data (keep at least 1 usable sample).
+    # NOTE: must be `n - total_gap`, not `max(n - total_gap, n)` — the latter
+    # is always n (total_gap >= 0), silently disabling the anti-leakage gap.
+    usable = max(n - total_gap, 1)
 
     cumulative = np.cumsum([ratios[s] for s in split_names])
     boundaries = [int(r * usable) for r in cumulative]

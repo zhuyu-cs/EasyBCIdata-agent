@@ -113,9 +113,16 @@ def validate_loaded_data(data_dict: Dict[str, Any]) -> ValidationResult:
 
     # Duration consistency
     if isinstance(frequency, (int, float)) and frequency > 0 and data.ndim >= 1:
+        # inspect-only loads return a tiny stub (e.g. first 1 s) while `duration`
+        # reports the file's TRUE length, so the check would always "mismatch"
+        # by ~orders of magnitude and flood logs once per file during batch
+        # inspection. Skip it for inspect stubs — the full-load path validates
+        # the real signal.
+        _meta = data_dict.get("meta") if isinstance(data_dict, dict) else None
+        _is_stub = bool(isinstance(_meta, dict) and _meta.get("inspect_only"))
         expected_duration = n_samples / frequency
         reported_duration = data_dict.get("duration")
-        if reported_duration is not None:
+        if not _is_stub and reported_duration is not None:
             ratio = abs(expected_duration - reported_duration) / max(expected_duration, 0.001)
             if ratio > 0.1:
                 result.warnings.append(

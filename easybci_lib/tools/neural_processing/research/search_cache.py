@@ -46,11 +46,22 @@ class SearchCache:
     def _ensure_dir(self) -> None:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def _make_key(self, modality: str, paradigm: str, question: str) -> str:
-        """Create a stable cache key from search parameters."""
+    def _make_key(
+        self, modality: str, paradigm: str, question: str,
+        cache_key: Optional[str] = None,
+    ) -> str:
+        """Create a stable cache key from search parameters.
+
+        When ``cache_key`` is provided it REPLACES ``question`` in the hashed
+        material. Callers pass a stable semantic key (modality + paradigm +
+        analysis_goal, WITHOUT volatile fields like n_channels / sampling_rate)
+        so runs that differ only in those dimensions share one cache entry.
+        The full ``question`` is still stored in the envelope for inspection.
+        """
+        key_part = cache_key if cache_key is not None else question
         raw = (
             f"v={_CACHE_SCHEMA_VERSION}|"
-            f"{modality.lower()}|{paradigm.lower()}|{question.lower().strip()}"
+            f"{modality.lower()}|{paradigm.lower()}|{key_part.lower().strip()}"
         )
         return hashlib.sha256(raw.encode(encoding="utf-8")).hexdigest()[:24]
 
@@ -62,12 +73,14 @@ class SearchCache:
         modality: str,
         paradigm: str,
         question: str,
+        cache_key: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Retrieve cached result if it exists and hasn't expired.
 
-        Returns None on miss (not found or expired).
+        Returns None on miss (not found or expired). ``cache_key`` (when given)
+        overrides ``question`` in key derivation — see :meth:`_make_key`.
         """
-        key = self._make_key(modality, paradigm, question)
+        key = self._make_key(modality, paradigm, question, cache_key)
         path = self._path_for_key(key)
 
         if not path.exists():
@@ -97,10 +110,16 @@ class SearchCache:
         paradigm: str,
         question: str,
         payload: Dict[str, Any],
+        cache_key: Optional[str] = None,
     ) -> None:
-        """Store a search result in the cache."""
+        """Store a search result in the cache.
+
+        ``cache_key`` (when given) overrides ``question`` in key derivation —
+        see :meth:`_make_key`. Pass the SAME ``cache_key`` to :meth:`get` to
+        retrieve it.
+        """
         self._ensure_dir()
-        key = self._make_key(modality, paradigm, question)
+        key = self._make_key(modality, paradigm, question, cache_key)
         path = self._path_for_key(key)
 
         envelope = {

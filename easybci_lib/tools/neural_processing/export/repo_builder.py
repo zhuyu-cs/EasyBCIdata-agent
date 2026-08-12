@@ -50,11 +50,57 @@ from typing import Any, Dict, List, Literal, Optional
 
 from easybci_lib.tools.neural_processing._seed import EASYBCI_SEED
 from easybci_lib.tools.neural_processing.export._lint import ruff_fix
+from easybci_lib.tools.neural_processing.export._size_utils import (
+    dir_size_bytes, format_size, paths_size_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
 # Directories that are part of the canonical output structure
 _CANONICAL_DIRS = frozenset({"preprocessed_output", "code", "plan", "middle_process"})
+
+
+def _compute_storage_footprint(out: Path, input_path: str) -> Dict[str, Any]:
+    """Raw-input vs preprocessed-output byte totals for the run summary.
+
+    Raw size priority: routing table (batch, sum every input's ``data_path``) >
+    ``plan/input_ref.json['size_bytes']`` (single-file) > ``input_path`` itself.
+    Output size = recursive size of ``preprocessed_output/``. Missing/unreadable
+    sources degrade to 0 (never raises). Returns {} when nothing is measurable.
+    """
+    raw_bytes = 0
+    # Batch: sum the actual routed source files.
+    try:
+        from easybci_lib.tools.neural_processing.io.routing_table import load_routing_table
+        table = load_routing_table(out)
+        if table and getattr(table, "inputs", None):
+            raw_bytes = paths_size_bytes(e.data_path for e in table.inputs)
+    except Exception:
+        raw_bytes = 0
+    # Single-file fallbacks.
+    if not raw_bytes:
+        ref = out / "plan" / "input_ref.json"
+        if ref.exists():
+            try:
+                raw_bytes = int(json.loads(ref.read_text(encoding="utf-8")).get("size_bytes") or 0)
+            except (OSError, json.JSONDecodeError, ValueError, TypeError):
+                raw_bytes = 0
+    if not raw_bytes and input_path:
+        p = Path(input_path)
+        raw_bytes = dir_size_bytes(p) if p.is_dir() else paths_size_bytes([input_path])
+
+    output_bytes = dir_size_bytes(out / "preprocessed_output")
+    if not raw_bytes and not output_bytes:
+        return {}
+    fp: Dict[str, Any] = {
+        "raw_size_bytes": raw_bytes,
+        "output_size_bytes": output_bytes,
+        "raw_size_human": format_size(raw_bytes),
+        "output_size_human": format_size(output_bytes),
+    }
+    if raw_bytes > 0:
+        fp["reduction_pct"] = round((1 - output_bytes / raw_bytes) * 100, 1)
+    return fp
 
 # --- Output layout: continuous (BIDS sub-) + epoched (no prefix) ---
 # Continuous post-pipeline data lives under preprocessed_output/preprocessed/
@@ -266,6 +312,8 @@ def build_mini_repo(
     status: Literal["ok", "partial", "migrated"] = "ok",
     partial_reason: Optional[str] = None,
     analysis_goal: Optional[str] = None,
+    scenario: Optional[str] = None,
+    deliverables: Optional[list] = None,
 ) -> Dict[str, Any]:
     """Build a reproducible mini-repo from pipeline execution results.
 
@@ -317,6 +365,37 @@ def build_mini_repo(
             except (OSError, json.JSONDecodeError):
                 _goal = None
     analysis_goal = (str(_goal).strip() if _goal else "") or "generic"
+
+    # Resolve scenario/deliverables with the same priority as analysis_goal:
+    #   explicit param > pipeline_record > plan/goal.json side file > default.
+    # propose_pipeline already wrote both into plan/goal.json, so an
+    # export/auto-finalize call that omits them still recovers the confirmed
+    # values instead of silently defaulting.
+    from easybci_lib.tools.neural_processing.preprocess.deliverables import (
+        normalize_deliverables as _normalize_deliverables,
+    )
+    _scenario = scenario or (pipeline_record or {}).get("scenario")
+    _deliv = deliverables
+    if _deliv is None:
+        _pr_deliv = (pipeline_record or {}).get("deliverables")
+        if isinstance(_pr_deliv, list):
+            _deliv = _pr_deliv
+    if _scenario is None or _deliv is None:
+        _goal_path = out / "plan" / "goal.json"
+        if _goal_path.exists():
+            try:
+                _gj = json.loads(_goal_path.read_text(encoding="utf-8"))
+                if _scenario is None:
+                    _scenario = _gj.get("scenario")
+                if _deliv is None and isinstance(_gj.get("deliverables"), list):
+                    _deliv = _gj["deliverables"]
+            except (OSError, json.JSONDecodeError):
+                pass
+    _scenario = (str(_scenario).strip() if _scenario else "") or "research"
+    try:
+        _deliverables = _normalize_deliverables(_deliv)
+    except ValueError:
+        _deliverables = ["preprocessed"]
 
     # Resolve web_evidence with the same priority pattern as
     # analysis_goal (pipeline_record > plan/web_evidence.json > "unavailable").
@@ -526,6 +605,13 @@ def build_mini_repo(
         # fields (proposal/reasoning/pipeline_record/schema). Stamp it here so
         # downstream consumers and the finalize-recovery path see it.
         pipeline_record["analysis_goal"] = analysis_goal
+        pipeline_record["scenario"] = _scenario
+        pipeline_record["deliverables"] = list(_deliverables)
+        # Raw-vs-preprocessed storage footprint (e.g. raw 5.6 TB → 98 GB) so the
+        # summary/README and machine consumers can report the reduction.
+        _footprint = _compute_storage_footprint(out, input_path)
+        if _footprint:
+            pipeline_record["storage_footprint"] = _footprint
         # Record the user's output_format choice + the resolved
         # chosen_format. .get() fallback elsewhere keeps consumers tolerant of
         # legacy records that lack these keys.
@@ -581,6 +667,8 @@ def build_mini_repo(
             "modality": modality,
             "paradigm": paradigm,
             "analysis_goal": analysis_goal,
+            "scenario": _scenario,
+            "deliverables": list(_deliverables),
             "web_evidence": web_evidence,
             "web_evidence_used": (
                 isinstance(web_evidence, dict)
@@ -637,6 +725,8 @@ def build_mini_repo(
             "modality": modality,
             "paradigm": paradigm,
             "analysis_goal": analysis_goal,
+            "scenario": _scenario,
+            "deliverables": list(_deliverables),
             "data_info": dict(data_info) if data_info else {},
             "web_evidence": web_evidence,
             "web_evidence_used": (
@@ -692,6 +782,22 @@ def build_mini_repo(
     )
     _write(code_dir / "pipeline.py", code)
     created_files.append("code/pipeline.py")
+
+    # Bundle the standalone Nihon Kohden io_loader plugin into the repo so the
+    # generated pipeline reads NK (.EEG) correctly on ANY machine — not as
+    # 1-channel BrainVision garbage. matches() only claims NK sets (sibling
+    # .21E), so it is inert in non-NK repos → provision unconditionally. Also
+    # drop a machine-global copy for interactive/QC reuse. Best-effort.
+    try:
+        from easybci_lib.tools.neural_processing.io.nk_loader_plugin import (
+            ensure_global_plugin,
+            ensure_repo_plugin,
+        )
+        ensure_repo_plugin(code_dir)
+        created_files.append("code/io_loaders/nihon_kohden.py")
+        ensure_global_plugin()
+    except Exception as _nk_err:  # noqa: BLE001
+        logger.warning("NK io_loader provisioning failed: %s", _nk_err)
 
     # Best-effort lint pass on the generated pipeline (auto-fix import order
     # and explicit text-mode encoding). Never blocks export — see
@@ -1677,6 +1783,21 @@ def _write_readme(
         if b_std[1] and a_std[1]:
             reduction = (1 - a_std[1] / b_std[1]) * 100 if b_std[1] > 0 else 0
             lines.append(f"| Std deviation | {b_std[1]:.4f} | {a_std[1]:.4f} ({reduction:+.1f}%) |")
+        lines.append("")
+
+    # --- 4b. Storage Footprint (raw inputs vs preprocessed output) ---
+    _fp = (pipeline_record or {}).get("storage_footprint") or {}
+    if _fp.get("raw_size_bytes") or _fp.get("output_size_bytes"):
+        lines.extend([
+            "## 4b. Storage Footprint",
+            "",
+            "| | Size |",
+            "|--|--|",
+            f"| Raw input | {_fp.get('raw_size_human', '?')} |",
+            f"| Preprocessed output | {_fp.get('output_size_human', '?')} |",
+        ])
+        if _fp.get("reduction_pct") is not None:
+            lines.append(f"| Reduction | {_fp['reduction_pct']:.1f}% |")
         lines.append("")
 
     # --- 5. QC Status ---

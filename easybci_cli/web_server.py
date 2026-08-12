@@ -847,6 +847,29 @@ async def get_analysis_goal_enum():
     }
 
 
+@app.get("/api/schema/scenario-enum")
+async def get_scenario_enum():
+    """Expose the canonical scenario enum to the WebUI (mirrors goal-enum)."""
+    try:
+        from easybci_lib.tools.neural_processing.preprocess.scenario import (
+            SCENARIO_REGISTRY, DEFAULT_SCENARIO,
+        )
+        options = [
+            {
+                "name": spec.name,
+                "display_name_en": spec.display_name.get("en", spec.name),
+                "display_name_zh": spec.display_name.get("zh", spec.name),
+                "description": spec.description,
+                "default_deliverables": spec.default_deliverables,
+            }
+            for spec in SCENARIO_REGISTRY.values()
+        ]
+        return {"options": options, "default": DEFAULT_SCENARIO}
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("scenario-enum: REGISTRY load failed: %s", exc)
+        return JSONResponse({"options": [], "error": "schema unavailable"})
+
+
 _EMPTY_MODEL_INFO: dict = {
     "model": "",
     "provider": "",

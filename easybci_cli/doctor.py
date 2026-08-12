@@ -2016,6 +2016,22 @@ def doctor_proven_pipelines() -> dict:
             continue
         fm = fm_match.group(1)
 
+        # Reference-import enhanced skills use a different provenance layout
+        # (adaptation_slots + qc_baselines instead of the crystallized
+        # data_profile block). Recognize them and validate on their own terms
+        # so the channels/sfreq_hz regex below cannot false-flag them.
+        is_reference = bool(re.search(r"source_kind:\s*reference_import", fm))
+        if is_reference:
+            has_slots = "adaptation_slots:" in fm
+            has_baselines = "qc_baselines:" in fm
+            if not (has_slots and has_baselines):
+                warnings.append({
+                    "name": skill_dir.name, "issue": "incomplete_reference_skill",
+                    "detail": "reference-import skill missing adaptation_slots/qc_baselines",
+                    "fix": f"re-run: easybci reference import <dir>  (or rm -rf '{skill_dir}')",
+                })
+            continue  # do NOT apply the crystallized-skill channels/sfreq check
+
         goal_m = re.search(r"analysis_goal:\s*([\w\-]+)", fm)
         goal = goal_m.group(1) if goal_m else None
         if goal in INELIGIBLE_GOALS:

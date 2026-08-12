@@ -157,6 +157,22 @@ def _resolve_aux_model_id() -> str:
         return "unknown"
 
 
+def _research_llm_max_tokens(default: int = 16384) -> int:
+    """Output-token ceiling for the query-planning LLM call.
+
+    Emits a JSON list of search queries via an aux model that may be a
+    REASONING model — thinking tokens are spent BEFORE the JSON, so a tight
+    ceiling truncated the query plan mid-list and degraded the whole search.
+    Generous default; override via ``web.research.plan_max_tokens``."""
+    try:
+        from easybci_cli.config import load_config
+
+        research = ((load_config() or {}).get("web") or {}).get("research") or {}
+        return max(1024, int(research.get("plan_max_tokens", default)))
+    except Exception:  # noqa: BLE001 — config read shouldn't be fatal
+        return default
+
+
 def _planner_enabled() -> bool:
     """``web.query_planner`` gate — default True. Escape hatch to force the
     template path."""
@@ -302,9 +318,10 @@ def plan_queries(
         response = call_llm_with_overflow_retry(
             call_llm=call_llm,
             task="web_extract",
+            timeout=_research_llm_timeout(),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=1024,
+            max_tokens=_research_llm_max_tokens(),
             fallback_input_chars=64_000,
         )
         text = extract_content_or_reasoning(response) or ""

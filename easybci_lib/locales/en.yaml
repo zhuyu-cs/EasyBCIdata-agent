@@ -64,4 +64,14 @@ layout_repair:
     reuse_suppressed: "This call is suppressed because the current work_dir is in Reuse Mode ({reuse_source}). The research tools are unnecessary — the proven skill's parameters are already authoritative."
     disallowed_ext_moved: "Moved {n_files} file(s) with disallowed extension from {dir_name}/ to middle_process/sweep_<ts>/."
 
+scenario:
+  research: "Research"
+  clinical: "Clinical"
+  deployment: "Deployment"
+
+deliverables:
+  preprocessed: "Preprocessed signal (NWB)"
+  ai_ready: "AI-ready training data (epochs)"
+
+
 

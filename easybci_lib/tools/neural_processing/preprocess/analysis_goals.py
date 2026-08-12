@@ -25,6 +25,12 @@ class AnalysisGoalSpec:
     allow_aggressive_notch: bool = True
     allow_ica: bool = True
     produces_figures: bool = True
+    # DEMOTED to a default *suggestion* only (was a hard gate). AI-ready
+    # generation is now driven by the `deliverables` concept (see
+    # preprocess/deliverables.py), decided by the user at confirm time and
+    # persisted into the proposal / confirm marker / pipeline_record. This flag
+    # is retained for backward-compat + as the seed value when the LLM first
+    # infers deliverables; codegen/contract_check no longer read it as a gate.
     produces_ai_ready: bool = True
     crystallize_eligible: bool = True
     notes: str = ""

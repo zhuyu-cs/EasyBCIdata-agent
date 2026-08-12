@@ -404,7 +404,7 @@ def judge_goal(
                 {"role": "user", "content": prompt},
             ],
             temperature=0,
-            max_tokens=200,
+            max_tokens=4096,
             timeout=timeout,
             extra_body=get_auxiliary_extra_body() or None,
         )

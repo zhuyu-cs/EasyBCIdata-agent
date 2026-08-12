@@ -57,7 +57,7 @@ def generate_title(
         response = call_llm(
             task="title_generation",
             messages=messages,
-            max_tokens=500,
+            max_tokens=4096,
             temperature=0.3,
             timeout=timeout,
             main_runtime=main_runtime,

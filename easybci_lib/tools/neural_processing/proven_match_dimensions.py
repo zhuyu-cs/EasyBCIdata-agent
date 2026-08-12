@@ -84,12 +84,16 @@ def _score_analysis_goal(entry, query: str) -> float:
         field stay visible in proven_matches, but the strict Reuse-gate check
         in neural_tools._handle_suggest_pipeline still requires exact equality
         before emitting a proven_recommendation).
+      * query == "generic" → 0.5 (neutral; "generic" is the unspecified-goal
+        sentinel the production caller substitutes when no goal is supplied —
+        ``args.get("analysis_goal") or "generic"`` — so a generic *query* must
+        not hard-filter out specific-goal entries like reference imports).
       * exact match → 1.0
       * mismatch    → 0.0 (hard filter short-circuits the entry).
     """
     a = (entry.analysis_goal or "").strip().lower()
     b = (query or "").strip().lower()
-    if not a or not b:
+    if not a or not b or b == "generic":
         return 0.5
     return 1.0 if a == b else 0.0
 

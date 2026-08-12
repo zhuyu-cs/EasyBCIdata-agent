@@ -26,11 +26,48 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
+from typing import Any, Callable, Dict, List
 
 from easybci_agent.web_search_provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _search_timeout_seconds(default: float = 15.0) -> float:
+    """Wall-clock cap (seconds) for a single Exa search/extract HTTP call.
+
+    The exa-py SDK (2.14.0) issues bare ``requests`` calls with NO timeout and
+    exposes no injectable session/timeout, so an unresponsive endpoint would
+    hang indefinitely. We bound each call with a worker-thread guard instead.
+    Read from ``web.research.search_timeout_seconds`` via ``load_config()``.
+    """
+    try:
+        from easybci_cli.config import load_config
+
+        research = ((load_config() or {}).get("web") or {}).get("research") or {}
+        return max(0.0, float(research.get("search_timeout_seconds", default)))
+    except Exception:  # noqa: BLE001 — config read must never be fatal
+        return default
+
+
+def _call_with_timeout(fn: Callable[[], Any], timeout: float) -> Any:
+    """Run ``fn()`` on a worker thread, raising ``TimeoutError`` past ``timeout``.
+
+    The worker is not joined on timeout (a wedged socket can't be force-killed);
+    it is a daemon thread that unwinds when its underlying HTTP call eventually
+    errors. ``timeout <= 0`` disables the guard (runs inline).
+    """
+    if timeout <= 0:
+        return fn()
+    ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="exa")
+    fut = ex.submit(fn)
+    try:
+        return fut.result(timeout=timeout)
+    except _FutureTimeout:
+        raise TimeoutError(f"Exa call exceeded {timeout:.0f}s")
+    finally:
+        ex.shutdown(wait=False)
 
 # Module-level note: the canonical ``_exa_client`` cache slot lives on
 # :mod:`tools.web_tools` so tests that do ``tools.web_tools._exa_client =
@@ -144,10 +181,14 @@ class ExaWebSearchProvider(WebSearchProvider):
                 return {"success": False, "error": "Interrupted"}
 
             logger.info("Exa search: '%s' (limit=%d)", query, limit)
-            response = _get_exa_client().search(
-                query,
-                num_results=limit,
-                contents={"highlights": True},
+            client = _get_exa_client()
+            response = _call_with_timeout(
+                lambda: client.search(
+                    query,
+                    num_results=limit,
+                    contents={"highlights": True},
+                ),
+                _search_timeout_seconds(),
             )
 
             web_results = []
@@ -188,7 +229,11 @@ class ExaWebSearchProvider(WebSearchProvider):
                 ]
 
             logger.info("Exa extract: %d URL(s)", len(urls))
-            response = _get_exa_client().get_contents(urls, text=True)
+            client = _get_exa_client()
+            response = _call_with_timeout(
+                lambda: client.get_contents(urls, text=True),
+                _search_timeout_seconds(),
+            )
 
             results: List[Dict[str, Any]] = []
             for result in response.results or []:

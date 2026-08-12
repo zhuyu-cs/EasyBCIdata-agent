@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from easybci_lib.tools.neural_processing.io.loader import load_neural
 from easybci_lib.tools.neural_processing.io.inspection_report import (
     ArtifactSummary,
     ChannelStat,
@@ -172,34 +173,93 @@ def deep_inspect(
         except Exception as exc:  # noqa: BLE001
             logger.warning("routing table upsert failed: %s", exc)
 
-    return {
+    envelope: dict[str, Any] = {
         "success": True,
         "report_path": str(out_path),
         "report": report.to_dict(),
         "degraded": report.degraded,
         "elapsed_s": round(time.monotonic() - started, 2),
     }
+    # Touchpoint ①: if this degraded because no loader could read the format
+    # (as opposed to a recognised loader crashing), surface an actionable
+    # next_action pointing the agent at register_io_loader.
+    if report.degraded:
+        next_action = _unsupported_format_next_action(data_path)
+        if next_action is not None:
+            envelope["next_action"] = next_action
+            envelope["report"]["degraded_reason"] = "unsupported_format"
+    return envelope
 
 
 def _discover_events_csv(data_path: Path | str) -> Optional[str]:
-    """Best-effort lookup of a sidecar ``events_{stem}.csv``.
+    """Best-effort lookup of a sidecar event file.
 
-    Searches the raw file's parent directory for ``events_{stem_safe}.csv``
-    and ``events_{raw_stem}.csv`` (raw stem may contain spaces). Returns an
-    absolute path string or ``None``. Used by the routing table so
+    Covers two naming conventions:
+
+    * **legacy** — ``events_{stem_safe}.csv`` / ``events_{raw_stem}.csv``
+      (the original EasyBCI convention; raw stem may contain spaces).
+    * **BIDS** — ``{base}_events.tsv`` where ``base`` is the data stem with
+      its modality suffix (``_eeg`` / ``_meg`` / ``_ieeg`` / ``_ecog`` /
+      ``_nirs`` / ``_beh``) dropped, per the BIDS sidecar rule. Falls back to
+      ``{stem}_events.tsv`` when there is no recognised modality suffix.
+
+    For BIDS, also tries **entity-reduced** names: an events sidecar is often
+    shared one entity level above the data file (e.g. data
+    ``sub-01_ses-1_task-x_run-1_eeg.edf`` -> events
+    ``sub-01_ses-1_task-x_events.tsv``, no run). We strip trailing entities
+    (run-/acq-/rec-/split-/…) one at a time, but keep the ``sub-``(+``ses-``)
+    prefix so a flat multi-subject directory never resolves another subject's
+    events file.
+
+    Returns an absolute path string or ``None``. Used by the routing table so
     build_ai_ready never has to re-discover events at run time.
     """
     p = Path(data_path)
     data_dir = p.parent
     if not data_dir.is_dir():
         return None
+
+    # BIDS base = stem minus a trailing modality entity (e.g.
+    # "sub-01_task-motor_eeg" -> "sub-01_task-motor").
+    _BIDS_MODALITY_SUFFIXES = ("_eeg", "_meg", "_ieeg", "_ecog", "_nirs", "_beh")
+    stem = p.stem
+    bids_base = stem
+    for suffix in _BIDS_MODALITY_SUFFIXES:
+        if stem.endswith(suffix):
+            bids_base = stem[: -len(suffix)]
+            break
+
     candidates = [
         data_dir / f"events_{stem_safe(p)}.csv",
-        data_dir / f"events_{p.stem}.csv",
+        data_dir / f"events_{stem}.csv",
+        data_dir / f"{bids_base}_events.tsv",
+        data_dir / f"{stem}_events.tsv",
     ]
     for c in candidates:
         if c.is_file():
             return str(c)
+
+    # Entity-reduced BIDS fallback: strip trailing "_<key>-<val>" segments from
+    # bids_base and retry, but never drop the leading sub-/ses- entities (that
+    # would let us match a different subject in a flat directory).
+    tokens = bids_base.split("_")
+    # Determine how many leading tokens are the protected sub-/ses- prefix.
+    protected = 0
+    for tok in tokens:
+        if tok.startswith("sub-") or tok.startswith("ses-"):
+            protected += 1
+        else:
+            break
+    # Peel one trailing entity token at a time down to (but not into) the
+    # protected prefix.
+    for cut in range(len(tokens) - 1, protected, -1):
+        reduced = "_".join(tokens[:cut])
+        if not reduced:
+            continue
+        cand = data_dir / f"{reduced}_events.tsv"
+        if cand.is_file():
+            return str(cand)
+
     return None
 
 
@@ -210,8 +270,6 @@ def _scan(
     psd_resolution_hz: float,
     max_preload_mb: int,
 ) -> InspectionReport:
-    from easybci_lib.tools.neural_processing.io.loader import load_neural
-
     light = load_neural(data_path, modality="auto", inspect_only=True)
     meta = light.get("meta", {}) or {}
     if isinstance(meta, dict) and meta.get("load_error"):
@@ -222,7 +280,9 @@ def _scan(
     fs = float(light.get("frequency") or 0.0)
     duration_s = float(light.get("duration") or (n_samples_total / fs if fs else 0.0))
     channels = list(light.get("channels") or [])
-    modality = light.get("modality", "auto")
+    # Backends report modality inside meta (top-level "modality" never exists);
+    # fall back to top-level then "auto" for forward-compat.
+    modality = meta.get("modality") or light.get("modality") or "auto"
     fmt = (meta.get("format") or Path(data_path).suffix.lstrip(".")).lower()
 
     preload_mb = (n_channels * n_samples_total * 4) / (1024 * 1024)
@@ -469,9 +529,41 @@ def _build_warnings(
     return warns
 
 
+def _unsupported_format_next_action(data_path: str) -> Optional[dict[str, Any]]:
+    """Distinguish 'no loader for this format' from 'loader crashed'.
+
+    Touchpoint ① of the extensible-io design: when a light load returns the
+    unknown-format sentinel (meta.format=='unknown', set only by
+    _load_unknown_format after built-ins AND registered plugins both declined),
+    return a next_action pointing the agent at register_io_loader. A genuine
+    loader crash (a recognised format that failed to parse) returns None so the
+    caller keeps the plain degraded path — the two failures have different
+    remedies and must not be conflated.
+    """
+    try:
+        light = load_neural(data_path, modality="auto", inspect_only=True)
+    except Exception:  # noqa: BLE001 — any load error here is not 'unsupported'
+        return None
+    meta = light.get("meta", {}) or {}
+    if not isinstance(meta, dict) or meta.get("format") != "unknown":
+        return None
+    return {
+        "next_tool": "register_io_loader",
+        "must_present": True,
+        "reason": "unsupported_format",
+        "hint": (
+            f"No built-in or registered loader can read '{Path(data_path).name}'. "
+            "Read the file's structure, write a loader exposing matches(path) and "
+            "load(path, inspect_only=False) that returns the standard dict, register "
+            "it with register_io_loader (it auto-probes + validates), then re-run "
+            "deep_inspect."
+        ),
+        "supported_formats": meta.get("supported_formats") or [],
+    }
+
+
 def _degraded_lightweight(data_path: str, *, reason: str) -> InspectionReport:
     """Fallback: header-only fingerprint, neutral zero stats."""
-    from easybci_lib.tools.neural_processing.io.loader import load_neural
     try:
         light = load_neural(data_path, modality="auto", inspect_only=True)
     except Exception as exc:
@@ -487,7 +579,9 @@ def _degraded_lightweight(data_path: str, *, reason: str) -> InspectionReport:
     n_samples = int(meta.get("n_samples_total") or 0)
     fs = float(light.get("frequency") or 0.0)
     duration_s = float(light.get("duration") or 0.0)
-    modality = light.get("modality", "auto")
+    # Backends report modality inside meta (top-level "modality" never exists);
+    # fall back to top-level then "auto" for forward-compat.
+    modality = meta.get("modality") or light.get("modality") or "auto"
     fmt = (meta.get("format") or Path(data_path).suffix.lstrip(".")).lower()
 
     return InspectionReport(

@@ -690,12 +690,45 @@ def _default_script_runner() -> ScriptRunner:
     """Wrap ``codegen.script_runner.run_script`` into the ``(wd, stage) → bool`` shape."""
     def _run(wd: Path, stage: str) -> bool:
         from easybci_lib.tools.neural_processing.codegen.script_runner import run_script
-        result = run_script(wd, stage)
-        # ``run_script`` returns a dict with a "success" key (or omits it on failure).
+        result = run_script(work_dir=str(wd), stage=stage)
         if isinstance(result, dict):
-            return bool(result.get("success"))
+            return bool(result.get("ok"))
         return bool(result)
     return _run
+
+
+def _read_deliverables_for_layout(wd: Path) -> "list[str] | None":
+    """Resolve the confirmed deliverables for layout verification.
+
+    Priority: plan/proposal.json → middle_process/proposal.confirmed marker →
+    on-disk AI_ready probe (via resolve_deliverables). Returns None only when
+    the deliverables module itself is unavailable, in which case the caller
+    falls back to the goal's legacy produces_ai_ready hint (unchanged
+    behaviour). Never raises.
+    """
+    try:
+        from easybci_lib.tools.neural_processing.preprocess.deliverables import (
+            resolve_deliverables,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    import json as _json
+    record = None
+    for rel in ("plan/proposal.json", "middle_process/proposal.confirmed"):
+        p = wd / rel
+        if not p.is_file():
+            continue
+        try:
+            obj = _json.loads(p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("deliverables"), list):
+            record = {"deliverables": obj["deliverables"]}
+            break
+    try:
+        return resolve_deliverables(record, work_dir=wd)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def verify_and_repair(
@@ -719,7 +752,11 @@ def verify_and_repair(
     """
     started = time.monotonic()
     wd = Path(work_dir)
-    resolved = resolve_for_goal(analysis_goal)
+    # deliverables (from plan/proposal.json → confirm marker → on-disk probe)
+    # overrides the goal's legacy produces_ai_ready hint so a run that produced
+    # NWB-only (default) is not false-flagged as missing code/build_ai_ready.py.
+    _deliverables = _read_deliverables_for_layout(wd)
+    resolved = resolve_for_goal(analysis_goal, _deliverables)
 
     if generator is None and not dry_run:
         generator = _default_codegen_generator(wd, resolved)

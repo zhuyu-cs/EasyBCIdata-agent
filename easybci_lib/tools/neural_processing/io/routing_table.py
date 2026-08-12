@@ -56,6 +56,11 @@ class RoutingEntry:
     inspection_report_path: str
     events_path: Optional[str] = None
     override_script: Optional[str] = None
+    # Estimated peak-processing footprint (MB) from the recipe-aware model in
+    # memory_strategy.estimate_peak_mb. Recorded once at routing time so the
+    # batch scheduler and the cross-instance memory gate reuse it without
+    # re-reading the inspection report. None when metadata was too thin.
+    peak_mb: Optional[float] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -76,6 +81,7 @@ class RoutingEntry:
             override_script=(
                 str(d["override_script"]) if d.get("override_script") else None
             ),
+            peak_mb=(float(d["peak_mb"]) if d.get("peak_mb") is not None else None),
         )
 
 

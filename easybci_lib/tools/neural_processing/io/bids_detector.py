@@ -190,14 +190,42 @@ def _find_bids_sidecars(
     if not base:
         return associated
 
+    # Subject/session-constrained glob prefix for sidecar fallbacks. Without
+    # this, a flat directory holding multiple subjects (sub-01_*, sub-02_*, …)
+    # would match another subject's sidecar via a bare `*_channels.tsv` glob
+    # and silently attach the wrong channel names / electrode coordinates.
+    sub = entities.get("subject", "")
+    ses = entities.get("session", "")
+    ss_prefix = sub
+    if sub and ses:
+        ss_prefix = f"{sub}_{ses}"
+
+    def _constrained_sidecar(suffix: str, extra_middle: str = "") -> "Path | None":
+        """Return the sidecar for *this* subject/session, or None if the match
+        is ambiguous or absent. Never blindly grabs candidates[0] across
+        subjects."""
+        if ss_prefix:
+            pat = f"{ss_prefix}*{extra_middle}{suffix}"
+        else:
+            pat = f"*{extra_middle}{suffix}"
+        cands = sorted(data_dir.glob(pat))
+        if len(cands) == 1:
+            return cands[0]
+        if len(cands) > 1 and sub:
+            # Keep only files whose name carries this exact subject token.
+            exact = [c for c in cands if f"{sub}_" in c.name or c.name.startswith(sub)]
+            if len(exact) == 1:
+                return exact[0]
+        return None
+
     # Search for standard sidecars
     # 1. Events file
     events_path = data_dir / f"{base}_events.tsv"
     if not events_path.exists():
-        # Try without run number
-        candidates = list(data_dir.glob(f"*{entities.get('task', '')}*_events.tsv"))
-        if candidates:
-            events_path = candidates[0]
+        # Try without run number, but constrained to this subject/session.
+        cand = _constrained_sidecar("_events.tsv", extra_middle=f"{entities.get('task', '')}*")
+        if cand is not None:
+            events_path = cand
     if events_path.exists():
         associated["events"] = {
             "path": str(events_path),
@@ -208,9 +236,9 @@ def _find_bids_sidecars(
     # 2. Channels file
     channels_path = data_dir / f"{base}_channels.tsv"
     if not channels_path.exists():
-        candidates = list(data_dir.glob("*_channels.tsv"))
-        if candidates:
-            channels_path = candidates[0]
+        cand = _constrained_sidecar("_channels.tsv")
+        if cand is not None:
+            channels_path = cand
     if channels_path.exists():
         associated["channels"] = {
             "path": str(channels_path),
@@ -220,9 +248,9 @@ def _find_bids_sidecars(
     # 3. Electrodes file
     electrodes_path = data_dir / f"{base}_electrodes.tsv"
     if not electrodes_path.exists():
-        candidates = list(data_dir.glob("*_electrodes.tsv"))
-        if candidates:
-            electrodes_path = candidates[0]
+        cand = _constrained_sidecar("_electrodes.tsv")
+        if cand is not None:
+            electrodes_path = cand
     if electrodes_path.exists():
         associated["electrodes"] = {
             "path": str(electrodes_path),

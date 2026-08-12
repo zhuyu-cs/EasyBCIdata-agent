@@ -17,7 +17,7 @@ What we DON'T borrow:
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -31,6 +31,10 @@ _FORMAT_MAP = {
     ".fif": "mne", ".edf": "mne", ".bdf": "mne", ".set": "mne",
     ".ds": "mne", ".cnt": "mne", ".gdf": "mne",
     ".vhdr": "mne", ".vmrk": "mne", ".eeg": "mne",  # BrainVision
+    # Nihon Kohden (EEG-1200A): anchor on .21e (NK-specific electrode file) so
+    # the shared .EEG extension is NOT stolen from BrainVision. load_nk locates
+    # the sibling .EEG from the anchor.
+    ".21e": "nk",
     ".cdt": "mne",  # Neuroscan CURRY
     ".mff": "mne",  # EGI/Philips
     ".sqd": "mne", ".con": "mne",  # KIT/Yokogawa MEG
@@ -55,6 +59,7 @@ def load_neural(
     preload: bool = True,
     max_duration: Optional[float] = None,
     inspect_only: bool = False,
+    target_hz: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Load neural recording into a standardized dict.
 
@@ -70,6 +75,12 @@ def load_neural(
         Load data into memory immediately. If False, MNE uses memory-mapped I/O.
     max_duration : float or None
         If set, only load the first N seconds (useful for large files).
+    target_hz : float or None
+        If set and below the native rate, decimate on the fly during load so a
+        multi-hour high-channel recording (e.g. 261ch/2000Hz sEEG ≈ 56 GB peak
+        at native float32) stays within a memory budget. Only the ``nk`` backend
+        honors this today; other backends ignore it (they load native and rely
+        on a later resample step). Ignored when ``inspect_only``.
     inspect_only : bool
         If True, load only metadata and a small sample (first 1 second) for
         stats computation. Avoids full data load for large files. The returned
@@ -124,14 +135,20 @@ def load_neural(
         result = _load_xdf(filepath, inspect_only=inspect_only)
     elif backend == "pkl":
         result = _load_pkl(filepath, inspect_only=inspect_only)
+    elif backend == "nk":
+        from easybci_lib.tools.neural_processing.io.nk_backend import load_nk
+        result = load_nk(filepath, inspect_only=inspect_only, modality=modality,
+                         max_duration=max_duration, target_hz=target_hz)
     elif backend == "unknown":
-        result = _load_unknown_format(filepath, inspect_only=inspect_only)
+        result = _load_via_plugin_or_unknown(filepath, inspect_only=inspect_only,
+                                             target_hz=target_hz)
     else:
         logger.warning(
             "Backend '%s' not implemented for %s — trying unknown format fallback.",
             backend, path.suffix,
         )
-        result = _load_unknown_format(filepath, inspect_only=inspect_only)
+        result = _load_via_plugin_or_unknown(filepath, inspect_only=inspect_only,
+                                             target_hz=target_hz)
 
     # Single seam: every loader's result must carry meta['data_unit'].
     # Loaders that know the unit (MNE → V/T, Curry → V after µV→V conversion)
@@ -175,6 +192,15 @@ def _resolve_companion_to_main(filepath: str) -> str:
     """
     path = Path(filepath)
 
+    # Nihon Kohden: if the passed file is any member of an NK set (its .21E
+    # sibling exists), route through the .21E anchor so _detect_backend picks
+    # the "nk" backend regardless of which member the user passed. A bare
+    # BrainVision .eeg (no sibling .21E) falls through unchanged.
+    if path.suffix.upper() in {".EEG", ".LOG", ".PNT", ".EVT", ".21E"}:
+        _anchor = path.with_suffix(".21E")
+        if _anchor.exists():
+            return str(_anchor)
+
     # Handle compound extensions: if last suffix is a known companion,
     # strip it and check if the parent path exists
     if path.suffix.lower() in _COMPANION_EXTENSIONS:
@@ -191,6 +217,57 @@ def _resolve_companion_to_main(filepath: str) -> str:
             return str(set_path)
 
     return filepath
+
+
+# Nihon Kohden companion/sidecar extensions. Only .EEG carries signal; the rest
+# accompany a recording (electrode labels, events, montage, …) and must never
+# be routed as standalone signal inputs.
+_NK_SIDECAR_EXTS = {
+    ".21E", ".LOG", ".PNT", ".EVT", ".11D", ".CMT", ".CN3", ".BFT", ".EGF",
+}
+
+
+def filter_signal_files(paths: Sequence[str]) -> list[str]:
+    """Drop companion/sidecar files and collapse each recording to its signal.
+
+    A glob like ``dir/*.21E`` (or a mixed ``dir/*``) pulls in per-recording
+    sidecars alongside the real signal file. Feeding those to the batch router
+    creates phantom inputs (an NK ``.21E`` the generated pipeline can't read) and
+    duplicate stems. This normalizes a matched list to true signal files:
+
+    - NK ``.EEG`` with a sibling ``.21E`` → kept (it is the signal).
+    - NK ``.21E/.LOG/.PNT/.EVT`` with a sibling ``.EEG`` → mapped to that ``.EEG``.
+    - A pure NK sidecar (no ``.EEG`` sibling) → dropped.
+    - Other known companions (``_COMPANION_EXTENSIONS``) → resolved to their main
+      file via :func:`_resolve_companion_to_main`; dropped if unresolved.
+    - Anything else → kept unchanged.
+
+    Order-preserving de-dup (a stem matched via both ``.EEG`` and ``.21E`` yields
+    one entry).
+    """
+    out: list[str] = []
+    for raw in paths:
+        p = Path(raw)
+        suf = p.suffix.upper()
+        if suf == ".EEG":
+            out.append(str(p))  # signal (NK or BrainVision — both read as signal)
+            continue
+        if suf in {".21E", ".LOG", ".PNT", ".EVT"}:
+            eeg = p.with_suffix(".EEG")
+            if eeg.exists():
+                out.append(str(eeg))
+            # else: orphan NK sidecar → drop
+            continue
+        if suf in _NK_SIDECAR_EXTS:
+            continue  # .11D/.CMT/.CN3/.BFT/.EGF — never signal
+        if p.suffix.lower() in _COMPANION_EXTENSIONS or p.suffix.lower() == ".fdt":
+            resolved = _resolve_companion_to_main(str(p))
+            if resolved != str(p) and Path(resolved).exists():
+                out.append(resolved)
+            # else: unresolved companion → drop
+            continue
+        out.append(str(p))
+    return list(dict.fromkeys(out))
 
 
 def _load_mne(filepath: str, preload: bool = True, max_duration: Optional[float] = None,
@@ -622,35 +699,37 @@ def _load_curry_raw(
 
 
 def _parse_curry_events(ceo_path: Path, frequency: float) -> List[Dict[str, Any]]:
-    """Parse event markers from a Curry .ceo file."""
-    import re as _re
+    """Parse event markers from a Curry .ceo file.
 
+    Events live in the NUMBER_LIST data block (``ListDescription = event
+    numbers``), NOT LOCATION_LIST — that section holds electrode coordinates
+    (all-zero rows here), which previously collapsed every event onset to 0.
+
+    NUMBER_LIST data rows (verified against the dataset's ground-truth events
+    CSV): column 0 = sample index, column 2 = event type/code.
+    """
     with open(ceo_path, "r", encoding="utf-8", errors="replace") as f:
         content = f.read()
 
     events: List[Dict[str, Any]] = []
 
-    # Curry events are in the LOCATION_LIST section — rows of timestamp data
-    # Format varies but typically: columns include sample index, type code, etc.
+    # Match the DATA block ("NUMBER_LIST START_LIST"), not the metadata block
+    # ("NUMBER_LIST START"). End at "NUMBER_LIST END_LIST".
     in_list = False
-    n_cols = 0
     for line in content.split("\n"):
-        if "LOCATION_LIST" in line and "START_LIST" in line:
+        if "NUMBER_LIST" in line and "START_LIST" in line:
             in_list = True
             continue
-        if in_list and "END_LIST" in line:
+        if in_list and "NUMBER_LIST" in line and "END_LIST" in line:
             break
-        if "ListNrColumns" in line:
-            m = _re.search(r"(\d+)", line)
-            if m:
-                n_cols = int(m.group(1))
         if in_list:
             parts = line.strip().split()
-            if parts and len(parts) >= 2:
+            if len(parts) >= 3:
                 try:
-                    # First column is typically sample index, second might be annotation
                     sample_idx = int(float(parts[0]))
-                    event_type = parts[1] if len(parts) > 1 else "event"
+                    event_type = parts[2]  # col2 = event code (col1 is always 0)
+                    if sample_idx <= 0:
+                        continue  # skip padding / empty rows
                     onset_sec = sample_idx / max(frequency, 1.0)
                     events.append({
                         "onset": onset_sec,
@@ -1016,9 +1095,15 @@ def _extract_nwb_trials(f) -> List[Dict[str, Any]]:
                 "metadata": {"trial_index": i},
             }
 
-            # Extract additional columns
+            # Extract additional columns. Skip the structural columns always,
+            # and the type column only when one was found. The parenthesised
+            # form matters: `A or B if C else False` parses as
+            # `(A or B) if C else False`, so with type_data=None the standard
+            # columns would NOT be skipped and would leak into metadata.
             for key in trials_group:
-                if key in ("start_time", "stop_time", "id") or key == type_key if type_data else False:
+                if key in ("start_time", "stop_time", "id") or (
+                    type_data is not None and key == type_key
+                ):
                     continue
                 if isinstance(trials_group[key], h5py.Dataset):
                     try:
@@ -1508,8 +1593,29 @@ def _load_csv(filepath: str, inspect_only: bool = False) -> Dict[str, Any]:
     if data_arr.ndim == 1:
         data_arr = data_arr[np.newaxis, :]
     elif data_arr.ndim == 2:
-        # CSV typically stores as (n_samples x n_channels), we need (n_channels x n_samples)
-        if data_arr.shape[0] > data_arr.shape[1]:
+        # We need (n_channels, n_samples). CSV typically stores the transpose
+        # (n_samples x n_channels). When a header names the channels, its
+        # column-count is AUTHORITATIVE — anchor the orientation to it rather
+        # than guessing by shape (a shape-only heuristic silently transposes
+        # any high-density / short recording where n_channels > n_samples).
+        if header_channels and len(header_channels) > 1:
+            if data_arr.shape[0] == len(header_channels) and data_arr.shape[1] != len(header_channels):
+                pass  # already (n_channels, n_samples)
+            elif data_arr.shape[1] == len(header_channels):
+                data_arr = data_arr.T  # (n_samples, n_channels) -> transpose
+            # ambiguous square / mismatch → fall through to heuristic below
+            elif data_arr.shape[0] > data_arr.shape[1]:
+                data_arr = data_arr.T
+        elif data_arr.shape[0] > data_arr.shape[1]:
+            # No header to anchor on: assume the common tall (n_samples x
+            # n_channels) layout. Recordings with more channels than samples
+            # are misread here — logged so the assumption is visible.
+            logger.warning(
+                "_load_csv: no header; assuming (n_samples x n_channels) by "
+                "shape %s. A recording with more channels than samples will be "
+                "transposed wrong — provide a header row to disambiguate.",
+                data_arr.shape,
+            )
             data_arr = data_arr.T
 
     n_channels = data_arr.shape[0]
@@ -1572,7 +1678,17 @@ def _load_npz(filepath: str, inspect_only: bool = False) -> Dict[str, Any]:
             data_arr = data_arr.reshape(-1, data_arr.shape[-1])
         if data_arr.shape[0] > data_arr.shape[1]:
             data_arr = data_arr.T
+        # .npy carries no sampling-rate metadata. Assume 256 Hz but WARN
+        # loudly: a wrong rate silently corrupts duration, resample decisions,
+        # and every seconds<->sample event conversion downstream. npz/mat
+        # branches at least try to read a rate; .npy cannot, so surface it.
         frequency = 256.0
+        logger.warning(
+            ".npy file %s has no embedded sampling rate; assuming %.0f Hz. "
+            "If the true rate differs, duration/resample/event-onset math will "
+            "be wrong. Provide a sidecar or use a format that stores fs.",
+            path.name, frequency,
+        )
         n_channels = data_arr.shape[0]
         n_samples = data_arr.shape[1]
         channels = [f"Ch{i}" for i in range(n_channels)]
@@ -1907,12 +2023,23 @@ def _load_pkl(filepath: str, inspect_only: bool = False) -> Dict[str, Any]:
             elif data_arr.ndim == 2 and data_arr.shape[0] > data_arr.shape[1]:
                 data_arr = data_arr.T
             n_ch = data_arr.shape[0]
+            # Bare ndarray carries no sampling rate. Assume 256 Hz but WARN
+            # loudly — a wrong rate silently corrupts duration/resample/event
+            # math (same hazard as the .npy path).
+            logger.warning(
+                "Pkl '%s' is a bare ndarray with no sampling rate; assuming "
+                "256 Hz. If the true rate differs, duration/resample/event-onset "
+                "math will be wrong. Wrap the array in a dict with 'frequency'/"
+                "'fs'/'srate' to be explicit.",
+                path.name,
+            )
             return {
                 "data": data_arr,
                 "frequency": 256.0,
                 "channels": [f"Ch{i}" for i in range(n_ch)],
                 "duration": float(data_arr.shape[-1] / 256.0),
-                "meta": {"format": "pkl", "source_file": filepath},
+                "meta": {"format": "pkl", "source_file": filepath,
+                         "assumed_sampling_rate": True},
             }
         logger.warning("Pkl '%s' contains non-dict, non-array type: %s", path.name, type(obj).__name__)
         return {
@@ -1926,7 +2053,16 @@ def _load_pkl(filepath: str, inspect_only: bool = False) -> Dict[str, Any]:
     # EasyBCI native format: {"data": {modality: ndarray}, "labels": {...}, "meta": {...}}
     raw_data = obj.get("data")
     meta = obj.get("meta", {})
-    freq = meta.get("frequency") or obj.get("frequency") or obj.get("srate") or obj.get("fs", 256.0)
+    freq = meta.get("frequency") or obj.get("frequency") or obj.get("srate") or obj.get("fs")
+    if not freq:
+        # No rate key anywhere — assume 256 Hz but WARN (wrong rate silently
+        # corrupts duration/resample/event math).
+        logger.warning(
+            "Pkl '%s' dict has no frequency/fs/srate key; assuming 256 Hz. "
+            "Add 'frequency' (or 'fs'/'srate') to make the rate explicit.",
+            path.name,
+        )
+        freq = 256.0
     channels = meta.get("channels") or obj.get("channels")
 
     if isinstance(raw_data, dict):
@@ -1975,6 +2111,43 @@ def _load_pkl(filepath: str, inspect_only: bool = False) -> Dict[str, Any]:
             **(meta if isinstance(meta, dict) else {}),
         },
     }
+
+
+def _load_via_plugin_or_unknown(filepath: str, inspect_only: bool = False,
+                                target_hz: Optional[float] = None) -> Dict[str, Any]:
+    """Unknown-format boundary: try agent-authored loader plugins, then fallback.
+
+    Built-ins have already been tried (this is only reached when
+    _detect_backend returned "unknown" or an unimplemented backend), so a
+    registered plugin here fills a genuine blank and never shadows a built-in.
+    A plugin whose load() raises falls through to _load_unknown_format so a
+    buggy plugin degrades exactly like a failed built-in instead of crashing.
+    """
+    try:
+        from easybci_lib.tools.neural_processing.io.loader_registry import (
+            find as _find_loader, call_load as _call_load,
+        )
+        plugin = _find_loader(filepath)
+    except Exception as exc:  # noqa: BLE001 — registry must never break loading
+        logger.warning("IO loader registry lookup failed for %s: %s",
+                       Path(filepath).name, exc)
+        plugin = None
+
+    if plugin is not None:
+        try:
+            result = _call_load(plugin, filepath, inspect_only=inspect_only,
+                                target_hz=target_hz)
+            if isinstance(result, dict):
+                _meta = result.setdefault("meta", {})
+                _meta.setdefault("loaded_by_plugin", plugin.name)
+                return result
+            logger.warning("IO loader plugin %s returned %s, not a dict — falling back",
+                           plugin.name, type(result).__name__)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("IO loader plugin %s failed on %s: %s — falling back",
+                           plugin.name, Path(filepath).name, exc)
+
+    return _load_unknown_format(filepath, inspect_only=inspect_only)
 
 
 def _load_unknown_format(filepath: str, inspect_only: bool = False) -> Dict[str, Any]:

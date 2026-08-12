@@ -23,7 +23,7 @@ The only handover between phases is a trio of stable artifacts under `<work_dir>
 
 ## Working Directory Constraint (ABSOLUTE)
 
-Before writing ANY file, compute and enter `work_dir = {data_parent_parent}/{data_parent_name}_preprocess_work_dir/`. ALL writes use absolute paths inside `work_dir`. NEVER write outside it.
+Before writing ANY file, compute and enter `work_dir = {data_parent_parent}/{data_parent_name}_preprocess_work_dir/`. ALL writes use absolute paths inside `work_dir`. NEVER write outside it. (If the user specified an output location, pass it verbatim as `output_base_dir` to `deep_inspect` instead of computing the path yourself — see "Output Path Convention".)
 
 ## Routing Table Contract (ABSOLUTE — multi-input runs)
 
@@ -134,6 +134,10 @@ Asymmetric cost: defaulting to `generic` cheaply skips downstream-purpose artifa
 
 The value flows into Steps 5/6/7 unchanged and into `plan/goal.json` + `plan/proposal.json` + `pipeline_record.json` as the single source of truth.
 
+**Also capture `scenario` (delivery context) here.** Orthogonal to `analysis_goal`: `research` (default) | `clinical` | `deployment`. Infer from the user's words about who the output is for — "clinical / 临床 / diagnosis / 诊断" → `clinical`; "online / real-time / 实时 / deploy / 部署" → `deployment`; otherwise `research`. Encourage the user to state it up front when they give the data path + goal. If unstated, default to `research` and mark it "(inferred)" at Step 7 so they can override. scenario biases recommended parameters (conservative for clinical, low-latency for deployment) but forces NO pipeline branching — every step still lands in `proposal.json` for review.
+
+**Capture AI-ready intent, do NOT auto-infer it.** `deliverables` defaults to `["preprocessed"]` (NWB only). Add `ai_ready` (epochs.pkl training data) ONLY when the user explicitly asks for AI-ready / training data / epochs. The mere presence of an events file is NOT a request for AI-ready — many clinical/research users only want the cleaned signal. The final AI-ready decision is confirmed at Step 7 before any beyond-NWB artefact is generated.
+
 ### Step 3 — DEEP INSPECT (mandatory in New-Plan Mode)
 
 Tool: `deep_inspect(data_path=<path>, work_dir=<work_dir>)`.
@@ -201,7 +205,7 @@ Channel cleanup: if `channel_summary.must_drop` is non-empty, put `drop_nondata_
 
 ### Step 6 — PROPOSE (stages the deliverable; nothing lands in `plan/` yet)
 
-Tool: `propose_pipeline(data_path=..., analysis_goal=<from Step 2>, steps=[...], rationale=[...], modality=..., paradigm=..., output_path=<work_dir>, inspection_report_path=<from Step 3>)`.
+Tool: `propose_pipeline(data_path=..., analysis_goal=<from Step 2>, scenario=<from Step 2, default research>, deliverables=<["preprocessed"] unless the user explicitly asked for AI-ready>, steps=[...], rationale=[...], modality=..., paradigm=..., output_path=<work_dir>, inspection_report_path=<from Step 3>)`.
 
 **`inspection_report_path` is REQUIRED** — the handler rejects calls without it.
 
@@ -256,9 +260,9 @@ terminal(command="ls <work_dir>/middle_process/proposal.staged.json")
 
 ### Step 7 — CONFIRM (the ONE human gate; materializes `plan/`)
 
-Present the proposal to the user **from the `propose_pipeline` return value** (`proposal` / `viz` / `web_evidence` / `reasoning_preview` fields). Do NOT read disk — `plan/` does not exist yet.
+Present the proposal to the user **from the `propose_pipeline` return value** (`presentation_block` / `proposal` / `viz` / `web_evidence` / `reasoning_preview` fields). Do NOT read disk — `plan/` does not exist yet.
 
-**You MUST show the FULL pipeline before asking for confirmation.** Enumerate every step from `viz.steps` (or `proposal.steps`) as a numbered list — each with its operator, params, and rationale. NEVER collapse this to a bare "confirm this pipeline?" — the expert cannot judge a pipeline they cannot see. Required form:
+**You MUST show the FULL pipeline before asking for confirmation.** Paste the `presentation_block` (or enumerate every step from `viz.steps` / `proposal.steps`) as a numbered list — each with its operator, params, and rationale. NEVER collapse this to a bare "confirm this pipeline?" — the expert cannot judge a pipeline they cannot see. Required form:
 
 > "Based on inspection (modality=…, fs=…, paradigm=…, n_bad_candidates=…, line_freq=…), I propose the pipeline below.
 >
@@ -266,13 +270,19 @@ Present the proposal to the user **from the `propose_pipeline` return value** (`
 > 2. bandpass:1,40 — [rationale]
 > …
 >
+> **Scenario:** research (inferred) · **Deliverables:** preprocessed signal (NWB) only
+> _(If you need AI-ready training data / epochs, say so now and I'll add it. If the scenario is wrong — clinical or deployment — tell me and I'll re-tune the parameters.)_
+>
 > Confirm (y) to run end-to-end, modify (m) to revise a step, or abort (n)."
 
 After the user responds, immediately call:
 
-`mark_proposal_confirmed(work_dir=<work_dir>, user_decision="confirm"|"modify"|"abort", proposal_summary=<one-line>)`
+`mark_proposal_confirmed(work_dir=<work_dir>, user_decision="confirm"|"modify"|"abort", proposal_summary=<one-line>, presented_steps=<ordered operator list you showed>)`
 
-- `confirm` → reads `middle_process/proposal.staged.json` and MATERIALIZES the post-confirmation deliverable: `pipeline.yaml` at work_dir root (legacy form only) + `plan/proposal.json` + `plan/goal.json` + `plan/web_evidence.json` (+ `plan/reasoning.md` for evidence-driven form). Writes `middle_process/proposal.confirmed` marker. Resets the autofix counter. The tool's return value includes `materialized: [...]` — the list of files it created. **Proceed to Phase 2.**
+**`presented_steps` is REQUIRED on `confirm` and is code-enforced.** Pass the exact ordered list of operators you presented (it equals the `presented_steps_expected` field in the propose return, e.g. `["drop_nondata_channels","notch","bandpass",...]`). The handler compares it against the staged proposal's real steps; if it is missing, empty, or doesn't match (count/order/operators), **confirmation is REJECTED** with `guard:"presentation_required"` and the return carries a `rendered_pipeline` string + `expected_steps`. When rejected: show the user that `rendered_pipeline` verbatim, get their decision, then call again with `presented_steps=expected_steps`. This guarantees the expert always sees the full pipeline — do not try to bypass it by guessing values.
+
+
+- `confirm` → reads `middle_process/proposal.staged.json` and MATERIALIZES the post-confirmation deliverable: `pipeline.yaml` at work_dir root (legacy form only) + `plan/proposal.json` + `plan/goal.json` + `plan/web_evidence.json` (+ `plan/reasoning.md` for evidence-driven form). Writes `middle_process/proposal.confirmed` marker. Resets the autofix counter. The tool's return value includes `materialized: [...]` — the list of files it created. The confirmed scenario/deliverables are persisted into the `proposal.confirmed` marker; Step 8 codegen reads deliverables from that marker — beyond-NWB artefacts are produced ONLY when confirmed here. **Proceed to Phase 2.**
 - `modify` → marker cleared (if present); the staged envelope is KEPT so the next `propose_pipeline` overwrites it with the revised proposal. Return to Step 5 PLAN. Keep `inspection_report.json`; do NOT re-inspect.
 - `abort` → marker AND staged envelope both deleted; terminate.
 
@@ -321,15 +331,15 @@ Tool: `generate_code(work_dir=<work_dir>, steps=<from confirmed proposal>, data_
 
 The handler reads the `proposal.confirmed` marker and locates `inspection_report.json` from `work_dir` automatically — you do NOT pass `proposal_confirmed=True` or `inspection_report_path`. Pass `steps` / `data_info` / `modality` / `analysis_goal` / `reasoning` through verbatim from what `propose_pipeline` returned at Step 6 (these equal what was written to `plan/`); do not re-derive them.
 
-Writes `code/pipeline.py + qc.py + vis.py + run.py + requirements.txt` (+ `build_ai_ready.py` iff events or `label_config` present **AND** `REGISTRY[analysis_goal].produces_ai_ready=True`). Inspection-driven hints are baked in: notch frequency uses the detected power-line peak, the "Inspection-driven hints" comment block records bad-channel candidates so the human reader sees why these parameters were chosen.
+Writes `code/pipeline.py + qc.py + vis.py + run.py + requirements.txt` (+ `build_ai_ready.py` iff `ai_ready ∈ deliverables` from the confirm marker **AND** events or `label_config` present). Inspection-driven hints are baked in: notch frequency uses the detected power-line peak, the "Inspection-driven hints" comment block records bad-channel candidates so the human reader sees why these parameters were chosen.
 
 `vis.py` is a standalone matplotlib-only script. **Non-invasive modalities (EEG/MEG/fNIRS/...)** get 5 figures (PSD / channel variance / amplitude distribution / timeseries + a `before_after_timeseries` panel that re-loads the raw input via MNE / pickle / npz). **Invasive modalities (sEEG/ECoG/iEEG/DBS/spike/spikes/unit/units, gated by `format_policy.is_invasive`)** get the 4 single-state figures only — no before/after, because the raw NWB-shaped input is expensive to reload and the 4 single-state figs on the processed signal are sufficient evidence. Per-figure failures don't abort; status flows through `middle_process/vis_status.json`. The selection rule lives in `codegen/generator.py:generate_vis_script`.
 
 `qc.py` writes only `preprocessed_output/QC_out/sub-<id>/ses-<ses>/qc_report.{json,md}` (no figures — those moved to `vis.py`).
 
-`analysis_goal ∈ {generic, exploratory}` skip `build_ai_ready.py`. The result payload's `ai_ready_skipped_reason="goal_not_ai_ready"` signals this; `plan/reasoning.md` should mention it.
+`ai_ready ∉ deliverables` (the default) skips `build_ai_ready.py` even when events exist — this is the new default (NWB only). The result payload's `ai_ready_skipped_reason="not_requested"` signals this; `plan/reasoning.md` should mention it. If `ai_ready ∈ deliverables` but the data has no events/labels, `generate_code` returns `success=false` with a `fix_hint` (supply labels or re-confirm without ai_ready) rather than silently emitting empty epochs.
 
-**NWB is the universal default for `preprocessed/`.** `format_policy.resolve_default_format(modality, "auto")` returns `"nwb"` across every modality. Callers can still override with `output_format="pkl"` explicitly. **Broad goals force NWB output.** When `produces_ai_ready=False`, `_handle_generate_code` overrides any caller-supplied `output_format=pkl` to `nwb`. The generated `pipeline.py` hard-fails on NWB write errors (no silent pkl fallback) so corrupted exports surface immediately.
+**NWB is the universal default for `preprocessed/`.** `format_policy.resolve_default_format(modality, "auto")` returns `"nwb"` across every modality. `preprocessed/` is NWB-only regardless of deliverables. The generated `pipeline.py` hard-fails on NWB write errors (no silent pkl fallback) so corrupted exports surface immediately.
 
 **Spike algorithm coverage in code-emit layer.** `_OPS` includes `threshold_spike` (MAD-based extracellular spike detection — `meta["spike_times"]`) and `mua_binning` (firing-rate matrix from spike times — `meta["mua_train"]`). Both honour Rule 5: continuous data array is never modified by spike ops.
 
@@ -353,7 +363,7 @@ Run only if `code/build_ai_ready.py` exists. Tool: `save_processed(data_path=<pr
 
 When `build_ai_ready.py` is absent and no events / label_config are available, the tool returns `{success: false, skipped: true, reason: ...}` — treat this as a clean skip, not an error.
 
-For `analysis_goal ∈ {generic, exploratory}`, `code/build_ai_ready.py` is intentionally not generated even when events / label_config are present — `save_processed` returns `{success: false, skipped: true, reason: "goal_not_ai_ready"}`. Treat this as a clean skip identical to the events-absent case.
+When `ai_ready ∉ deliverables` (the default), `code/build_ai_ready.py` is intentionally not generated even when events / label_config are present — `save_processed` returns `{success: false, skipped: true, reason: "not_requested"}`. Treat this as a clean skip identical to the events-absent case.
 
 **Multi-input runs**: call `save_processed` ONCE — the script loops over the routing table. Each entry's `events_path` field tells `build_ai_ready.py` where to find the sidecar events CSV for that specific recording.
 
@@ -438,11 +448,19 @@ fields report what happened.
 
 ## Output Path Convention
 
-`work_dir = {data_parent_parent}/{data_parent_name}_preprocess_work_dir/`. Examples:
+Default `work_dir = {data_parent_parent}/{data_parent_name}_preprocess_work_dir/`. Examples:
 - Input `/data/study/raw/eeg.edf` → `work_dir = /data/study/raw_preprocess_work_dir/`
 - Input `/home/user/study/session1/raw.fif` → `work_dir = /home/user/study/session1_preprocess_work_dir/`
 
-User can override with explicit output path, but the default MUST follow this convention.
+**If the user names a storage location** (e.g. "把结果存到 /data/preprocessed/ 下面",
+"save the output under D:/out"), do NOT compute the work_dir path yourself. Pass the raw
+location string as `output_base_dir` to `deep_inspect` at Step 2. Code creates
+`{data_parent_name}_preprocess_work_dir/` inside it (the `_preprocess_work_dir` folder is
+appended automatically) — this may live on a different disk than the raw data. You only need
+to specify the location ONCE, at `deep_inspect`; Phase 2 tools reuse the work_dir already on disk.
+
+If the user names no location, omit both `work_dir` and `output_base_dir` — `deep_inspect`
+derives the default next to the data automatically.
 
 ## Visualization & Output Contract (unchanged)
 

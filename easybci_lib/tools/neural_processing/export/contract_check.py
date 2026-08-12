@@ -219,6 +219,7 @@ def enumerate_pending(
     work_dir,
     routing_data=None,
     analysis_goal: str = "generic",
+    deliverables=None,
 ) -> dict:
     """Return a per-entry completeness snapshot for a multi-input work_dir.
 
@@ -272,11 +273,21 @@ def enumerate_pending(
 
     inputs = (routing_data or {}).get("inputs") or []
 
-    goal_produces_ai_ready = True
-    if _GOAL_REGISTRY is not None:
-        spec = _GOAL_REGISTRY.get(analysis_goal)
-        if spec is not None:
-            goal_produces_ai_ready = spec.produces_ai_ready
+    from easybci_lib.tools.neural_processing.preprocess.deliverables import (
+        normalize_deliverables as _normalize_deliverables,
+    )
+    # deliverables is the source of truth for beyond-NWB expectations. When the
+    # caller does not pass it (legacy), fall back to the goal's default hint so
+    # existing callers keep their prior behaviour.
+    if deliverables is None:
+        _goal_default_ai_ready = True
+        if _GOAL_REGISTRY is not None:
+            spec = _GOAL_REGISTRY.get(analysis_goal)
+            if spec is not None:
+                _goal_default_ai_ready = spec.produces_ai_ready
+        wants_ai_ready = _goal_default_ai_ready
+    else:
+        wants_ai_ready = "ai_ready" in _normalize_deliverables(deliverables)
 
     missing_by_entry: dict = {}
     pending_ids: list = []
@@ -308,7 +319,7 @@ def enumerate_pending(
             if not qc.is_file():
                 missing.append("qc_report")
 
-            if inp.get("events_path") and goal_produces_ai_ready:
+            if inp.get("events_path") and wants_ai_ready:
                 epochs = (
                     wd / "preprocessed_output" / "AI_ready"
                     / sub / f"ses-{ses}" / f"{stem}_epochs.pkl"
@@ -423,10 +434,31 @@ def verify_layout_strict_multi(
     except Exception:  # noqa: BLE001
         pass
 
+    # deliverables — same proposal.json source as goal, with legacy fallback
+    # (resolve_deliverables infers ai_ready from on-disk AI_ready artefacts so
+    # a legacy completed run is not false-reported as missing ai_ready).
+    from easybci_lib.tools.neural_processing.preprocess.deliverables import (
+        resolve_deliverables as _resolve_deliverables,
+    )
+    _deliv = None
+    try:
+        proposal_path = wd / "plan" / "proposal.json"
+        if proposal_path.is_file():
+            _p = _json.loads(proposal_path.read_text(encoding="utf-8"))
+            if isinstance(_p, dict) and isinstance(_p.get("deliverables"), list):
+                _deliv = _p["deliverables"]
+    except Exception:  # noqa: BLE001
+        pass
+    deliverables = _resolve_deliverables(
+        {"deliverables": _deliv} if _deliv is not None else None, work_dir=wd
+    )
+
     # Forward pass: delegate to enumerate_pending. Convert per-entry
     # `missing` lists back into the flat error-string form this function
     # has always emitted so downstream error surfacing is unchanged.
-    snapshot = enumerate_pending(wd, routing_data=table, analysis_goal=goal)
+    snapshot = enumerate_pending(
+        wd, routing_data=table, analysis_goal=goal, deliverables=deliverables,
+    )
     for fid, entry in snapshot["missing_by_entry"].items():
         sub, ses, stem = entry["subject_id"], entry["session_id"], entry["stem_safe"]
         for kind in entry["missing"]:
@@ -886,6 +918,45 @@ def _render_skill_md(name: str, profile: Dict[str, Any], grade: str, date_str: s
 
     step_string = "→".join(steps) if steps else ""
 
+    # Reference-import extension (optional; absent for auto-crystallized skills).
+    _source_kind = profile.get("source_kind")
+    _extra_meta = ""
+    _extra_body = ""
+    if _source_kind:
+        _ref_origin = profile.get("reference_origin") or "unknown"
+        _slots = profile.get("adaptation_slots") or []
+        _baselines = profile.get("qc_baselines") or {}
+        _ml = [f"  source_kind: {_source_kind}",
+               f'  reference_origin: "{_ref_origin}"']
+        _reject_kw = profile.get("reject_keywords") or []
+        if _reject_kw:
+            _ml.append("  reject_keywords:")
+            for _kw in _reject_kw:
+                _ml.append(f"    - {json.dumps(_kw)}")
+        if _slots:
+            _ml.append("  adaptation_slots:")
+            for _s in _slots:
+                _ml.append(f"    - param: {_s['param']}")
+                _ml.append(f"      strategy: {_s['strategy']}")
+        if _baselines:
+            _ml.append("  qc_baselines:")
+            for _k, _v in _baselines.items():
+                _ml.append(f"    {_k}: {json.dumps(_v)}")
+        _extra_meta = "\n" + "\n".join(_ml)
+
+        _bl = ["", "## Reference Adaptation",
+               f"- Source: `{_ref_origin}`",
+               "- Skeleton is anchored to the gold standard; the following are "
+               "recomputed per new recording (component-3 adaptive reuse):"]
+        for _s in _slots:
+            _bl.append(f"  - **{_s['param']}** — strategy `{_s['strategy']}`")
+        if _baselines:
+            _bl.append("")
+            _bl.append("### QC Soft-Baselines (component-4 compares against these)")
+            for _k, _v in _baselines.items():
+                _bl.append(f"- **{_k}**: `{json.dumps(_v)}`")
+        _extra_body = "\n".join(_bl)
+
     return f"""---
 name: {name}
 description: "Proven pipeline for {mod} {par}, {nch}ch @ {freq}Hz, QC grade {grade}, goal={goal}"
@@ -911,8 +982,8 @@ metadata:
   source_run: "{src_run}"
   web_evidence_used: {str(web_used).lower()}
   version: 1
-  auto_crystallized: true
-  proven_date: "{date_str}"
+  auto_crystallized: {("false" if _source_kind else "true")}
+  proven_date: "{date_str}"{_extra_meta}
 ---
 
 # Proven Pipeline: {mod} {par} ({nch}ch @ {freq}Hz)
@@ -960,7 +1031,7 @@ metadata:
 - Channel count deviates from profile by > 30%
 - Sampling rate deviates from profile by > 30%
 - Different analysis_goal (this skill is only safe for `{goal}`)
-
+{_extra_body}
 ## References
 {refs_block}
 """
