@@ -309,7 +309,7 @@ class _RunStream:
 
     __slots__ = ("_run_id", "_buf", "_seq", "_closed", "_waiters")
 
-    def __init__(self, run_id: str, maxlen: int = 200) -> None:
+    def __init__(self, run_id: str, maxlen: int = 1000) -> None:
         self._run_id = run_id
         self._buf: "collections.deque[tuple[int, Dict[str, Any]]]" = collections.deque(maxlen=maxlen)
         self._seq = 0
@@ -2672,9 +2672,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                 "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
             }
-            # Include the effective session ID in the result so callers
-            # (e.g. X-EasyBCI-Session-Id header) can track compression-
-            # triggered session rotations. (#16938)
+            # Echo the effective session id back to callers (X-EasyBCI-Session-Id
+            # header). Post-invariant the agent no longer rotates
+            # its id mid-run, so this always equals the id we dispatched with —
+            # kept so clients can pin the session across turns of one task.
             _eff_sid = getattr(agent, "session_id", session_id)
             if isinstance(_eff_sid, str) and _eff_sid:
                 result["session_id"] = _eff_sid
@@ -2986,14 +2987,28 @@ class APIServerAdapter(BasePlatformAdapter):
         try:
             if not session_id or not user_message:
                 return
-            # Only fire on the first turn of the session — if conversation
-            # history already contains a user message, the LLM hook (or a
-            # prior heuristic write) has already had its chance.
+            # Fire only on the FIRST user turn of the session. Subtlety: the
+            # WebUI includes the message being sent RIGHT NOW in
+            # conversation_history (useConversation.ts builds `[...base, userMsg]`),
+            # whereas some callers pass history that excludes it. So count PRIOR
+            # user turns = user messages in history minus the current one (the
+            # trailing entry when it matches user_message). Without this
+            # discount, prior_user was always ≥1 on the WebUI path and the
+            # heuristic title NEVER fired — leaving every WebUI session NULL and
+            # showing the "Untitled Session" placeholder. (2026-08-13)
             history = conversation_history or []
             prior_user = sum(
                 1 for m in history
                 if isinstance(m, dict) and m.get("role") == "user"
             )
+            if history:
+                last = history[-1]
+                if (
+                    isinstance(last, dict)
+                    and last.get("role") == "user"
+                    and (last.get("content") == user_message or prior_user == 1)
+                ):
+                    prior_user -= 1
             if prior_user > 0:
                 return
             db = self._ensure_session_db()
@@ -3653,7 +3668,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 # Wait for the next append (or close), with a keepalive floor so
                 # idle connections and proxies don't time out.
                 before = q.last_seq
-                await q.wait_for_change(timeout=30.0)
+                await q.wait_for_change(timeout=15.0)
                 if q.last_seq == before and not q.closed:
                     await response.write(b": keepalive\n\n")
         except (ConnectionResetError, asyncio.CancelledError):

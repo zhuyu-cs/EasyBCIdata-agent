@@ -322,6 +322,12 @@ function MessageBubbleImpl({ message, onResend, streaming, runStatus = "unknown"
 
   const hasToolCalls = message.toolCalls && message.toolCalls.length > 0;
   const hasOrphanThinking = message.thinking && !hasToolCalls;
+  // Reloaded history: an assistant message can carry top-level `thinking` AND
+  // tool calls. During live streaming that reasoning threads into each step's
+  // per-call reasoning, but on reload there is no per-step reasoning to thread
+  // into, so the thinking would vanish (only copyable via context menu).
+  // Surface it as a block above the steps when we're NOT streaming.
+  const hasReloadedThinkingWithTools = !streaming && message.thinking && hasToolCalls;
   const collapsible = !streaming && (message.content?.length ?? 0) > COLLAPSE_THRESHOLD;
 
   const handleCopy = useCallback(() => {
@@ -406,6 +412,7 @@ function MessageBubbleImpl({ message, onResend, streaming, runStatus = "unknown"
         </div>
 
       {hasOrphanThinking && <ThinkingBlock thinking={message.thinking!} />}
+      {hasReloadedThinkingWithTools && <ThinkingBlock thinking={message.thinking!} />}
 
       {hasToolCalls && (message.toolCalls!.length >= 5
         ? <Suspense fallback={null}><PipelineTimeline toolCalls={message.toolCalls!} runStatus={runStatus} messageId={message.id} progress={progress} /></Suspense>

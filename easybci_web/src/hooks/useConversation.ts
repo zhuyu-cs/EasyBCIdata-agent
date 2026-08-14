@@ -62,7 +62,11 @@ function transformApiMessage(
     timestamp: msg.timestamp ?? Date.now() / 1000,
   };
   if (msg.role === "assistant") {
-    const reasoning = msg.reasoning ?? msg.reasoning_content ?? undefined;
+    const reasoning =
+      msg.reasoning ??
+      msg.reasoning_content ??
+      extractReasoningDetails(msg.reasoning_details) ??
+      undefined;
     if (reasoning) result.thinking = reasoning;
   }
   if (msg.tool_calls?.length) {
@@ -82,6 +86,65 @@ function transformApiMessage(
   return result;
 }
 
+/**
+ * Transform a full history payload into render messages, preserving tool
+ * results that would otherwise be dropped.
+ *
+ * The normal path binds each tool row to its assistant `tool_call.id` via
+ * `findToolResult`, then drops the standalone tool rows (role !== user/assistant).
+ * That loses any ORPHAN tool row — one whose matching assistant `tool_calls`
+ * entry is absent (a dropped assistant flush, or a lineage-stitch boundary
+ * where the assistant lived in a different session). Rather than silently
+ * discard real tool output, we surface each orphan as its own step card so the
+ * conversation stays complete. `system` rows remain intentionally hidden
+ * (session_meta / prompt scaffolding — not conversational content).
+ */
+function buildHistoryMessages(all: SessionMessage[]): Message[] {
+  // 1) Which tool rows are already claimed by an assistant tool_call in-window?
+  const consumed = new Set<number>();
+  all.forEach((msg, idx) => {
+    if (msg.role !== "assistant" || !msg.tool_calls?.length) return;
+    for (const tc of msg.tool_calls) {
+      for (let i = idx + 1; i < all.length; i++) {
+        if (all[i].role === "assistant") break; // window bound (matches findToolResult)
+        if (all[i].role === "tool" && all[i].tool_call_id === tc.id) {
+          consumed.add(i);
+          break;
+        }
+      }
+    }
+  });
+
+  // 2) Build user/assistant messages normally; splice orphan tool rows in place.
+  const out: Message[] = [];
+  all.forEach((msg, idx) => {
+    if (msg.role === "user" || msg.role === "assistant") {
+      const m = transformApiMessage(msg, idx, all);
+      if (m) out.push(m);
+      return;
+    }
+    if (msg.role === "tool" && !consumed.has(idx)) {
+      // Orphan tool result → standalone one-step card so it stays visible.
+      out.push({
+        id: `hist-${idx}`,
+        role: "assistant",
+        content: "",
+        timestamp: msg.timestamp ?? Date.now() / 1000,
+        toolCalls: [
+          {
+            tool: msg.tool_name || "tool",
+            preview: undefined,
+            status: (msg.tool_status as ToolCall["status"] | undefined) ?? "done",
+            duration: msg.tool_duration ?? undefined,
+            reasoning: msg.content ?? undefined,
+          },
+        ],
+      });
+    }
+  });
+  return out;
+}
+
 function tryParsePreview(args: string): string | undefined {
   try {
     const parsed = JSON.parse(args);
@@ -89,6 +152,41 @@ function tryParsePreview(args: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Best-effort text extraction from a provider-specific `reasoning_details`
+ * payload. Some providers (OpenAI Responses API, OpenRouter details-only) put
+ * the thinking ONLY here, leaving `reasoning`/`reasoning_content` null — so
+ * without this the WebUI shows no thinking even though the row has it. The
+ * gateway's replay path already reads these fields; this brings the WebUI to
+ * parity. Handles the common shapes: a plain string, an array of
+ * `{text|summary|content}` blocks, or a single such object. Returns undefined
+ * when nothing textual is found (never throws).
+ */
+function extractReasoningDetails(details: unknown): string | undefined {
+  if (!details) return undefined;
+  if (typeof details === "string") return details.trim() || undefined;
+  const pluck = (o: unknown): string | undefined => {
+    if (!o) return undefined;
+    if (typeof o === "string") return o;
+    if (typeof o === "object") {
+      const r = o as Record<string, unknown>;
+      const v = r.text ?? r.summary ?? r.content ?? r.reasoning;
+      if (typeof v === "string") return v;
+      // Nested content arrays (e.g. Responses items with {content:[{text}]}).
+      if (Array.isArray(v)) {
+        const inner = v.map(pluck).filter(Boolean).join("\n").trim();
+        return inner || undefined;
+      }
+    }
+    return undefined;
+  };
+  if (Array.isArray(details)) {
+    const joined = details.map(pluck).filter(Boolean).join("\n").trim();
+    return joined || undefined;
+  }
+  return pluck(details);
 }
 
 export type OnRunCompleteCallback = () => void;
@@ -196,9 +294,7 @@ export function useConversation() {
       .getSessionMessages(activeSessionId)
       .then((data) => {
         if (cancelled) return;
-        const transformed = data.messages
-          .map((m, i) => transformApiMessage(m, i, data.messages))
-          .filter((m): m is Message => m !== null);
+        const transformed = buildHistoryMessages(data.messages);
         setMessages(transformed);
         setError(null);
         sessionVersionRef.current = data.version ?? null;
@@ -232,9 +328,7 @@ export function useConversation() {
     if (!sid) return;
     try {
       const data = await api.getSessionMessages(sid);
-      const transformed = data.messages
-        .map((m, i) => transformApiMessage(m, i, data.messages))
-        .filter((m): m is Message => m !== null);
+      const transformed = buildHistoryMessages(data.messages);
       setMessages(transformed);
       sessionVersionRef.current = data.version ?? null;
       setExternalUpdateAvailable(false);

@@ -52,6 +52,9 @@ _NEURAL_ORCHESTRATION_TOOLS = [
     # _EASYBCI_CORE_TOOLS + neural + easybci-webui) or the neural⊆cli subset
     # check drops the ENTIRE neural toolset. See CLAUDE.md sync rule.
     "register_io_loader",
+    # register_analysis_goal — agent-authored analysis_goal for methodologies
+    # not covered by the built-in REGISTRY. Same sync rule as register_io_loader.
+    "register_analysis_goal",
     # `skill_manage` (write access to skills) is intentionally included so the
     # proven-pipeline flywheel can crystallize successful runs into reusable
     # skills on every platform, not just the CLI.
@@ -71,12 +74,22 @@ _EASYBCI_CORE_TOOLS = [
     "vision_analyze",
     # Skills
     "skills_list", "skill_view",
+    # Agent-driven external skill search + install (Phase B). Belongs to the
+    # `skills` toolset alongside skill_manage; listed here so every code-capable
+    # session (CLI + WebUI) can reach it. Flows through the same quarantine +
+    # security-scan gate as the CLI; degrades gracefully offline (local-dir
+    # source + intranet index). See install_skill tool + 02-install-skill-tool.md.
+    "install_skill",
     # Planning & memory
     "pipeline_tracker", "memory",
     # Session history search
     "session_search",
     # Code execution + delegation
     "execute_code", "delegate_task",
+    # Controlled dependency extension (general capability — request an exact-pinned
+    # package instead of raw `pip install`; registered under the `dependency`
+    # toolset, MUST be listed here too so every code-capable session can reach it).
+    "request_dependency",
     # Neural/BCI data processing
     "inspect_data", "preprocess_neural", "quality_check",
     "segment_data", "save_processed", "plan_pipeline",
@@ -133,7 +146,7 @@ TOOLSETS = {
     
     "skills": {
         "description": "Access and view skill documents with specialized instructions and knowledge",
-        "tools": ["skills_list", "skill_view"],
+        "tools": ["skills_list", "skill_view", "install_skill"],
         "includes": []
     },
     
@@ -170,6 +183,13 @@ TOOLSETS = {
     "code_execution": {
         "description": "Run Python scripts that call tools programmatically (reduces LLM round trips)",
         "tools": ["execute_code"],
+        "includes": []
+    },
+
+    "dependency": {
+        "description": "Controlled dependency extension — install an exact-pinned "
+                       "package (safer than raw terminal pip)",
+        "tools": ["request_dependency"],
         "includes": []
     },
     

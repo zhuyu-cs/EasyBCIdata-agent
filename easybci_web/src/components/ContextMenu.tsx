@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 export interface ContextMenuItem {
   label: string;
@@ -15,6 +16,9 @@ interface Props {
 
 export function ContextMenu({ x, y, items, onClose }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
+  // Corrected coordinates after measuring the menu box. Seed with the raw
+  // cursor position so the first paint is already close.
+  const [pos, setPos] = useState({ left: x, top: y });
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -33,23 +37,27 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
     };
   }, [onClose]);
 
-  useEffect(() => {
+  // Measure AFTER layout (menu is portaled to body, no ancestor transform, no
+  // translate animation) and clamp to the viewport on all four edges.
+  useLayoutEffect(() => {
     const menu = menuRef.current;
     if (!menu) return;
     const rect = menu.getBoundingClientRect();
-    if (rect.right > window.innerWidth) {
-      menu.style.left = `${x - rect.width}px`;
-    }
-    if (rect.bottom > window.innerHeight) {
-      menu.style.top = `${y - rect.height}px`;
-    }
+    const margin = 8;
+    let left = x;
+    let top = y;
+    if (left + rect.width > window.innerWidth) left = x - rect.width;
+    if (top + rect.height > window.innerHeight) top = y - rect.height;
+    if (left < margin) left = margin;
+    if (top < margin) top = margin;
+    setPos({ left, top });
   }, [x, y]);
 
-  return (
+  return createPortal(
     <div
       ref={menuRef}
-      className="fixed z-50 bg-[var(--bg-secondary)] rounded-lg shadow-lg border border-[var(--border-primary)] py-1 min-w-[160px] animate-fade-in"
-      style={{ left: x, top: y }}
+      className="fixed z-50 bg-[var(--bg-secondary)] rounded-lg shadow-lg border border-[var(--border-primary)] py-1 min-w-[160px] animate-fade-in-opacity"
+      style={{ left: pos.left, top: pos.top }}
     >
       {items.map((item, i) => (
         <button
@@ -67,6 +75,7 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
           {item.label}
         </button>
       ))}
-    </div>
+    </div>,
+    document.body,
   );
 }

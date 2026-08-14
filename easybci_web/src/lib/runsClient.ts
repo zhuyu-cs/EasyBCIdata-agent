@@ -35,7 +35,7 @@ export interface RunEvent {
 export type StreamStatus =
   | { kind: "connecting" }
   | { kind: "connected" }
-  | { kind: "reconnecting"; attempt: number; max: number }
+  | { kind: "reconnecting"; attempt: number; max?: number }
   | { kind: "failed"; reason: string };
 
 export interface SubscribeOptions {
@@ -46,7 +46,12 @@ export interface SubscribeOptions {
 }
 
 const GATEWAY_BASE = "/v1";
-const MAX_RETRIES = 3;
+// Backoff climbs 2^(attempt-1)*1s until this cap, then stays flat. We retry
+// indefinitely while the run has not delivered a terminal event — a dropped
+// SSE connection must never be treated as a clean end (that was the frequent
+// "disconnect" bug). Only a server-sent run.failed/cancelled ends the stream.
+const BACKOFF_CAP_ATTEMPTS = 5; // 2^4 * 1000ms = 16s ceiling
+const MAX_BACKOFF_MS = 20_000;
 
 function getAuthHeaders(): Record<string, string> {
   const key = import.meta.env?.VITE_API_SERVER_KEY as string | undefined;
@@ -99,7 +104,9 @@ function subscribeWithEventSourceRetry(
   url: string,
   onEvent: (ev: RunEvent) => void,
   onDone: () => void,
-  onError: (err: Error) => void,
+  // Retained for signature symmetry with subscribeToRun; unused because we now
+  // retry indefinitely and never surface a hard "failed" error.
+  _onError: (err: Error) => void,
   options: SubscribeOptions,
 ): () => void {
   let attempt = 0;
@@ -111,7 +118,7 @@ function subscribeWithEventSourceRetry(
 
   function connect() {
     if (cancelled) return;
-    status?.(attempt === 0 ? { kind: "connecting" } : { kind: "reconnecting", attempt, max: MAX_RETRIES });
+    status?.(attempt === 0 ? { kind: "connecting" } : { kind: "reconnecting", attempt });
     // EventSource has no standard way to carry Last-Event-ID on initial connect;
     // pass via query string for backends that support it (no-op otherwise).
     const fullUrl = lastEventId ? `${url}?last_event_id=${encodeURIComponent(lastEventId)}` : url;
@@ -140,20 +147,14 @@ function subscribeWithEventSourceRetry(
       source?.close();
       if (cancelled) return;
 
-      if (source?.readyState === EventSource.CLOSED) {
-        onDone();
-        return;
-      }
-
+      // Do NOT treat a closed connection as a clean completion. Only a
+      // server-sent terminal event (handled in onmessage) calls onDone().
+      // Any error/close here means the transport dropped — reconnect and let
+      // Last-Event-ID replay fill the gap.
       attempt++;
-      if (attempt > MAX_RETRIES) {
-        status?.({ kind: "failed", reason: "Connection lost after multiple attempts" });
-        onError(new Error("SSE connection failed after retries"));
-        return;
-      }
-
-      status?.({ kind: "reconnecting", attempt, max: MAX_RETRIES });
-      const delay = Math.pow(2, attempt - 1) * 1000;
+      status?.({ kind: "reconnecting", attempt });
+      const climb = Math.min(attempt, BACKOFF_CAP_ATTEMPTS);
+      const delay = Math.min(Math.pow(2, climb - 1) * 1000, MAX_BACKOFF_MS);
       retryTimer = setTimeout(connect, delay);
     };
   }
@@ -172,7 +173,9 @@ function subscribeWithFetchRetry(
   headers: Record<string, string>,
   onEvent: (ev: RunEvent) => void,
   onDone: () => void,
-  onError: (err: Error) => void,
+  // Retained for signature symmetry with subscribeToRun; unused because we now
+  // retry indefinitely and never surface a hard "failed" error.
+  _onError: (err: Error) => void,
   options: SubscribeOptions,
 ): () => void {
   let attempt = 0;
@@ -184,11 +187,14 @@ function subscribeWithFetchRetry(
 
   async function connect() {
     if (cancelled) return;
-    status?.(attempt === 0 ? { kind: "connecting" } : { kind: "reconnecting", attempt, max: MAX_RETRIES });
+    status?.(attempt === 0 ? { kind: "connecting" } : { kind: "reconnecting", attempt });
     controller = new AbortController();
 
     try {
-      const reqHeaders: Record<string, string> = { ...headers };
+      const reqHeaders: Record<string, string> = {
+        Accept: "text/event-stream",
+        ...headers,
+      };
       if (lastEventId) reqHeaders["Last-Event-ID"] = lastEventId;
       const res = await fetch(url, { headers: reqHeaders, signal: controller.signal });
       if (!res.ok || !res.body) {
@@ -237,15 +243,12 @@ function subscribeWithFetchRetry(
     } catch (err) {
       if ((err as Error).name === "AbortError" || cancelled) return;
 
+      // Same policy as the EventSource path: retry indefinitely until a
+      // server terminal event ends the stream. Never surface a hard "failed".
       attempt++;
-      if (attempt > MAX_RETRIES) {
-        status?.({ kind: "failed", reason: (err as Error).message });
-        onError(err instanceof Error ? err : new Error(String(err)));
-        return;
-      }
-
-      status?.({ kind: "reconnecting", attempt, max: MAX_RETRIES });
-      const delay = Math.pow(2, attempt - 1) * 1000;
+      status?.({ kind: "reconnecting", attempt });
+      const climb = Math.min(attempt, BACKOFF_CAP_ATTEMPTS);
+      const delay = Math.min(Math.pow(2, climb - 1) * 1000, MAX_BACKOFF_MS);
       retryTimer = setTimeout(connect, delay);
     }
   }

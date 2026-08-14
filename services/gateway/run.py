@@ -6156,10 +6156,19 @@ class GatewayRunner:
                 agent_result, response, history_len=len(history),
             )
 
-            # If the agent's session_id changed during compression, update
-            # session_entry so transcript writes below go to the right session.
+            # Session-id invariant (2026-08-13): the agent's id is locked for
+            # the run and compression is in-place, so it cannot diverge. If it
+            # somehow does, REFUSE to redirect transcript writes to a rotated
+            # id (that would split the task into a second session file); log
+            # the anomaly and keep writing to the id we started with.
             if agent_result.get("session_id") and agent_result["session_id"] != session_entry.session_id:
-                session_entry.session_id = agent_result["session_id"]
+                logger.error(
+                    "[session-invariant] agent.session_id diverged mid-run "
+                    "(%s -> %s); REFUSING to redirect transcript writes. "
+                    "Keeping %s.",
+                    session_entry.session_id, agent_result["session_id"],
+                    session_entry.session_id,
+                )
 
             # Prepend reasoning/thinking if display is enabled (per-platform)
             try:
@@ -12780,24 +12789,26 @@ class GatewayRunner:
                             unique_tags.append(tag)
                     final_response = final_response + "\n" + "\n".join(unique_tags)
             
-            # Sync session_id: the agent may have created a new session during
-            # mid-run context compression (_compress_context splits sessions).
-            # If so, update the session store entry so the NEXT message loads
-            # the compressed transcript, not the stale pre-compression one.
+            # Session-id invariant (2026-08-13): a live task must NEVER rotate
+            # to a new session id — doing so would split one conversation into
+            # two session_<id>.json files. Compression is now IN-PLACE (A2), and
+            # AIAgent.session_id is locked for the duration of a run, so the
+            # agent's id can no longer diverge from the one we dispatched with.
+            # We keep this as a tripwire: if a divergence is ever observed, we
+            # REFUSE to adopt it into the store (which would mint the second
+            # file on the next request) and loudly log the anomaly instead.
             agent = agent_holder[0]
             _session_was_split = False
             if agent and session_key and hasattr(agent, 'session_id') and agent.session_id != session_id:
-                _session_was_split = True
-                logger.info(
-                    "Session split detected: %s → %s (compression)",
-                    session_id, agent.session_id,
+                logger.error(
+                    "[session-invariant] agent.session_id diverged mid-run "
+                    "(%s -> %s); REFUSING to adopt the rotated id into the "
+                    "session store (would split the task into a second file). "
+                    "Keeping %s.",
+                    session_id, agent.session_id, session_id,
                 )
-                entry = self.session_store._entries.get(session_key)
-                if entry:
-                    entry.session_id = agent.session_id
-                    self.session_store._save()
 
-            effective_session_id = getattr(agent, 'session_id', session_id) if agent else session_id
+            effective_session_id = session_id
 
             # When compression created a new session, the messages list was
             # shortened.  Using the original history offset would produce an

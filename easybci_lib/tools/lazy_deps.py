@@ -51,6 +51,7 @@ Adding a new backend:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -136,6 +137,58 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
 }
 
 
+# =============================================================================
+# Runtime allowlist union (floor, not authority).
+#
+# LAZY_DEPS is the built-in *floor* — it is never enough (shared/00-principles
+# §二·五). The agent extends it at runtime via `request()` / the
+# request_dependency tool: safe, exact-pinned specs get merged into
+# `_RUNTIME_DEPS` (process-local) and persisted to
+# ``~/.easybci/runtime_lazy_deps.json`` so the next process treats them as
+# "built-in" too. All read paths below (feature_specs / feature_missing /
+# ensure / is_available) consult the UNION of LAZY_DEPS ∪ _RUNTIME_DEPS.
+# Built-in LAZY_DEPS always wins on key collision.
+# =============================================================================
+
+
+_RUNTIME_DEPS: dict[str, tuple[str, ...]] = {}
+
+
+def _runtime_deps_path() -> Path:
+    from easybci_lib.constants import get_easybci_home
+    return get_easybci_home() / "runtime_lazy_deps.json"
+
+
+def _load_runtime_deps() -> None:
+    """Load the persisted runtime allowlist into ``_RUNTIME_DEPS`` (idempotent)."""
+    try:
+        p = _runtime_deps_path()
+    except Exception:  # noqa: BLE001 — home resolution should never hard-fail here
+        return
+    if not p.exists():
+        return
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if isinstance(v, (list, tuple)):
+                    _RUNTIME_DEPS[str(k)] = tuple(str(s) for s in v)
+    except Exception:  # noqa: BLE001 — a corrupt file must not break imports
+        pass
+
+
+def _known_feature(feature: str) -> bool:
+    """True if the feature is registered in the built-in floor or runtime union."""
+    return feature in LAZY_DEPS or feature in _RUNTIME_DEPS
+
+
+def _specs_for(feature: str) -> tuple[str, ...]:
+    """Return specs for a feature. Built-in LAZY_DEPS wins over the runtime union."""
+    if feature in LAZY_DEPS:
+        return LAZY_DEPS[feature]
+    return _RUNTIME_DEPS.get(feature, ())
+
+
 # Conservative regex for spec validation — package name plus optional
 # version range. Reject anything that looks like a URL, file path, or shell
 # metacharacter.
@@ -209,6 +262,20 @@ def _spec_is_safe(spec: str) -> bool:
     if spec.startswith(("-", "/", ".")) or "://" in spec or "@" in spec:
         return False
     return bool(_SAFE_SPEC.match(spec))
+
+
+# Agent-requested deps are held to a STRICTER bar than built-in LAZY_DEPS:
+# exact pin only (==X.Y.Z), no ranges/no bare names. This upholds the project's
+# exact-pinning hard constraint (shared/00-principles §三) — the runtime
+# allowlist must never smuggle in an unpinned/range spec.
+_SAFE_PINNED = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*"
+                          r"(?:\[[A-Za-z0-9_,\-]+\])?"   # optional [extras]
+                          r"==[A-Za-z0-9_.\-+]+$")
+
+
+def _spec_is_exact_pinned(spec: str) -> bool:
+    """Accept only exact-pinned specs (``==X.Y.Z``); reject ranges/urls/git/shell."""
+    return bool(_SAFE_PINNED.match(spec)) and _spec_is_safe(spec)
 
 
 def _pkg_name_from_spec(spec: str) -> str:
@@ -362,10 +429,13 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
 
 
 def feature_specs(feature: str) -> tuple[str, ...]:
-    """Return the registered specs for a feature, or raise KeyError."""
-    if feature not in LAZY_DEPS:
+    """Return the registered specs for a feature, or raise KeyError.
+
+    Consults the union LAZY_DEPS ∪ _RUNTIME_DEPS (built-in floor wins).
+    """
+    if not _known_feature(feature):
         raise KeyError(f"Unknown lazy feature: {feature!r}")
-    return LAZY_DEPS[feature]
+    return _specs_for(feature)
 
 
 def feature_missing(feature: str) -> tuple[str, ...]:
@@ -385,9 +455,12 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
     batch) get prompt=False and skip the confirmation — config flag is
     the gate in that case.
     """
-    if feature not in LAZY_DEPS:
+    if not _known_feature(feature):
         raise FeatureUnavailable(
-            feature, (), f"feature {feature!r} not in LAZY_DEPS allowlist"
+            feature, (),
+            f"feature {feature!r} not in the dependency allowlist "
+            "(use the request_dependency tool to add an exact-pinned package, "
+            "rather than a raw `pip install`)",
         )
 
     missing = feature_missing(feature)
@@ -460,18 +533,64 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
     logger.info("Lazy install complete for feature %r", feature)
 
 
+def request(feature: str, specs: tuple[str, ...], *, prompt: bool = False) -> None:
+    """Agent-controlled dependency add — the sanctioned alternative to raw pip.
+
+    Stricter than the built-in :data:`LAZY_DEPS`: every spec must be
+    exact-pinned (``==X.Y.Z``); ranges / urls / git+ / shell metacharacters are
+    rejected (upholds the exact-pinning hard constraint, shared/00-principles §三).
+
+    On accept, the feature is merged into the runtime allowlist union
+    (:data:`_RUNTIME_DEPS`) and persisted to ``~/.easybci/runtime_lazy_deps.json``
+    so it is recognised on the next process too (the floor grows — a flywheel),
+    then :func:`ensure` installs it (the ``security.allow_lazy_installs`` global
+    kill-switch still applies via ``ensure``).
+
+    Raises :class:`FeatureUnavailable` on bad input or install failure.
+    """
+    if not feature or not specs:
+        raise FeatureUnavailable(feature, tuple(specs or ()),
+                                 "feature and specs are both required")
+    for spec in specs:
+        if not _spec_is_exact_pinned(spec):
+            raise FeatureUnavailable(
+                feature, tuple(specs),
+                f"spec {spec!r} must be exact-pinned (==X.Y.Z); "
+                "no ranges / urls / git+ / shell metacharacters",
+            )
+    specs = tuple(specs)
+    # Register into the process-local union BEFORE ensure(), so the
+    # membership/spec lookups inside ensure() see it.
+    _RUNTIME_DEPS[feature] = specs
+    # Persist so the next process treats it as "built-in" (flywheel). Failure to
+    # persist must not block the install — the process-local union still works.
+    try:
+        p = _runtime_deps_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        cur: dict[str, Any] = {}
+        if p.exists():
+            loaded = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                cur = loaded
+        cur[feature] = list(specs)
+        p.write_text(json.dumps(cur, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        logger.debug("failed to persist runtime dep %r (continuing)", feature)
+    ensure(feature, prompt=prompt)
+
+
 def is_available(feature: str) -> bool:
     """Return True if the feature's deps are already satisfied."""
-    if feature not in LAZY_DEPS:
+    if not _known_feature(feature):
         return False
     return not feature_missing(feature)
 
 
 def feature_install_command(feature: str) -> Optional[str]:
     """Return the ``pip install`` command a user could run manually, or None."""
-    if feature not in LAZY_DEPS:
+    if not _known_feature(feature):
         return None
-    specs = LAZY_DEPS[feature]
+    specs = _specs_for(feature)
     return "uv pip install " + " ".join(repr(s) for s in specs)
 
 
@@ -571,3 +690,8 @@ def ensure_and_bind(
 
     target_globals.update(bindings)
     return True
+
+
+# Load the persisted runtime allowlist once at import so agent-requested deps
+# from prior sessions are recognised (the floor grows across runs).
+_load_runtime_deps()

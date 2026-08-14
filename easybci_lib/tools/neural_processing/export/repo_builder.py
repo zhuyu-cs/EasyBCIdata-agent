@@ -1836,8 +1836,7 @@ def _write_readme(
             lines.append(f"│   │   └── sub-{sub}/")
             for ses in sessions[:3]:
                 lines.append(f"│   │       └── {ses}/")
-                lines.append(f"│   │           ├── {{stem}}_preprocessed{_preproc_ext}")
-                lines.append(f"│   │           └── {{stem}}_preprocessed.meta.json")
+                lines.append(f"│   │           └── {{stem}}_preprocessed{_preproc_ext}")
             if len(sessions) > 3:
                 lines.append(f"│   │       └── ... ({len(sessions) - 3} more sessions)")
         if len(output_hierarchy) > 3:
@@ -1869,8 +1868,7 @@ def _write_readme(
                 lines.append(f"│               └── qc_report_{ses}.json")
     else:
         lines.append("│   │   └── sub-{subject_id}/{session_id}/")
-        lines.append(f"│   │       ├── {{stem}}_preprocessed{_preproc_ext}")
-        lines.append("│   │       └── {stem}_preprocessed.meta.json")
+        lines.append(f"│   │       └── {{stem}}_preprocessed{_preproc_ext}")
         lines.append("│   ├── AI_ready/                      ⏵ Epoched / segmented data — feed straight to model")
         lines.append("│   │   └── {subject_id}/{session_id}/")
         lines.append("│   │       └── *_epochs.pkl")
@@ -1979,10 +1977,14 @@ def _write_readme(
         "### {subject_id}/{session_id}/ — AI-Ready Data",
         "",
         f"- **`{{stem}}_preprocessed{_preproc_ext}`** — The AI-ready preprocessed data in "
-        + ("NWB (Neurodata Without Borders) format." if _preproc_ext == ".nwb"
+        + ("NWB (Neurodata Without Borders) format. Self-describing: channel "
+           "names/types, sampling rate and shape live in the electrode table + "
+           "ElectricalSeries; the full processing provenance (analysis_goal, "
+           "modality, ordered steps, dropped_channels) is embedded as a JSON "
+           "`easybci_provenance` scratch entry inside the file — no external "
+           "sidecar needed."
+           if _preproc_ext == ".nwb"
            else "pickle format. Structure: `{\"data\": {\"neural\": ndarray}, \"labels\": {...}, \"meta\": {...}}`"),
-        "- **`{stem}_preprocessed.meta.json`** — JSON sidecar with shape info, "
-        "channel names, sampling rate, and pipeline steps (inspectable without loading the full array)",
         "",
         "### figures/sub-{subject_id}/{session_id}/ — Visual Quality Evidence",
         "",

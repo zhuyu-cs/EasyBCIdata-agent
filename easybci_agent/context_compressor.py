@@ -61,6 +61,21 @@ _SUMMARY_TOKENS_CEILING = 12_000
 # Placeholder used when pruning old tool results
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 
+# --- Pinned findings (Phase E) --------------------------------------------
+# The agent can mark a key mid-task value it must not lose to lossy compaction
+# by writing a line beginning with ``PINNED:`` (case-insensitive) anywhere in
+# its text. Compaction extracts these deterministically and re-emits them
+# VERBATIM under a dedicated summary section — bypassing summarizer lossiness.
+# The extract is idempotent across repeated compactions: the rendered section
+# is itself re-parseable, so a pin captured in round 1 survives round N even if
+# no new marker appears. Inert (no-op) when no markers are present.
+_PINNED_SECTION_HEADER = "## Pinned Findings (verbatim)"
+# Matches a "PINNED: <text>" marker line (leading whitespace / list bullet ok).
+_PINNED_MARKER_RE = re.compile(r"(?im)^[ \t>*\-]*PINNED:[ \t]*(.+?)[ \t]*$")
+# Bounds so a runaway agent can't blow the summary budget with pins.
+_PINNED_MAX_ITEMS = 30
+_PINNED_MAX_CHARS = 500
+
 # Chars per token rough estimate
 _CHARS_PER_TOKEN = 4
 # Flat token cost per attached image part.  Real cost varies by provider and
@@ -756,6 +771,133 @@ class ContextCompressor(ContextEngine):
 
         return "\n\n".join(parts)
 
+    # ------------------------------------------------------------------
+    # Pinned findings (Phase E) — deterministic verbatim preservation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_pins_from_text(text: str) -> List[str]:
+        """Return the verbatim payloads of every ``PINNED:`` marker in *text*."""
+        if not text or "PINNED:" not in text.upper():
+            return []
+        out: List[str] = []
+        for m in _PINNED_MARKER_RE.finditer(text):
+            val = m.group(1).strip()
+            if val:
+                out.append(val[:_PINNED_MAX_CHARS])
+        return out
+
+    @classmethod
+    def _pins_from_rendered_section(cls, summary: str) -> List[str]:
+        """Re-extract pins previously rendered into a summary's pinned section.
+
+        Lets pins survive iterative compaction: the section we emit is itself
+        parseable, so round N reads round N-1's pins back out. Reads only the
+        bullet lines under the pinned header (stops at the next ``## `` header).
+        """
+        if not summary or _PINNED_SECTION_HEADER not in summary:
+            return []
+        lines = summary.splitlines()
+        try:
+            start = next(i for i, ln in enumerate(lines)
+                         if ln.strip() == _PINNED_SECTION_HEADER)
+        except StopIteration:
+            return []
+        out: List[str] = []
+        for ln in lines[start + 1:]:
+            if ln.startswith("## "):
+                break
+            stripped = ln.strip()
+            if stripped.startswith("- "):
+                val = stripped[2:].strip()
+                if val:
+                    out.append(val[:_PINNED_MAX_CHARS])
+        return out
+
+    def _collect_pinned_findings(
+        self,
+        turns: List[Dict[str, Any]],
+        previous_summary: Optional[str] = "",
+    ) -> List[str]:
+        """Gather deduped pins from prior summary + the turns being compacted.
+
+        Prior-summary pins come first (stable ordering across compactions);
+        newly-marked pins from this round are appended. Deduped verbatim,
+        capped at :data:`_PINNED_MAX_ITEMS`.
+        """
+        seen: set[str] = set()
+        ordered: List[str] = []
+
+        def _add(val: str) -> None:
+            if val and val not in seen:
+                seen.add(val)
+                ordered.append(val)
+
+        for val in self._pins_from_rendered_section(previous_summary or ""):
+            _add(val)
+        for msg in turns or []:
+            _add_text = _content_text_for_contains(msg.get("content"))
+            for val in self._extract_pins_from_text(_add_text):
+                _add(val)
+        return ordered[:_PINNED_MAX_ITEMS]
+
+    @staticmethod
+    def _render_pinned_section(pins: List[str]) -> str:
+        """Render pins into the verbatim summary section (empty string if none)."""
+        if not pins:
+            return ""
+        body = "\n".join(f"- {p}" for p in pins)
+        return (
+            f"{_PINNED_SECTION_HEADER}\n"
+            "[Preserved byte-for-byte across compaction — do NOT summarise, "
+            "reword, or drop. Key mid-task values the agent marked with "
+            "PINNED:]\n"
+            f"{body}"
+        )
+
+    def _apply_pinned_findings(
+        self,
+        summary: str,
+        turns: List[Dict[str, Any]],
+        previous_summary: Optional[str] = "",
+    ) -> str:
+        """Append the verbatim pinned-findings section to *summary*.
+
+        No-op (returns *summary* unchanged) when nothing is pinned, so normal
+        sessions are unaffected. Any pre-existing pinned section in *summary*
+        (e.g. echoed by the summarizer) is stripped first so we stay the single
+        authoritative source.
+        """
+        pins = self._collect_pinned_findings(turns, previous_summary)
+        summary = self._strip_pinned_section(summary)
+        if not pins:
+            return summary
+        section = self._render_pinned_section(pins)
+        sep = "\n\n" if summary and not summary.endswith("\n\n") else ""
+        return f"{summary}{sep}{section}"
+
+    @staticmethod
+    def _strip_pinned_section(summary: str) -> str:
+        """Remove an existing pinned-findings section from *summary* if present."""
+        if not summary or _PINNED_SECTION_HEADER not in summary:
+            return summary
+        lines = summary.splitlines()
+        out: List[str] = []
+        skipping = False
+        for ln in lines:
+            if ln.strip() == _PINNED_SECTION_HEADER:
+                skipping = True
+                continue
+            if skipping:
+                if ln.startswith("## "):
+                    skipping = False
+                    out.append(ln)
+                # else: still inside the pinned block — drop the line
+                continue
+            out.append(ln)
+        return "\n".join(out).rstrip()
+
+
     def _fallback_to_main_for_compression(self, e: Exception, reason: str) -> None:
         """Switch from a separate ``summary_model`` back to the main model.
 
@@ -949,6 +1091,14 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # Redact the summary output as well — the summarizer LLM may
             # ignore prompt instructions and echo back secrets verbatim.
             summary = redact_sensitive_text(content.strip())
+            # Phase E: deterministically re-emit agent-pinned key values
+            # VERBATIM (carried from the prior summary + this round's turns),
+            # so lossy summarization can't drop mid-task facts the agent must
+            # keep for downstream work (e.g. sampling_rate, bad channels,
+            # subject/session ids). No-op when nothing is pinned.
+            summary = self._apply_pinned_findings(
+                summary, turns_to_summarize, previous_summary=self._previous_summary
+            )
             # Store for iterative updates on next compaction
             self._previous_summary = summary
             self._summary_failure_cooldown_until = 0.0

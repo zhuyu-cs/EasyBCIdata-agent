@@ -120,6 +120,33 @@ def get_optional_skills_dir(default: Path | None = None) -> Path:
     return get_easybci_home() / "optional-skills"
 
 
+def get_local_skills_dir(default: Path | None = None) -> Path:
+    """Return the *local* skill-source directory for air-gapped / intranet use.
+
+    This is the offline fallback lane for the Skills Hub: an admin or user drops
+    skill bundles here (via NFS mount, USB copy, internal artifact export …) and
+    ``LocalDirSkillSource`` serves them with zero network. Distinct from
+    ``optional-skills`` (which ships inside the repo) — this one is empty by
+    default and only becomes active once populated.
+
+    Resolution order (import-safe — no ``load_config`` here, since this module is
+    imported at module scope in 30+ files):
+      1. ``EASYBCI_LOCAL_SKILLS_DIR`` env var
+      2. explicit *default* argument (callers that already read config pass the
+         ``skills.local_source_dir`` value here)
+      3. ``get_easybci_home() / "local-skills"``
+
+    The path is returned whether or not it exists; callers treat a missing /
+    empty directory as "unconfigured" and stay silent.
+    """
+    override = os.getenv("EASYBCI_LOCAL_SKILLS_DIR", "").strip()
+    if override:
+        return Path(override)
+    if default is not None:
+        return default
+    return get_easybci_home() / "local-skills"
+
+
 def get_easybci_dir(new_subpath: str, old_name: str) -> Path:
     """Resolve a EasyBCI subdirectory with backward compatibility.
 

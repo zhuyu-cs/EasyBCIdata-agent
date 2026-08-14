@@ -54,7 +54,7 @@ export function ReconnectBanner({ status, onRetry, onCopyOutput }: Props) {
           style={{ background: "var(--text-warning)" }}
         />
         <span className="font-medium">
-          Reconnecting… (attempt {status.attempt}/{status.max})
+          Reconnecting… {status.max ? `(attempt ${status.attempt}/${status.max})` : `(attempt ${status.attempt})`}
         </span>
       </div>
     );
@@ -138,7 +138,7 @@ export function StreamHealthDot({ status }: { status: StreamStatus | null }) {
     title = "Connecting…";
   } else if (status.kind === "reconnecting") {
     color = "var(--text-warning)";
-    title = `Reconnecting (${status.attempt}/${status.max})`;
+    title = status.max ? `Reconnecting (${status.attempt}/${status.max})` : `Reconnecting (${status.attempt})`;
   } else if (status.kind === "failed") {
     color = "var(--text-error)";
     title = `Failed: ${status.reason}`;

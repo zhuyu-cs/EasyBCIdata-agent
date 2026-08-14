@@ -156,6 +156,26 @@ terminal(command='cat <work_dir>/middle_process/inputs_routing.json')
 
 Confirm every input file is present with a non-empty `(subject_id, session_id)`. If any entry has `identity_source="fallback"` AND `identity_confidence<0.5`, surface this to the user in the Step 7 confirmation message — they may want to pass `--subject-id`/`--session-id` explicitly.
 
+**Pin key findings so long runs survive context compaction.** On a long
+multi-input session the conversation may be auto-compacted (older turns
+summarized) before you reach Step 6/7 — and lossy summarization can blur exact
+values you still need. When `deep_inspect` (or any step) surfaces a value you
+must carry forward verbatim — modality, sampling rate, channel count, detected
+line-noise (50/60 Hz), bad-channel candidates, resolved `(subject_id,
+session_id)`, resample/notch decisions — emit a line beginning with `PINNED:`
+in your reply, one fact per line, e.g.:
+
+```
+PINNED: sub-03 ses-01 — modality=sEEG, fs=2000Hz, n_channels=128, line_noise=50Hz
+PINNED: bad channels = [C3, C17] (flat); plan notch=50Hz + resample→250Hz
+```
+
+Compaction preserves every `PINNED:` line byte-for-byte in a dedicated
+"Pinned Findings" section and carries it across repeated compactions, so these
+values are never lost. Pin sparingly (the essentials, not whole reports) — the
+full report always lives on disk in `inspection_report.json`.
+
+
 ### Step 4 — PROVEN-PIPELINE REUSE CHECK
 
 Call `suggest_pipeline` / `plan_pipeline` (passing `inspection_report_path` from Step 3 — required). If `proven_recommendation.similarity ≥ 0.6` AND `reuse_contract == "full_flow_required"` is returned → **Reuse Mode**:

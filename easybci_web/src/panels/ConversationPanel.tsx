@@ -13,7 +13,7 @@ import { ReconnectBanner, StreamHealthDot } from "@/components/ReconnectBanner";
 import { exportToMarkdown, downloadMarkdown } from "@/lib/export";
 import type { Message } from "@/hooks/useConversation";
 import type { RunStatus } from "@/components/StepCard";
-import type { StageProgress } from "@/components/StageProgressBar";
+import { StageProgressBar, type StageProgress } from "@/components/StageProgressBar";
 import type { StreamStatus } from "@/lib/runsClient";
 import type { TurnEta } from "@/lib/turnEta";
 import { formatTotalElapsed } from "@/lib/turnEta";
@@ -377,6 +377,12 @@ export function ConversationPanel({
                   streaming={isStreaming && i === messages.length - 1 && msg.role === "assistant"}
                 />
               ))}
+            </div>
+          )}
+
+          {isStreaming && progress && (
+            <div className="animate-fade-in mt-5">
+              <StageProgressBar progress={progress} />
             </div>
           )}
 

@@ -1394,6 +1394,7 @@ def _process_one(work_dir, inp, steps):
             out_path=out_file,
             analysis_goal=EASYBCI_GOAL,
             modality=EASYBCI_MODALITY,
+            steps=steps,
         )
         print("Wrote {{}}".format(out_file))
 
@@ -1727,7 +1728,7 @@ def _nwb_coerce_session_start(value):
 
 
 def _save_nwb_inline(*, data_dict, subject_id, out_path,
-                     analysis_goal="", modality=None):
+                     analysis_goal="", modality=None, steps=None):
     """Write data_dict (loader-shape) to an NWB file.
 
     Metadata is resolved with multi-alias lookup:
@@ -1823,6 +1824,27 @@ def _save_nwb_inline(*, data_dict, subject_id, out_path,
         except Exception:
             pass
     _mod_l = (modality or "").strip().lower()
+    # Self-contained provenance: the processing chain, modality and dropped
+    # channels are NOT otherwise recoverable from the NWB (channels/rate/shape
+    # already live in the electrode table + ElectricalSeries). Stored as a JSON
+    # scratch string so a reader gets full provenance from the NWB alone, with
+    # no external sidecar. Reading it does not touch the signal array.
+    try:
+        _prov = {
+            "producer": "EasyBCI Data Agent",
+            "analysis_goal": analysis_goal or "",
+            "modality": modality or "",
+            "steps": list(steps) if steps else [],
+            "dropped_channels": list(meta_d.get("dropped_channels", []))
+                if isinstance(meta_d, _Mapping_nwb) else [],
+        }
+        nwb.add_scratch(
+            json.dumps(_prov, ensure_ascii=False),
+            name="easybci_provenance",
+            description="EasyBCIdata preprocessing provenance (JSON): analysis_goal, modality, ordered steps, dropped_channels",
+        )
+    except Exception:
+        pass
     spike_times = data_dict.get("spike_times") if isinstance(data_dict, _Mapping_nwb) else None
     if _mod_l in ("spike", "spikes", "unit", "units") and spike_times:
         for _i, _st in enumerate(spike_times):

@@ -7,11 +7,14 @@ export type RunStatus = "running" | "completed" | "failed" | "unknown";
 type StepKind = "normal" | "recovered-retry" | "abandoned" | "terminal-error";
 interface ClassifiedCall { call: ToolCall; kind: StepKind; }
 
-// classifyCalls: tool errors only become terminal red when the run as a
-// whole failed (runStatus === "failed") AND the failing call is the last
-// one in the list. Every other error is greyed — either a recovered retry (a
-// later same-named call succeeded) or "abandoned"/Skipped. While a run is still
-// streaming (running / unknown) a transient last-step error must NOT flash red.
+// classifyCalls: tool errors only become terminal red when the run is NOT
+// actively streaming AND the failing call is the last one AND no later
+// same-named call recovered it. "failed" (live run that errored out) and
+// "unknown" (reloaded history — the run is already over, so a persisted
+// last un-recovered error genuinely WAS terminal) both qualify. Only while a
+// run is still streaming ("running") must a transient last-step error stay
+// grey so it doesn't flash red before recovery. "completed" also stays grey
+// (the run succeeded overall).
 function classifyCalls(toolCalls: ToolCall[], runStatus: RunStatus): ClassifiedCall[] {
   const lastIdx = toolCalls.length - 1;
   return toolCalls.map((call, i) => {
@@ -20,10 +23,10 @@ function classifyCalls(toolCalls: ToolCall[], runStatus: RunStatus): ClassifiedC
       .slice(i + 1)
       .some((later) => later.tool === call.tool && later.status === "done");
     if (recovered) return { call, kind: "recovered-retry" as StepKind };
-    if (runStatus === "failed" && i === lastIdx) {
+    if ((runStatus === "failed" || runStatus === "unknown") && i === lastIdx) {
       return { call, kind: "terminal-error" as StepKind };
     }
-    // running / completed / unknown, or a non-last error under failed → grey.
+    // running / completed, or a non-last error → grey.
     return { call, kind: "abandoned" as StepKind };
   });
 }

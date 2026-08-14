@@ -1180,7 +1180,67 @@ class SessionDB:
         # Give up silently; sidebar will show "Untitled" until LLM title arrives.
         return False
 
+    def get_first_user_message(self, session_id: str) -> Optional[str]:
+        """Return the earliest user-message content for a session, or None."""
+        if not session_id:
+            return None
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT content FROM messages "
+                    "WHERE session_id = ? AND role = 'user' AND content IS NOT NULL "
+                    "ORDER BY timestamp, id LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+            except Exception:
+                return None
+        if row is None:
+            return None
+        content = row["content"] if hasattr(row, "keys") else row[0]
+        try:
+            return self._decode_content(content)
+        except Exception:
+            return content if isinstance(content, str) else None
+
+    def backfill_missing_title(self, session_id: str) -> Optional[str]:
+        """Give a titleless session a heuristic title from its first user message.
+
+        Read-side self-heal for the sidebar: a heuristic/LLM title is written
+        only on the *run* path (api_server). Sessions that never went through
+        it — rows backfilled by ``reconcile_session_from_agent_log``, legacy
+        rows, or any created outside that path — keep ``title = NULL`` and the
+        WebUI shows "Untitled Session" even though the conversation is intact.
+        This fills the gap on read so restarts show real names.
+
+        No-op (returns the existing title) when a title is already set. Returns
+        the title in effect after the call, or None if nothing could be derived
+        (no user message yet). Fail-open: never raises into the caller.
+        """
+        if not session_id:
+            return None
+        try:
+            existing = self.get_session_title(session_id)
+        except Exception:
+            existing = None
+        if existing:
+            return existing
+        first_user = self.get_first_user_message(session_id)
+        if not first_user:
+            return None
+        try:
+            # Reuses the exact derivation + collision handling used on the run
+            # path, so a backfilled title is byte-identical to what the live
+            # heuristic would have written.
+            self.set_heuristic_title_from_message(session_id, first_user)
+        except Exception:
+            logger.debug("backfill_missing_title failed for %s", session_id, exc_info=True)
+        try:
+            return self.get_session_title(session_id)
+        except Exception:
+            return None
+
     def set_session_work_dir(self, session_id: str, work_dir: Optional[str]) -> bool:
+
         """Persist the mini-repo work_dir associated with a session.
 
         Stored on the sessions row so the WebUI `/artifacts` endpoint can
@@ -1860,6 +1920,89 @@ class SessionDB:
             result.append(msg)
         return result
 
+    def get_messages_with_lineage(self, session_id: str) -> List[Dict[str, Any]]:
+        """Load messages for a session AND all its lineage ancestors, in order.
+
+        Full read-side stitching for the WebUI. Sessions created before the
+        in-place-compression fix (2026-08-13) were SPLIT by compression into a
+        parent→child chain linked via ``parent_session_id`` — the parent holds
+        the pre-compression turns, the child holds everything after. Clicking
+        either one used to show only half the task. This walks the lineage
+        root→tip and concatenates each session's rows via :meth:`get_messages`
+        (so every column the frontend needs — ``tool_status``/``tool_duration``/
+        ``reasoning*`` — is preserved, unlike ``get_messages_as_conversation``
+        which drops several).
+
+        Duplicate replayed user messages at a compression boundary (the child
+        session replays the last user turn as its seed) are de-duped with the
+        same rule ``get_messages_as_conversation`` uses. For a single, unsplit
+        session (the common case post-fix) the chain is length 1 and this is
+        equivalent to :meth:`get_messages`.
+        """
+        chain = self._full_lineage_chain(session_id)
+        if len(chain) <= 1:
+            return self.get_messages(session_id)
+
+        stitched: List[Dict[str, Any]] = []
+        for sid in chain:
+            for msg in self.get_messages(sid):
+                if self._is_duplicate_replayed_user_message(stitched, msg):
+                    continue
+                stitched.append(msg)
+        return stitched
+
+    def _full_lineage_chain(self, session_id: str) -> List[str]:
+        """Return the complete compression chain (root→tip) containing ``session_id``.
+
+        Works whether the clicked node is the root, the tip, or somewhere in
+        the middle. The WebUI sidebar lists only roots (``include_children``
+        defaults False in ``list_sessions_rich``), so the clicked node is
+        usually the root and we must walk DOWN to the tip — but a resumed/mid
+        node must also resolve to the whole chain, so we first climb UP to the
+        root, then walk DOWN picking the latest-started child at each step
+        (mirrors ``resolve_resume_session_id``). A single unsplit session
+        yields ``[session_id]``.
+        """
+        if not session_id:
+            return [session_id]
+
+        with self._lock:
+            # 1) Climb to the root via parent_session_id.
+            root = session_id
+            seen = {root}
+            for _ in range(100):
+                row = self._conn.execute(
+                    "SELECT parent_session_id FROM sessions WHERE id = ?",
+                    (root,),
+                ).fetchone()
+                if row is None:
+                    break
+                parent = row["parent_session_id"] if hasattr(row, "keys") else row[0]
+                if not parent or parent in seen:
+                    break
+                seen.add(parent)
+                root = parent
+
+            # 2) Walk down from the root to the tip, latest-started child each step.
+            chain = [root]
+            current = root
+            seen_down = {root}
+            for _ in range(100):
+                child_row = self._conn.execute(
+                    "SELECT id FROM sessions WHERE parent_session_id = ? "
+                    "ORDER BY started_at DESC, id DESC LIMIT 1",
+                    (current,),
+                ).fetchone()
+                if child_row is None:
+                    break
+                child = child_row["id"] if hasattr(child_row, "keys") else child_row[0]
+                if not child or child in seen_down:
+                    break
+                seen_down.add(child)
+                chain.append(child)
+                current = child
+        return chain
+
     def resolve_resume_session_id(self, session_id: str) -> str:
         """Redirect a resume target to the descendant session that holds the messages.
 
@@ -1926,15 +2069,19 @@ class SessionDB:
         return session_id
 
     def get_messages_as_conversation(
-        self, session_id: str, include_ancestors: bool = False
+        self, session_id: str
     ) -> List[Dict[str, Any]]:
         """
         Load messages in the OpenAI conversation format (role + content dicts).
         Used by the gateway to restore conversation history.
+
+        Single-session only. Multi-session lineage stitching (compression
+        parent→child chains) is served by ``get_messages_with_lineage``; resume
+        redirects to the descendant holding the transcript via
+        ``resolve_resume_session_id`` before calling this, so no ancestor walk
+        is needed here.
         """
         session_ids = [session_id]
-        if include_ancestors:
-            session_ids = self._session_lineage_root_to_tip(session_id)
 
         with self._lock:
             placeholders = ",".join("?" for _ in session_ids)
@@ -1990,32 +2137,8 @@ class SessionDB:
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize responses_message_items, falling back to None")
                         msg["responses_message_items"] = None
-            if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
-                continue
             messages.append(msg)
         return messages
-
-    def _session_lineage_root_to_tip(self, session_id: str) -> List[str]:
-        if not session_id:
-            return [session_id]
-
-        chain = []
-        current = session_id
-        seen = set()
-        with self._lock:
-            for _ in range(100):
-                if not current or current in seen:
-                    break
-                seen.add(current)
-                chain.append(current)
-                row = self._conn.execute(
-                    "SELECT parent_session_id FROM sessions WHERE id = ?",
-                    (current,),
-                ).fetchone()
-                if row is None:
-                    break
-                current = row["parent_session_id"] if hasattr(row, "keys") else row[0]
-        return list(reversed(chain)) or [session_id]
 
     @staticmethod
     def _is_duplicate_replayed_user_message(messages: List[Dict[str, Any]], msg: Dict[str, Any]) -> bool:

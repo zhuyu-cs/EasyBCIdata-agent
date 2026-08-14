@@ -75,6 +75,13 @@ API_SERVER_ENABLED=true API_SERVER_PORT=8642 \
 
 > **Usage recommendation.** Keep each session focused on a single dataset, both in the WebUI and in the CLI. A focused context helps the agent make better preprocessing decisions and avoids interference between unrelated data. Start a fresh session for a new dataset (click "New Session" in the WebUI, or re-launch `easybci` in the CLI).
 
+> **Write a good first message.** In your very first command, state three things so the agent can plan well from the start.
+> - **Data path.** Where the raw data lives (a file or a directory to batch-process).
+> - **Analysis goal.** The downstream methodology, such as `classification`, `source_localization`, `feature_extraction`, `clinical_screening`, `connectivity`, `phase_amplitude_coupling`, or `online_inference` (use `exploratory` or `generic` if unsure).
+> - **Scenario.** The delivery context, one of `research` (default), `clinical`, or `deployment`.
+>
+> Example. *"Preprocess /data/sub01_mi.edf for motor-imagery classification, research scenario."* You don't have to get every field right, since the agent will ask when something is missing, but providing them upfront skips a round-trip and yields a better pipeline.
+
 > **Detailed usage** — CLI built-in commands, input shortcuts, the WebUI three-column workspace, file-browser flows, and session management are all covered in the Usage Guide: [English](/asset/USAGE.en.md). 
 
 ---

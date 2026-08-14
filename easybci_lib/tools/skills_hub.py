@@ -2523,6 +2523,195 @@ class OptionalSkillSource(SkillSource):
 
 
 # ---------------------------------------------------------------------------
+# Local directory source adapter (air-gapped / intranet fallback lane)
+# ---------------------------------------------------------------------------
+
+class LocalDirSkillSource(SkillSource):
+    """Fetch skills from a user/admin-configured local directory — zero network.
+
+    This is the offline fallback lane of the degradation ladder: on an
+    air-gapped or intranet-only box, public sources (GitHub / clawhub / …) time
+    out and return nothing, but skills dropped into the local directory (via NFS
+    mount, USB copy, internal artifact export) are still searchable + installable
+    through the *same* quarantine + scan gate.
+
+    Mirrors :class:`OptionalSkillSource` almost exactly; the only difference is
+    the directory is *configurable* (``EASYBCI_LOCAL_SKILLS_DIR`` env →
+    ``skills.local_source_dir`` config → ``~/.easybci/local-skills``) rather than
+    the repo-shipped ``optional-skills/``. When the directory does not exist the
+    source is fully transparent: every method returns empty / ``None`` and it
+    contributes no noise to search results.
+
+    Trust level is ``community`` (not ``builtin``) — these bundles are
+    user/admin-supplied, not official-with-the-release, so they flow through the
+    security scan exactly like any third-party skill.
+    """
+
+    def __init__(self):
+        from easybci_lib.constants import get_local_skills_dir
+
+        # Config layer (skills.local_source_dir) is read here — constants.py is
+        # import-safe and must not depend on load_config, so the env→default
+        # resolution lives there and the config value is threaded in as the
+        # `default` argument.
+        configured: Optional[str] = None
+        try:
+            from easybci_cli.config import load_config
+
+            cfg = load_config() or {}
+            skills_cfg = cfg.get("skills") if isinstance(cfg, dict) else None
+            if isinstance(skills_cfg, dict):
+                raw = skills_cfg.get("local_source_dir")
+                if isinstance(raw, str) and raw.strip():
+                    configured = raw.strip()
+        except Exception:
+            configured = None
+
+        resolved = get_local_skills_dir(
+            default=Path(configured).expanduser() if configured else None
+        )
+        # Treat a non-existent / non-directory path as "unconfigured": stay silent.
+        self._dir: Optional[Path] = resolved if resolved.is_dir() else None
+
+    def source_id(self) -> str:
+        return "local-dir"
+
+    def trust_level_for(self, identifier: str) -> str:
+        return "community"
+
+    # -- search -----------------------------------------------------------
+
+    def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
+        if self._dir is None:
+            return []
+        results: List[SkillMeta] = []
+        query_lower = query.lower()
+        for meta in self._scan_all():
+            searchable = f"{meta.name} {meta.description} {' '.join(meta.tags)}".lower()
+            if not query_lower or query_lower in searchable:
+                results.append(meta)
+            if len(results) >= limit:
+                break
+        return results
+
+    # -- fetch ------------------------------------------------------------
+
+    def fetch(self, identifier: str) -> Optional[SkillBundle]:
+        if self._dir is None:
+            return None
+        # identifier format: "local/<rel>" or "<rel>" or bare skill name
+        rel = identifier.split("/", 1)[-1] if identifier.startswith("local/") else identifier
+        skill_dir = self._dir / rel
+
+        # Guard against path traversal (e.g. "local/../../etc")
+        try:
+            resolved = skill_dir.resolve()
+            if not str(resolved).startswith(str(self._dir.resolve())):
+                return None
+        except (OSError, ValueError):
+            return None
+
+        if not resolved.is_dir():
+            # Fall back to searching by skill name only (last segment)
+            skill_name = rel.rsplit("/", 1)[-1]
+            found = self._find_skill_dir(skill_name)
+            if not found:
+                return None
+            skill_dir = found
+        else:
+            skill_dir = resolved
+
+        files: Dict[str, Union[str, bytes]] = {}
+        for f in skill_dir.rglob("*"):
+            if (
+                f.is_file()
+                and not f.name.startswith(".")
+                and "__pycache__" not in f.parts
+                and f.suffix != ".pyc"
+            ):
+                rel_path = str(f.relative_to(skill_dir))
+                try:
+                    files[rel_path] = f.read_bytes()
+                except OSError:
+                    continue
+
+        if not files:
+            return None
+
+        name = skill_dir.name
+        return SkillBundle(
+            name=name,
+            files=files,
+            source="local-dir",
+            identifier=f"local/{skill_dir.relative_to(self._dir)}",
+            trust_level="community",
+        )
+
+    # -- inspect ----------------------------------------------------------
+
+    def inspect(self, identifier: str) -> Optional[SkillMeta]:
+        if self._dir is None:
+            return None
+        rel = identifier.split("/", 1)[-1] if identifier.startswith("local/") else identifier
+        skill_name = rel.rsplit("/", 1)[-1]
+        for meta in self._scan_all():
+            if meta.name == skill_name or meta.path == rel:
+                return meta
+        return None
+
+    # -- internal helpers -------------------------------------------------
+
+    def _find_skill_dir(self, name: str) -> Optional[Path]:
+        """Find a skill directory by name anywhere under the local dir."""
+        if self._dir is None or not self._dir.is_dir():
+            return None
+        for skill_md in self._dir.rglob("SKILL.md"):
+            if skill_md.parent.name == name:
+                return skill_md.parent
+        return None
+
+    def _scan_all(self) -> List[SkillMeta]:
+        """Enumerate all local skills with metadata."""
+        if self._dir is None or not self._dir.is_dir():
+            return []
+
+        results: List[SkillMeta] = []
+        for skill_md in sorted(self._dir.rglob("SKILL.md")):
+            parent = skill_md.parent
+            rel_parts = parent.relative_to(self._dir).parts
+            if any(part.startswith(".") for part in rel_parts):
+                continue
+
+            try:
+                content = skill_md.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            fm = OptionalSkillSource._parse_frontmatter(content)
+            name = fm.get("name", parent.name)
+            desc = fm.get("description", "")
+            tags = []
+            meta_block = fm.get("metadata", {})
+            if isinstance(meta_block, dict):
+                easybci_meta = meta_block.get("easybci", {})
+                if isinstance(easybci_meta, dict):
+                    tags = easybci_meta.get("tags", [])
+
+            rel_path = str(parent.relative_to(self._dir))
+            results.append(SkillMeta(
+                name=name,
+                description=desc[:200],
+                source="local-dir",
+                identifier=f"local/{rel_path}",
+                trust_level="community",
+                path=rel_path,
+                tags=tags if isinstance(tags, list) else [],
+            ))
+
+        return results
+
+
+# ---------------------------------------------------------------------------
 # Shared cache helpers (used by multiple adapters)
 # ---------------------------------------------------------------------------
 
@@ -3134,6 +3323,7 @@ def create_source_router(auth: Optional[GitHubAuth] = None) -> List[SkillSource]
 
     sources: List[SkillSource] = [
         OptionalSkillSource(),        # Official optional skills (highest priority)
+        LocalDirSkillSource(),        # Air-gapped/intranet fallback lane (zero network; empty unless configured)
         EasybciIndexSource(auth=auth), # Centralized index (search + resolved install paths)
         SkillsShSource(auth=auth),
         WellKnownSkillSource(),

@@ -16,7 +16,7 @@ class IncompleteRunError(Exception):
     paradigm could only be filled with the string ``"unknown"`` — the
     previous behavior was to write a husk plan/proposal.json with these
     placeholders, which downstream tools (proven_match, baseline compare,
-    skill_writer) silently treated as a real result.
+    skill crystallization) silently treated as a real result.
     """
 
     def __init__(self, reason: str, *, work_dir: str = ""):

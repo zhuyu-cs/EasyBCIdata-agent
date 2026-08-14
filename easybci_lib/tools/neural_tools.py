@@ -592,6 +592,54 @@ def _check_neural_requirements() -> bool:
         return False
 
 
+def _current_analysis_goals() -> list:
+    """Runtime enum for analysis_goal: builtin REGISTRY ∪ third-party yaml.
+
+    Floor-not-authority (shared principles §二·五): the built-in REGISTRY is a
+    starting point; third-party goals dropped under
+    ``~/.easybci/skills/analysis_goals/*.yaml`` (loaded via
+    ``analysis_goals_loader``) are unioned in so the agent can *see* them in the
+    tool schema. Kept cheap — get_definitions is memoized on config mtime and
+    the loader globs a tiny dir. Never raises: a bad third-party file must not
+    break the schema panel.
+    """
+    try:
+        from easybci_lib.tools.neural_processing.preprocess.analysis_goals import (
+            REGISTRY as _GOAL_REGISTRY,
+        )
+        from easybci_lib.tools.neural_processing.preprocess.analysis_goals_loader import (
+            load_and_merge_third_party as _merge_tp,
+        )
+        reg = dict(_GOAL_REGISTRY)  # do not mutate the real REGISTRY
+        try:
+            _merge_tp(reg)
+        except Exception:  # noqa: BLE001 — schema panel survives loader failure
+            pass
+        return sorted(reg.keys())
+    except Exception:  # noqa: BLE001 — fall back to static enum in the schema
+        return []
+
+
+def _goal_enum_schema_override(schema: dict):
+    """Build a zero-arg ``dynamic_schema_overrides`` callable that patches the
+    ``analysis_goal`` enum of ``schema`` with the live goal set at definition
+    time. Returns the whole ``parameters`` dict (shallow-merge is top-level, so
+    a nested enum edit must replace the entire ``parameters`` key). Falls back
+    to the static schema enum when the live set is empty.
+    """
+    def _override() -> dict:
+        import copy
+        goals = _current_analysis_goals()
+        if not goals:
+            return {}  # keep static enum
+        params = copy.deepcopy(schema.get("parameters", {}))
+        ag = params.get("properties", {}).get("analysis_goal")
+        if isinstance(ag, dict) and "enum" in ag:
+            ag["enum"] = goals
+        return {"parameters": params}
+    return _override
+
+
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
@@ -723,6 +771,7 @@ PREPROCESS_NEURAL_SCHEMA = {
                 "enum": [
                     "classification", "source_localization", "feature_extraction",
                     "clinical_screening", "exploratory", "generic",
+                    "connectivity", "phase_amplitude_coupling", "online_inference",
                 ],
                 "description": (
                     "Same enum as plan_pipeline. Drives drop_bads:auto + "
@@ -905,6 +954,7 @@ SAVE_PROCESSED_SCHEMA = {
                 "enum": [
                     "classification", "source_localization", "feature_extraction",
                     "clinical_screening", "exploratory", "generic",
+                    "connectivity", "phase_amplitude_coupling", "online_inference",
                 ],
             },
             "data_info": {"type": "object", "description": "events / fingerprint — used when build_ai_ready.py must be generated"},
@@ -1789,6 +1839,155 @@ def _handle_register_io_loader(args, **kw):
             ),
         }
     return json.dumps(payload, default=str)
+
+
+REGISTER_ANALYSIS_GOAL_SCHEMA = {
+    "name": "register_analysis_goal",
+    "description": (
+        "Register a new analysis_goal for a methodology not covered by the "
+        "built-in REGISTRY (classification / source_localization / "
+        "feature_extraction / clinical_screening / exploratory / generic / "
+        "connectivity / phase_amplitude_coupling / online_inference). The goal "
+        "controls pipeline-wide flags (drop_bads / drop_nondata / notch / ICA / "
+        "figures / crystallize eligibility). Registration writes "
+        "~/.easybci/skills/analysis_goals/<name>.yaml, then AUTO-VALIDATES by "
+        "reloading it through the third-party loader — if it does not merge "
+        "cleanly the file is removed and a structured error is returned for you "
+        "to fix. Built-in goals always win (you cannot shadow them). On success, "
+        "re-run plan_pipeline with analysis_goal='<name>' — it is now selectable "
+        "everywhere. Use this only when no built-in goal fits; prefer 'generic' "
+        "when unsure."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Lowercase snake_case identifier, e.g. 'drift_tracking'.",
+            },
+            "description": {
+                "type": "string",
+                "description": "One line: what methodology this goal drives.",
+            },
+            "display_name": {
+                "type": "object",
+                "description": "Optional {\"en\": ..., \"zh\": ...} display names.",
+            },
+            "inject_drop_bads": {
+                "type": "boolean",
+                "description": "Inject drop_bads:auto into generated pipelines (default true).",
+            },
+            "inject_drop_nondata": {
+                "type": "boolean",
+                "description": "Inject drop_nondata_channels:data_only (default true). "
+                               "Set false to keep all channels (e.g. connectivity).",
+            },
+            "allow_aggressive_notch": {"type": "boolean"},
+            "allow_ica": {"type": "boolean"},
+            "produces_figures": {"type": "boolean"},
+            "crystallize_eligible": {"type": "boolean"},
+            "notes": {"type": "string"},
+            "rationale": {
+                "type": "string",
+                "description": "Why the built-in goals were insufficient (stored in notes).",
+            },
+        },
+        "required": ["name", "description"],
+    },
+}
+
+
+def _handle_register_analysis_goal(args, **kw):
+    """Register an agent-authored analysis_goal (third-party yaml + TOFU).
+
+    Mirrors register_io_loader: validate → write yaml → reload-validate →
+    next_action. Never raises into the agent loop. Built-in REGISTRY always
+    wins; a bad/failing yaml is removed so the dir never holds a half-registered
+    goal.
+    """
+    import re
+    if not isinstance(args, dict):
+        return json.dumps({"success": False, "error": "invalid args"})
+    name = (args.get("name") or "").strip()
+    desc = (args.get("description") or "").strip()
+    if not re.match(r"^[a-z][a-z0-9_]{0,63}$", name):
+        return json.dumps({
+            "success": False, "error": "invalid name",
+            "fix_hint": "name must be a lowercase snake_case identifier, e.g. 'drift_tracking'",
+        })
+    if not desc:
+        return json.dumps({
+            "success": False, "error": "description required",
+            "fix_hint": "one line: what methodology this goal drives",
+        })
+    try:
+        from easybci_lib.tools.neural_processing.preprocess.analysis_goals import (
+            REGISTRY as _GOAL_REGISTRY,
+        )
+        from easybci_lib.tools.neural_processing.preprocess.analysis_goals_loader import (
+            load_and_merge_third_party as _merge_tp,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"success": False, "error": f"analysis_goals unavailable: {exc}"})
+
+    if name in _GOAL_REGISTRY:
+        return json.dumps({
+            "success": False, "error": f"'{name}' is a builtin goal",
+            "fix_hint": "builtin REGISTRY takes precedence; pick a different name",
+        })
+
+    try:
+        from easybci_lib.constants import get_easybci_home
+        d = get_easybci_home() / "skills" / "analysis_goals"
+        d.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "name": name,
+            "display_name": args.get("display_name") or {"en": name, "zh": name},
+            "description": desc,
+            "inject_drop_bads": bool(args.get("inject_drop_bads", True)),
+            "inject_drop_nondata": bool(args.get("inject_drop_nondata", True)),
+            "allow_aggressive_notch": bool(args.get("allow_aggressive_notch", True)),
+            "allow_ica": bool(args.get("allow_ica", True)),
+            "produces_figures": bool(args.get("produces_figures", True)),
+            "crystallize_eligible": bool(args.get("crystallize_eligible", True)),
+            "notes": (args.get("notes") or "")
+            + (f"\nrationale: {args.get('rationale')}" if args.get("rationale") else ""),
+        }
+        target = d / f"{name}.yaml"
+        import yaml as _yaml
+        target.write_text(
+            _yaml.safe_dump(payload, allow_unicode=True), encoding="utf-8"
+        )
+        # Validation gate: reload through the loader and require it to merge.
+        reg = dict(_GOAL_REGISTRY)
+        conflicts = _merge_tp(reg)
+        if name not in reg:
+            target.unlink(missing_ok=True)  # do not leave a half-registered goal
+            bad = next((c for c in conflicts if c.name == name), None)
+            return json.dumps({
+                "success": False, "stage": "validate",
+                "error": bad.reason if bad else "goal did not load",
+                "fix_hint": "check field types match AnalysisGoalSpec (bools/strings)",
+            })
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("register_analysis_goal failed")
+        return json.dumps({"success": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    return json.dumps({
+        "success": True,
+        "name": name,
+        "registered_path": str(target),
+        "next_action": {
+            "next_tool": "plan_pipeline",
+            "must_present": True,
+            "reason": "goal_registered",
+            "hint": (
+                f"analysis_goal '{name}' registered and validated. It is now "
+                "selectable in plan_pipeline/propose_pipeline. Re-run planning "
+                f"with analysis_goal='{name}'."
+            ),
+        },
+    }, default=str)
 
 
 def _handle_import_reference(args, **kw):
@@ -4579,7 +4778,19 @@ def _do_handle_plan_pipeline(args, **kw):
     from easybci_lib.tools.neural_processing.preprocess.analysis_goals import (
         REGISTRY as _GOAL_REGISTRY,
     )
-    allowed_goals = set(_GOAL_REGISTRY.keys())
+    # Floor-not-authority (shared principles §二·五): built-in REGISTRY is the
+    # floor; third-party goals registered via `register_analysis_goal`
+    # (~/.easybci/skills/analysis_goals/*.yaml) are unioned in so a goal the
+    # agent just self-registered is actually accepted here, not rejected.
+    _goal_reg = dict(_GOAL_REGISTRY)
+    try:
+        from easybci_lib.tools.neural_processing.preprocess.analysis_goals_loader import (
+            load_and_merge_third_party as _merge_tp,
+        )
+        _merge_tp(_goal_reg)
+    except Exception:  # noqa: BLE001 — validation still works off builtin floor
+        pass
+    allowed_goals = set(_goal_reg.keys())
     goal = args.get("analysis_goal")
     if not goal or not isinstance(goal, str) or not goal.strip():
         return json.dumps({
@@ -4599,6 +4810,11 @@ def _do_handle_plan_pipeline(args, **kw):
             "success": False,
             "error": f"analysis_goal={goal!r} not in {sorted(allowed_goals)}",
             "field": "analysis_goal",
+            "fix_hint": (
+                "Pick one of the listed goals, or — if none fits your "
+                "methodology — call register_analysis_goal to add a new one, "
+                "then retry with that name. Prefer 'generic' when unsure."
+            ),
         })
 
     # Normalise + validate the two orthogonal axes (both optional). scenario
@@ -6100,6 +6316,16 @@ registry.register(
     emoji="\U0001f50c",  # 🔌
 )
 
+# 1e. register_analysis_goal — agent-authored analysis_goal for uncovered methodology
+registry.register(
+    name="register_analysis_goal",
+    toolset="neural",
+    schema=REGISTER_ANALYSIS_GOAL_SCHEMA,
+    handler=_handle_register_analysis_goal,
+    check_fn=_check_neural_requirements,
+    emoji="\U0001f3af",  # 🎯
+)
+
 # 1c. mark_proposal_confirmed — Phase 1 → Phase 2 hand-off marker
 registry.register(
     name="mark_proposal_confirmed",
@@ -6118,6 +6344,7 @@ registry.register(
     handler=_handle_preprocess_neural,
     check_fn=_check_neural_requirements,
     emoji="⚡",
+    dynamic_schema_overrides=_goal_enum_schema_override(PREPROCESS_NEURAL_SCHEMA),
 )
 
 # 3. quality_check
@@ -6158,6 +6385,7 @@ registry.register(
     handler=_handle_save_processed,
     check_fn=_check_neural_requirements,
     emoji="\U0001f4be",
+    dynamic_schema_overrides=_goal_enum_schema_override(SAVE_PROCESSED_SCHEMA),
 )
 
 registry.register(
@@ -6167,6 +6395,7 @@ registry.register(
     handler=_handle_save_processed,
     check_fn=_check_neural_requirements,
     emoji="\U0001f4e4",
+    dynamic_schema_overrides=_goal_enum_schema_override(SAVE_PROCESSED_SCHEMA),
 )
 
 # 6. plan_pipeline (primary) + suggest_pipeline, propose_pipeline (aliases)
@@ -6177,6 +6406,7 @@ registry.register(
     handler=_handle_plan_pipeline,
     check_fn=_check_neural_requirements,
     emoji="\U0001f4a1",
+    dynamic_schema_overrides=_goal_enum_schema_override(PLAN_PIPELINE_SCHEMA),
 )
 
 registry.register(
@@ -6186,6 +6416,7 @@ registry.register(
     handler=_handle_plan_pipeline,
     check_fn=_check_neural_requirements,
     emoji="\U0001f4a1",
+    dynamic_schema_overrides=_goal_enum_schema_override(PLAN_PIPELINE_SCHEMA),
 )
 
 registry.register(
@@ -6195,6 +6426,7 @@ registry.register(
     handler=_handle_plan_pipeline,
     check_fn=_check_neural_requirements,
     emoji="\U0001f4cb",
+    dynamic_schema_overrides=_goal_enum_schema_override(PLAN_PIPELINE_SCHEMA),
 )
 
 # 7. list_data

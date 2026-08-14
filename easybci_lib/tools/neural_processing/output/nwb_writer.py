@@ -14,6 +14,7 @@ Output contract (Spec § 4.2):
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -258,6 +259,34 @@ def save_nwb(
     modality = ""
     if isinstance(meta, Mapping):
         modality = (meta.get("modality") or "").strip().lower()
+
+    # Self-contained provenance: the processing chain, modality and dropped
+    # channels are NOT otherwise recoverable from the NWB (channels/rate/shape
+    # already live in the electrode table + ElectricalSeries). Stored as a JSON
+    # scratch string so a reader gets full provenance from the NWB alone, with
+    # no external sidecar. Kept in sync with the inlined _save_nwb_inline in
+    # codegen/generator.py:_NWB_HELPERS_BLOCK.
+    try:
+        _steps = meta.get("steps") if isinstance(meta, Mapping) else None
+        _dropped = meta.get("dropped_channels") if isinstance(meta, Mapping) else None
+        _prov = {
+            "producer": "EasyBCI Data Agent",
+            "analysis_goal": analysis_goal or "",
+            "modality": modality or "",
+            "steps": list(_steps) if _steps else [],
+            "dropped_channels": list(_dropped) if _dropped else [],
+        }
+        nwb.add_scratch(
+            json.dumps(_prov, ensure_ascii=False),
+            name="easybci_provenance",
+            description=(
+                "EasyBCIdata preprocessing provenance (JSON): analysis_goal, "
+                "modality, ordered steps, dropped_channels"
+            ),
+        )
+    except Exception:
+        logger.debug("save_nwb: failed to attach provenance scratch", exc_info=True)
+
     spike_times = payload.get("spike_times")
     if modality in ("spike", "spikes", "unit", "units"):
         if spike_times:

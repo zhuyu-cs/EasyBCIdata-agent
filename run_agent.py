@@ -636,6 +636,39 @@ class AIAgent:
         self._base_url_lower = value.lower() if value else ""
         self._base_url_hostname = base_url_hostname(value)
 
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        # HARD INVARIANT (2026-08-13): a task that has NOT exited must NEVER
+        # rotate to a new session id — because the JSON log filename is frozen
+        # from this id at construction (session_log_file), any mid-run change
+        # would mint a SECOND session_<newid>.json file and split one logical
+        # task across two transcripts. That is exactly the bug the user
+        # reported ("运行着运行着自动切成两个"). We lock the id for the duration
+        # of a run (see run_conversation) and reject any divergent write while
+        # locked. Legitimate rotations (/new, /branch, /resume) happen only
+        # BETWEEN runs, when the agent is idle and unlocked.
+        #
+        # Reject-and-log (never raise): a stray rotation must not crash a
+        # live task. We keep the original id and record what was attempted.
+        if (
+            getattr(self, "_session_id_locked", False)
+            and getattr(self, "_session_id", None)
+            and value != self._session_id
+        ):
+            logger.error(
+                "[session-invariant] REFUSED mid-run session_id rotation "
+                "%s -> %s (task has not exited; keeping original id, no new "
+                "session file will be minted). This write was ignored.",
+                self._session_id, value,
+                stack_info=True,
+            )
+            return
+        self._session_id = value
+
     def __init__(
         self,
         base_url: str = None,
@@ -1428,6 +1461,10 @@ class AIAgent:
         self._session_db = session_db
         self._parent_session_id = parent_session_id
         self._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
+        self._compression_occurred = False  # set once a compression trims memory this run;
+        # lets _save_session_log's never-shrink guard permit the JSON log to shrink to the
+        # post-compression working state (SQLite still holds full history). See
+        # improved_docs/plans/webui-history-json-shrink/plan.md.
         self._session_db_created = False  # DB row deferred to run_conversation()
         self._session_init_model_config = {
             "max_iterations": self.max_iterations,
@@ -4305,6 +4342,13 @@ class AIAgent:
                 self._ensure_db_session()
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
+            logger.info(
+                "[flush-trace] session=%s len(messages)=%d len(history)=%d "
+                "start_idx=%d last_flushed=%d flush_from=%d writing=%d",
+                self.session_id, len(messages), len(conversation_history or []),
+                start_idx, self._last_flushed_db_idx, flush_from,
+                max(0, len(messages) - flush_from),
+            )
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
@@ -4348,7 +4392,14 @@ class AIAgent:
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
-            logger.warning("Session DB append_message failed: %s", e)
+            # M1 diagnosis: a swallowed flush means this turn lands in JSONL
+            # (gateway skip_db path) but never in SQLite → invisible on refresh.
+            # Log loudly with the cursor so we can tell WHICH rows were lost.
+            logger.error(
+                "[flush-trace] Session DB append_message FAILED (rows NOT persisted "
+                "to SQLite; will be missing on WebUI refresh): session=%s err=%s",
+                self.session_id, e, exc_info=True,
+            )
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
         """
@@ -4864,7 +4915,16 @@ class AIAgent:
             # This protects against data loss when --resume loads a session whose
             # messages weren't fully written to SQLite — the resumed agent starts
             # with partial history and would otherwise clobber the full JSON log.
-            if self.session_log_file.exists():
+            #
+            # EXEMPTION: once compression has trimmed the model's in-memory history
+            # this run, a shorter write is LEGITIMATE (the JSON log mirrors the
+            # working state; SQLite holds the full pre-compression history). Skip
+            # the shrink check in that case so the log tracks the live state and
+            # can keep appending post-compression turns. See
+            # improved_docs/plans/webui-history-json-shrink/plan.md.
+            if self.session_log_file.exists() and not getattr(
+                self, "_compression_occurred", False
+            ):
                 try:
                     existing = json.loads(self.session_log_file.read_text(encoding="utf-8"))
                     existing_count = existing.get("message_count", len(existing.get("messages", [])))
@@ -9648,6 +9708,18 @@ class AIAgent:
             except Exception:
                 pass
 
+        # A2 (2026-08-13): persist the FULL pre-compression history to SQLite
+        # before the compressor discards the middle turns. SQLite is the WebUI
+        # read source and must hold the complete conversation; compression only
+        # trims what the model sees, never what we store or display.
+        if self._session_db:
+            try:
+                if not self._session_db_created:
+                    self._ensure_db_session()
+                self._flush_messages_to_session_db(messages)
+            except Exception as e:
+                logger.warning("pre-compression flush failed: %s", e)
+
         try:
             compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
         except TypeError:
@@ -9691,56 +9763,27 @@ class AIAgent:
 
         if self._session_db:
             try:
-                # Ensure the old session row exists before we reference it as
-                # parent_session_id — if _session_db_created is False the row
-                # was never written, and the FK constraint would fail.
                 if not self._session_db_created:
                     self._ensure_db_session()
-                # Propagate title to the new session with auto-numbering
-                old_title = self._session_db.get_session_title(self.session_id)
-                # Trigger memory extraction on the old session before it rotates.
+                # Compression is IN-PLACE (2026-08-13, A2): the logical task has
+                # NOT exited, so we keep the SAME session_id + JSON file. The old
+                # code ended the session and forked a new id/file here, which made
+                # a still-running task appear to "split into two" with the first
+                # half orphaned (parent message_count=0). The full pre-compression
+                # history is already flushed to SQLite above; here we only trigger
+                # memory extraction and refresh the stored system-prompt snapshot.
                 self.commit_memory_session(messages)
-                self._session_db.end_session(self.session_id, "compression")
-                old_session_id = self.session_id
-                self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-                os.environ["EASYBCI_SESSION_ID"] = self.session_id
-                try:
-                    from services.gateway.session_context import _SESSION_ID
-                    _SESSION_ID.set(self.session_id)
-                except Exception:
-                    pass
-                # Update session_log_file to point to the new session's JSON file
-                self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
-                _old_db_created = self._session_db_created
-                self._session_db_created = False
-                self._session_db.create_session(
-                    session_id=self.session_id,
-                    source=self.platform or os.environ.get("EASYBCI_SESSION_SOURCE", "cli"),
-                    model=self.model,
-                    model_config=self._session_init_model_config,
-                    parent_session_id=old_session_id if _old_db_created else None,
-                )
-                self._session_db_created = True
-                # Auto-number the title for the continuation session
-                if old_title:
-                    try:
-                        new_title = self._session_db.get_next_title_in_lineage(old_title)
-                        self._session_db.set_session_title(self.session_id, new_title)
-                    except (ValueError, Exception) as e:
-                        logger.debug("Could not propagate title on compression: %s", e)
                 self._session_db.update_system_prompt(self.session_id, new_system_prompt)
-                # Reset flush cursor — new session starts with no messages written
-                self._last_flushed_db_idx = 0
             except Exception as e:
-                logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
+                logger.warning("Session DB in-place compression update failed: %s", e)
 
-        # Notify the context engine that the session_id rotated because of
-        # compression (not a fresh /new). Plugin engines (e.g. easybci-lcm) use
-        # boundary_reason="compression" to preserve DAG lineage across the
-        # rollover instead of re-initializing fresh per-session state.
-        # See easybci-lcm#68. Built-in ContextCompressor ignores kwargs.
+        # Notify the context engine of the compression boundary. Under in-place
+        # compression (A2) the session_id does NOT change, so old==new — plugin
+        # engines (e.g. easybci-lcm) treat this as a same-session compression
+        # boundary and preserve DAG lineage. Built-in ContextCompressor ignores
+        # kwargs. See easybci-lcm#68.
         try:
-            _old_sid = locals().get("old_session_id")
+            _old_sid = self.session_id
             if _old_sid and hasattr(self.context_compressor, "on_session_start"):
                 self.context_compressor.on_session_start(
                     self.session_id or "",
@@ -9750,13 +9793,13 @@ class AIAgent:
         except Exception as _ce_err:
             logger.debug("context engine on_session_start (compression): %s", _ce_err)
 
-        # Notify memory providers of the compression-driven session_id rotation
-        # so provider-cached per-session state (Hindsight's _document_id,
-        # accumulated turn buffers, counters) refreshes. reset=False because
-        # the logical conversation continues; only the id and DB row rolled
-        # over. See #6672.
+        # Notify memory providers of the compression boundary so provider-cached
+        # per-session state (Hindsight's _document_id, accumulated turn buffers,
+        # counters) refreshes. reset=False because the logical conversation
+        # continues. Under A2 the id is unchanged; parent==self signals an
+        # in-place compression boundary rather than a rotation. See #6672.
         try:
-            _old_sid = locals().get("old_session_id")
+            _old_sid = self.session_id
             if _old_sid and self._memory_manager:
                 self._memory_manager.on_session_switch(
                     self.session_id or "",
@@ -9804,6 +9847,20 @@ class AIAgent:
             self.session_id or "none", _pre_msg_count, len(compressed),
             f"{_compressed_est:,}",
         )
+        # A2 cursor realignment: SQLite already holds the full pre-compression
+        # history (flushed above). The compressed in-memory list's summary block
+        # must NEVER be written to SQLite — set the cursor to len(compressed) so
+        # the next flush appends only post-compression NEW turns *after* the full
+        # history already persisted.
+        if self._session_db:
+            self._last_flushed_db_idx = len(compressed)
+        # The model's in-memory history is now the compressed working state.
+        # Allow _save_session_log to mirror that shorter state to the JSON log
+        # (SQLite already holds the full pre-compression history, flushed above).
+        # Set OUTSIDE the _session_db guard so the exemption also applies when
+        # there is no SQLite session (the JSON log is then the only store and
+        # must still track the live working state).
+        self._compression_occurred = True
         return compressed, new_system_prompt
 
     def _set_tool_guardrail_halt(self, decision: ToolGuardrailDecision) -> None:
@@ -11099,6 +11156,43 @@ class AIAgent:
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Locking wrapper around :meth:`_run_conversation_impl`.
+
+        A run IS the "task is alive" window. We lock ``session_id`` for its
+        whole duration so nothing (compression, a stray sync, a plugin) can
+        rotate the id and split the logical task across two session files —
+        the user's hard rule: "任务未退出就不该有新的 session 文件". Legitimate
+        rotations (/new, /branch, /resume) run BETWEEN turns, when the agent
+        is idle and unlocked. Re-entrant safe (the background review fork calls
+        run_conversation on a SEPARATE agent instance; a nested self-call would
+        keep the lock held via the depth counter). Always released in finally.
+        """
+        _already_locked = getattr(self, "_session_id_locked", False)
+        self._session_id_locked = True
+        try:
+            return self._run_conversation_impl(
+                user_message,
+                system_message=system_message,
+                conversation_history=conversation_history,
+                task_id=task_id,
+                stream_callback=stream_callback,
+                persist_user_message=persist_user_message,
+            )
+        finally:
+            # Only the outermost call releases the lock (defensive against a
+            # hypothetical nested self-call; today there is none).
+            if not _already_locked:
+                self._session_id_locked = False
+
+    def _run_conversation_impl(
+        self,
+        user_message: str,
+        system_message: str = None,
+        conversation_history: List[Dict[str, Any]] = None,
+        task_id: str = None,
+        stream_callback: Optional[callable] = None,
+        persist_user_message: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Run a complete conversation with tool calling until completion.
 
@@ -11458,11 +11552,10 @@ class AIAgent:
                     )
                     if len(messages) >= _orig_len:
                         break  # Cannot compress further
-                    # Compression created a new session — clear the history
-                    # reference so _flush_messages_to_session_db writes ALL
-                    # compressed messages to the new session's SQLite, not
-                    # skipping them because conversation_history is still the
-                    # pre-compression length.
+                    # Compression rewrote `messages` in place (SAME session; full
+                    # pre-compression history already persisted to SQLite). Clear
+                    # the history prefix so the flush cursor (len(compressed))
+                    # governs and only post-compression turns get appended.
                     conversation_history = None
                     # Fix: reset retry counters after compression so the model
                     # gets a fresh budget on the compressed context.  Without
@@ -13138,9 +13231,10 @@ class AIAgent:
                                 approx_tokens=approx_tokens,
                                 task_id=effective_task_id,
                             )
-                            # Compression created a new session — clear history
-                            # so _flush_messages_to_session_db writes compressed
-                            # messages to the new session, not skipping them.
+                            # Compression rewrote `messages` in place (SAME
+                            # session; full history already in SQLite). Clear the
+                            # history prefix; the flush cursor (len(compressed))
+                            # ensures only post-compression turns get appended.
                             conversation_history = None
                             if len(messages) < original_len or old_ctx > _reduced_ctx:
                                 self._emit_status(
@@ -14128,9 +14222,10 @@ class AIAgent:
                             approx_tokens=self.context_compressor.last_prompt_tokens,
                             task_id=effective_task_id,
                         )
-                        # Compression created a new session — clear history so
-                        # _flush_messages_to_session_db writes compressed messages
-                        # to the new session (see preflight compression comment).
+                        # Compression rewrote `messages` in place (SAME session;
+                        # full history already in SQLite). Clear the history
+                        # prefix; the flush cursor (len(compressed)) ensures only
+                        # post-compression turns get appended.
                         conversation_history = None
                     
                     # Save session log incrementally (so progress is visible even if interrupted)

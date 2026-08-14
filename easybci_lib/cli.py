@@ -8057,22 +8057,22 @@ class EasybciCLI:
                     focus_topic=focus_topic or None,
                 )
                 self.conversation_history = compressed
-                # _compress_context ends the old session and creates a new child
-                # session on the agent (run_agent.py::_compress_context). Sync the
-                # CLI's session_id so /status, /resume, exit summary, and title
-                # generation all point at the live continuation session, not the
-                # ended parent. Without this, subsequent end_session() calls target
-                # the already-closed parent and the child is orphaned.
+                # Session-id invariant (2026-08-13): compression is IN-PLACE
+                # (A2) — _compress_context keeps the SAME session_id + file and
+                # has already persisted the full pre-compression history to
+                # SQLite and realigned the flush cursor. So the id must not
+                # diverge here, and no offset-0 reflush is needed (that was for
+                # the old child-session model). If the id somehow diverged,
+                # REFUSE to follow it and log the anomaly.
                 if (
                     getattr(self.agent, "session_id", None)
                     and self.agent.session_id != self.session_id
                 ):
-                    self.session_id = self.agent.session_id
-                    self._pending_title = None
-                    # Manual /compress replaces conversation_history with a new
-                    # compressed handoff for the child session. Persist it from
-                    # offset 0 so resume can recover the continuation after exit.
-                    self.agent._flush_messages_to_session_db(self.conversation_history, None)
+                    logger.error(
+                        "[session-invariant] agent.session_id diverged during "
+                        "/compress (%s -> %s); REFUSING to follow. Keeping %s.",
+                        self.session_id, self.agent.session_id, self.session_id,
+                    )
                 new_tokens = estimate_request_tokens_rough(
                     self.conversation_history,
                     system_prompt=_sys_prompt,
@@ -9495,19 +9495,21 @@ class EasybciCLI:
             # Update history with full conversation
             self.conversation_history = result.get("messages", self.conversation_history) if result else self.conversation_history
 
-            # If auto-compression fired mid-turn, the agent created a new
-            # continuation session and mutated self.agent.session_id. Sync
-            # the CLI's session_id so /status, /resume, title generation,
-            # and the exit summary all target the live child session rather
-            # than the ended parent. Mirrors the gateway's post-run sync
-            # (gateway/run.py around line 9983).
+            # Session-id invariant (2026-08-13): compression is in-place and
+            # the agent locks its id for the run, so it must not diverge from
+            # the CLI's. If it ever does, REFUSE to follow the rotated id
+            # (following it would orphan the original session file and split
+            # the task in two); log the anomaly and keep the CLI's id.
             if (
                 self.agent
                 and getattr(self.agent, "session_id", None)
                 and self.agent.session_id != self.session_id
             ):
-                self.session_id = self.agent.session_id
-                self._pending_title = None
+                logger.error(
+                    "[session-invariant] agent.session_id diverged mid-run "
+                    "(%s -> %s); REFUSING to follow the rotated id. Keeping %s.",
+                    self.session_id, self.agent.session_id, self.session_id,
+                )
 
             # Get the final response
             response = result.get("final_response", "") if result else ""

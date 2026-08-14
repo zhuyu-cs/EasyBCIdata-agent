@@ -700,6 +700,18 @@ async def get_sessions(limit: int = 20, offset: int = 0):
             total = db.session_count()
             now = time.time()
             for s in sessions:
+                # Title self-heal: sessions that never hit the run-path title
+                # writer (legacy rows, reconcile-backfilled rows) have a NULL
+                # title and show "Untitled" in the sidebar even though the
+                # conversation is intact. Derive one from the first user
+                # message on read so restarts show real names. Fail-open.
+                if not s.get("title"):
+                    try:
+                        healed_title = db.backfill_missing_title(s["id"])
+                        if healed_title:
+                            s["title"] = healed_title
+                    except Exception:
+                        _log.debug("title backfill skipped for %s", s.get("id"), exc_info=True)
                 s["is_active"] = (
                     s.get("ended_at") is None
                     and (now - s.get("last_active", s.get("started_at", 0))) < 300
@@ -2349,7 +2361,23 @@ async def get_session_messages(session_id: str, request: Request):
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
-        messages = db.get_messages(sid)
+        # Read-side self-heal: the WebUI /v1/runs path persists only to SQLite
+        # (agent flush) + the agent's full JSON log — it never writes JSONL. If
+        # a flush dropped rows, they survive in the JSON log but not in SQLite,
+        # so they vanish on refresh. Backfill the missing tail from the log so
+        # the whole conversation shows. Idempotent + fail-open.
+        try:
+            from easybci_lib.session_reconcile import reconcile_session_from_agent_log
+            healed = reconcile_session_from_agent_log(db, sid)
+            if healed:
+                _log.info("session %s: backfilled %d dropped rows from agent log", sid, healed)
+        except Exception:
+            _log.debug("session reconcile skipped", exc_info=True)
+        # Lineage-aware read: sessions split by pre-2026-08-13 compression are
+        # a parent→child chain; stitch the whole chain so clicking the root
+        # (the sidebar lists roots only) shows the FULL task, not just the
+        # pre-compression half. Unsplit sessions (post-fix) return as-is.
+        messages = db.get_messages_with_lineage(sid)
         # Cheap version stamp — message count + last timestamp + last role.
         # Strong enough to detect external mutations without scanning content.
         last_ts = 0

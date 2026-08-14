@@ -141,16 +141,30 @@ def auto_title_session(
     if not title:
         return
 
-    try:
-        session_db.set_session_title(session_id, title, source='llm')
-        logger.debug("Auto-generated session title: %s", title)
-        if title_callback is not None:
-            try:
-                title_callback(title)
-            except Exception:
-                logger.debug("Auto-title callback failed", exc_info=True)
-    except Exception as e:
-        logger.debug("Failed to set auto-generated title: %s", e)
+    # Write with collision-suffix retry: the sessions.title UNIQUE index makes
+    # set_session_title raise ValueError when another session already holds this
+    # exact title (common — two similar conversations summarize to the same
+    # phrase). Without retry the second session would stay NULL and show the
+    # "Untitled Session" placeholder. Mirror the heuristic path's " (N)" loop.
+    base = title
+    attempt = base
+    for n in range(2, 12):
+        try:
+            session_db.set_session_title(session_id, attempt, source='llm')
+            logger.debug("Auto-generated session title: %s", attempt)
+            if title_callback is not None:
+                try:
+                    title_callback(attempt)
+                except Exception:
+                    logger.debug("Auto-title callback failed", exc_info=True)
+            return
+        except ValueError:
+            # Title in use (or failed validation) — try a numbered suffix.
+            attempt = f"{base} ({n})"
+        except Exception as e:
+            logger.debug("Failed to set auto-generated title: %s", e)
+            return
+    logger.debug("Auto-title gave up after collision retries for base %r", base)
 
 
 def maybe_auto_title(
