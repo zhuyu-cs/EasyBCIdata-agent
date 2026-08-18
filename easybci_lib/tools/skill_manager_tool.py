@@ -300,6 +300,30 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
                 continue
             if skill_md.parent.name == name:
                 return {"path": skill_md.parent}
+
+    # Fallback: match by frontmatter name field. Covers cases where the
+    # directory name differs from the frontmatter name (e.g. directory
+    # "neural-io" has frontmatter name "neural-io-index").
+    for skills_dir in get_all_skills_dirs():
+        if not skills_dir.exists():
+            continue
+        for skill_md in skills_dir.rglob("SKILL.md"):
+            if any(part in EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+                continue
+            try:
+                text = skill_md.read_text(encoding="utf-8")
+                if text.startswith("---"):
+                    end = text.find("---", 3)
+                    if end > 0:
+                        fm = text[3:end]
+                        for line in fm.splitlines():
+                            if line.startswith("name:"):
+                                fm_name = line[5:].strip().strip("'\"")
+                                if fm_name == name:
+                                    return {"path": skill_md.parent}
+                                break
+            except (OSError, UnicodeDecodeError):
+                continue
     return None
 
 

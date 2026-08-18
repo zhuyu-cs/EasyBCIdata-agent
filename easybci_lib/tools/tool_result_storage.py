@@ -167,6 +167,21 @@ def maybe_persist_tool_result(
         except Exception as exc:
             logger.warning("Sandbox write failed for %s: %s", tool_use_id, exc)
 
+    # Fallback: direct local write when no sandbox env is active yet.
+    try:
+        local_dir = STORAGE_DIR
+        os.makedirs(local_dir, exist_ok=True)
+        local_path = f"{local_dir}/{tool_use_id}.txt"
+        with open(local_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        logger.info(
+            "Persisted large tool result (local fallback): %s (%d chars -> %s)",
+            tool_name, len(content), local_path,
+        )
+        return _build_persisted_message(preview, has_more, len(content), local_path)
+    except Exception as exc:
+        logger.warning("Local fallback write failed for %s: %s", tool_use_id, exc)
+
     logger.info(
         "Inline-truncating large tool result: %s (%d chars, no sandbox write)",
         tool_name, len(content),

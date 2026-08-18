@@ -224,12 +224,12 @@ class HonchoMemoryProvider(MemoryProvider):
         self._prefetch_result_fired_at: int = -999      # turn the pending result was fired at
         self._dialectic_empty_streak: int = 0           # consecutive empty returns
 
-        # Port #1957: lazy session init for tools-only mode
+        # lazy session init for tools-only mode
         self._session_initialized = False
         self._lazy_init_kwargs: Optional[dict] = None
         self._lazy_init_session_id: Optional[str] = None
 
-        # Port #4053: automated context guard — when True, plugin is fully inactive
+        # automated context guard — when True, plugin is fully inactive
         self._automated_skipped = False
 
     @property
@@ -241,7 +241,7 @@ class HonchoMemoryProvider(MemoryProvider):
         try:
             from services.plugins.memory.honcho.client import HonchoClientConfig
             cfg = HonchoClientConfig.from_global_config()
-            # Port #2645: baseUrl-only verification — api_key OR base_url suffices
+            # baseUrl-only verification — api_key OR base_url suffices
             return cfg.enabled and bool(cfg.api_key or cfg.base_url)
         except Exception:
             return False
@@ -280,7 +280,7 @@ class HonchoMemoryProvider(MemoryProvider):
         and pre-warming context at init.
         """
         try:
-            # ----- Port #4053: automated context guard -----
+            # ----- automated context guard -----
             agent_context = kwargs.get("agent_context", "")
             platform = kwargs.get("platform", "cli")
             if agent_context in ("flush",) or platform in ():
@@ -321,12 +321,12 @@ class HonchoMemoryProvider(MemoryProvider):
             except Exception as e:
                 logger.debug("Honcho cost-awareness config parse error: %s", e)
 
-            # ----- Port #1969: aiPeer sync from SOUL.md — REMOVED -----
+            # ----- aiPeer sync from SOUL.md — REMOVED -----
             # SOUL.md is persona content, not identity config. aiPeer should
             # only come from honcho.json (host block or root) or the default.
             # See scratch/memory-plugin-ux-specs.md #10 for rationale.
 
-            # ----- Port #1957: lazy session init for tools-only mode -----
+            # ----- lazy session init for tools-only mode -----
             if self._recall_mode == "tools":
                 if cfg.init_on_session_start:
                     # Eager init even in tools mode (opt-in)
@@ -553,7 +553,7 @@ class HonchoMemoryProvider(MemoryProvider):
 
         B1: Returns empty when recall_mode is "tools" (no injection).
         B5: Respects injection_frequency — "first-turn" returns cached/empty after turn 0.
-        Port #3265: Truncates to context_tokens budget.
+        Truncates to context_tokens budget.
         """
         if self._automated_skipped:
             return ""
@@ -680,7 +680,7 @@ class HonchoMemoryProvider(MemoryProvider):
 
         result = "\n\n".join(parts)
 
-        # ----- Port #3265: token budget enforcement -----
+        # ----- token budget enforcement -----
         result = self._truncate_to_budget(result)
 
         return result
@@ -1210,7 +1210,7 @@ class HonchoMemoryProvider(MemoryProvider):
         if self._automated_skipped:
             return tool_error("Honcho is not active (automated context).")
 
-        # Port #1957: ensure session is initialized for tools-only mode
+        # ensure session is initialized for tools-only mode
         if not self._session_initialized:
             if not self._ensure_session():
                 return tool_error("Honcho session could not be initialized.")

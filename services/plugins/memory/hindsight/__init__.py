@@ -7,8 +7,6 @@ Configurable request timeout via HINDSIGHT_TIMEOUT env var or config.json.
 Configurable embedded daemon idle timeout via HINDSIGHT_IDLE_TIMEOUT env var
 or config.json idle_timeout.
 
-Original PR #1811 by benfrank241, adapted to MemoryProvider ABC.
-
 Config via environment variables:
   HINDSIGHT_API_KEY                — API key for Hindsight Cloud
   HINDSIGHT_BANK_ID                — memory bank identifier (default: easybci)
@@ -52,8 +50,8 @@ _DEFAULT_LOCAL_URL = "http://localhost:8888"
 _MIN_CLIENT_VERSION = "0.4.22"
 _DEFAULT_TIMEOUT = 120  # seconds — cloud API can take 30-40s per request
 _DEFAULT_IDLE_TIMEOUT = 300  # seconds — Hindsight embedded daemon default
-# Mirrors hindsight-integrations/openclaw — Hindsight 0.5.0 added
-# `update_mode='append'` semantics on retain (vectorize-io/hindsight#932).
+# Hindsight 0.5.0 added
+# `update_mode='append'` semantics on retain.
 # Without it, reusing a stable session-scoped document_id silently
 # overwrites prior turns server-side, so we keep the per-process
 # unique document_id fallback for older APIs.
@@ -156,7 +154,7 @@ def _check_api_supports_update_mode_append(api_url: str,
 
     Probes once per URL per process. Returns False on any probe failure —
     that's the safe default: a per-process unique ``document_id`` and no
-    ``update_mode`` keeps the resume-overwrite fix (#6654) intact.
+    ``update_mode`` keeps the resume-overwrite fix intact.
     """
     if not api_url:
         return False
@@ -1042,7 +1040,7 @@ class HindsightMemoryProvider(MemoryProvider):
         we fall back to *fallback_document_id* (the per-process unique
         ``f"{session_id}-{start_ts}"`` minted at initialize / switch time)
         and don't pass ``update_mode`` at all — that's the only way the
-        resume-overwrite fix (#6654) keeps working on legacy servers.
+        resume-overwrite fix keeps working on legacy servers.
 
         Probe is cached at module level per API URL, so this is one HTTP
         round-trip per (process, api_url) pair regardless of how many
@@ -1574,12 +1572,12 @@ class HindsightMemoryProvider(MemoryProvider):
         Without this hook, initialize()-cached state (``_session_id``,
         ``_document_id``, ``_session_turns``, ``_turn_counter``) would keep
         pointing at the previous session and writes would land in the wrong
-        document. See easybci-agent#6672.
+        document.
 
         Always update ``_session_id`` so metadata and tags on subsequent
         retains reflect the active session. Always mint a fresh
         ``_document_id`` so the new session's retain doesn't overwrite the
-        old session's document on vectorize-io/hindsight#1303. Always clear
+        old session's document. Always clear
         the accumulated batch buffers (``_session_turns``, ``_turn_counter``,
         ``_turn_index``) — even for /resume and /branch, the new session's
         batching must start from zero so an in-flight retain doesn't flush
@@ -1744,7 +1742,7 @@ class HindsightMemoryProvider(MemoryProvider):
         # loop from one provider's shutdown() strands the aiohttp
         # ClientSession + TCPConnector owned by every sibling provider
         # on a dead loop, which surfaces as the "Unclosed client session"
-        # / "Unclosed connector" warnings reported in #11923. The loop
+        # / "Unclosed connector" warnings. The loop
         # runs on a daemon thread and is reclaimed on process exit;
         # per-session cleanup happens via self._client.aclose() above.
 

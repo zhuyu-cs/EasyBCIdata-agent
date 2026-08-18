@@ -293,6 +293,48 @@ def _salvage_layout(out: Path) -> List[str]:
     return notes
 
 
+_NK_EXTENSIONS = frozenset({".21e", ".eeg", ".log", ".pnt", ".evt"})
+
+
+def _input_is_nihon_kohden(
+    input_path: str,
+    data_info: Dict[str, Any],
+    work_dir: Path,
+) -> bool:
+    """Return True when the recording uses the Nihon Kohden backend.
+
+    Checks (any True → bundle the NK plugin):
+    1. input_path is a .21E file, OR has a sibling .21E (NK disambiguation).
+    2. data_info meta reports format from the nk backend.
+    3. Multi-input: routing table contains at least one NK input.
+    """
+    if input_path:
+        p = Path(input_path)
+        if p.suffix.lower() == ".21e":
+            return True
+        if p.suffix.lower() in _NK_EXTENSIONS and p.with_suffix(".21E").exists():
+            return True
+
+    fmt = (data_info.get("meta") or {}).get("format", "")
+    if fmt and "nk" in fmt.lower():
+        return True
+
+    try:
+        from easybci_lib.tools.neural_processing.io.routing_table import load_routing_table
+        table = load_routing_table(work_dir)
+        if table:
+            for entry in table.entries:
+                dp = Path(entry.data_path)
+                if dp.suffix.lower() == ".21e":
+                    return True
+                if dp.suffix.lower() in _NK_EXTENSIONS and dp.with_suffix(".21E").exists():
+                    return True
+    except Exception:
+        pass
+
+    return False
+
+
 def build_mini_repo(
     output_dir: str,
     steps: List[str],
@@ -450,8 +492,7 @@ def build_mini_repo(
         # records it synthesizes from scratch (turn-1 early-stop case).
         # Such "husk" records carry placeholder modality/paradigm/steps and
         # MUST be overwritten by the next real ok finalize — otherwise the
-        # user sees a 'modality=unknown' README forever (Bug #1/#2 from
-        # the 2026-06-17 WebUI test).
+        # user sees a 'modality=unknown' README forever.
         existing_is_husk = bool(existing_record.get("auto_synthesized"))
         # ok + ok → no-op return existing record. Don't re-walk the tree.
         # Exception 1: if salvage rescued anything, we MUST re-run the full
@@ -783,21 +824,20 @@ def build_mini_repo(
     _write(code_dir / "pipeline.py", code)
     created_files.append("code/pipeline.py")
 
-    # Bundle the standalone Nihon Kohden io_loader plugin into the repo so the
-    # generated pipeline reads NK (.EEG) correctly on ANY machine — not as
-    # 1-channel BrainVision garbage. matches() only claims NK sets (sibling
-    # .21E), so it is inert in non-NK repos → provision unconditionally. Also
-    # drop a machine-global copy for interactive/QC reuse. Best-effort.
-    try:
-        from easybci_lib.tools.neural_processing.io.nk_loader_plugin import (
-            ensure_global_plugin,
-            ensure_repo_plugin,
-        )
-        ensure_repo_plugin(code_dir)
-        created_files.append("code/io_loaders/nihon_kohden.py")
-        ensure_global_plugin()
-    except Exception as _nk_err:  # noqa: BLE001
-        logger.warning("NK io_loader provisioning failed: %s", _nk_err)
+    # Bundle the standalone Nihon Kohden io_loader plugin ONLY when the input
+    # is actually NK format. Previously provisioned unconditionally, which
+    # polluted non-NK repos with an irrelevant io_loaders/ directory.
+    if _input_is_nihon_kohden(input_path, data_info, out):
+        try:
+            from easybci_lib.tools.neural_processing.io.nk_loader_plugin import (
+                ensure_global_plugin,
+                ensure_repo_plugin,
+            )
+            ensure_repo_plugin(code_dir)
+            created_files.append("code/io_loaders/nihon_kohden.py")
+            ensure_global_plugin()
+        except Exception as _nk_err:  # noqa: BLE001
+            logger.warning("NK io_loader provisioning failed: %s", _nk_err)
 
     # Best-effort lint pass on the generated pipeline (auto-fix import order
     # and explicit text-mode encoding). Never blocks export — see

@@ -1,4 +1,4 @@
-"""T7 Sub-phase P-F — Typed schema for pipeline proposals.
+"""Typed schema for pipeline proposals.
 
 ``PipelineProposal`` is what every ``plan_pipeline`` / ``propose_pipeline``
 returns *conceptually* — even though the wire format remains JSON.  The

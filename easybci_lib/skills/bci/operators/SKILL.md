@@ -83,6 +83,14 @@ _No operators in this group yet — slot reserved for future skills (03 / T2)._
 |---|---|---|---|
 | [ica](adaptive_cleaning/ica/SKILL.md) | `ica` | eeg, meg | ICA artifact removal — automatic detection and exclusion of EOG/ECG components |
 
+### `psg/` — Polysomnography-specific operators  *(3)*
+
+| Operator | step_string | Modalities | Description |
+|---|---|---|---|
+| [respiratory_events](psg/respiratory_events/SKILL.md) | `respiratory_events` | eeg | Detect apnea, hypopnea, and SpO2 desaturation events (AASM criteria) |
+| [plm_detect](psg/plm_detect/SKILL.md) | `plm_detect` | eeg | Periodic Limb Movement detection from leg EMG (WASM/AASM criteria) |
+| [epoch_qc_sleep](psg/epoch_qc_sleep/SKILL.md) | `epoch_qc_sleep` | eeg | 30-second epoch-level multi-channel quality scoring, hypnogram-aware |
+
 ### `fnirs/` — fNIRS-specific operators  *(planned)*
 
 _No operators in this group yet — slot reserved for future skills (03 / T2)._

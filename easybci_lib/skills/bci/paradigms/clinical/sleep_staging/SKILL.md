@@ -4,7 +4,7 @@ layer: L2
 group: clinical
 metadata:
   analysis_goal_allowed:
-  - classification
+  - sleep_staging
   - clinical_screening
   - feature_extraction
   - exploratory
@@ -22,30 +22,119 @@ tags:
 - rem
 - nrem
 - hypnogram
+- respiratory
+- spo2
+- plm
 modality: eeg
 ---
-# Sleep EEG — Polysomnography and Sleep Staging
+# Polysomnography (PSG) Sleep Preprocessing
+
+## Overview
+
+Full polysomnography preprocessing for sleep studies — multi-channel data
+from heterogeneous signal types (EEG, EOG, EMG, respiratory, SpO2, limb,
+position) with per-route filtering, clinical event detection, and
+epoch-level quality assessment. Designed for Compumedics `.SLP` bundles and
+EDF-based PSG, handling mixed native sampling rates via resample-to-one.
 
 ## Signal Characteristics
 
 | Property | Typical Value |
 |----------|--------------|
-| Sampling rate | 256–512 Hz |
-| EEG Channels | 2–6 (clinical PSG: C3, C4, O1, O2, F3, F4) |
-| Additional channels | EOG (×2), EMG (chin), ECG, respiratory, SpO2 |
+| Format | Compumedics .SLP (directory bundle) or EDF |
+| EEG channels | 2–6 (C3/C4/O1/O2/F3/F4 vs M1/M2) |
+| EOG channels | 2 (E1-M2, E2-M2) |
+| EMG channels | 2–4 (chin, limb-L/R) |
+| Respiratory | Airflow (NPress/CPress/Therm), Effort (Thor/Abdo) |
+| Oximetry | SpO2 (1 Hz), Pulse (1 Hz), Pleth (200 Hz) |
+| Position | Enum channel (supine/lateral/prone) |
 | Recording duration | 6–10 hours (full night) |
-| Reference | Contralateral mastoid (M1/M2) |
-| Epoch length | 30 seconds (AASM standard) |
+| Native rates | 200 Hz (EEG/EOG/EMG/Pleth), 25 Hz (respiratory), 1 Hz (SpO2) |
+| Common resample target | 100 Hz (AASM standard for staging) |
+| Epoch length | 30 seconds (AASM) |
+
+## Channel Routing Strategy
+
+PSG channels are grouped into routes with independent filtering parameters.
+The generated pipeline processes each route with its optimal settings before
+merging into the final output array.
+
+| Route | Channels | Bandpass | Notch | Rationale |
+|-------|----------|----------|-------|-----------|
+| EEG | F3/F4/C3/C4/O1/O2-M1/M2 | 0.3–35 Hz | Yes (50/60) | Preserve delta (0.5–2 Hz) + spindles (11–16 Hz); nothing above 35 Hz relevant. |
+| EOG | E1-M2, E2-M2 | 0.3–10 Hz | No | Capture slow eye movements; fast activity is crosstalk. Do NOT artifact-reject (REM detection depends on this). |
+| EMG (chin) | EMG-L, EMG-R | 10–100 Hz | Yes | Isolate muscle tone; rectify + RMS for stage discrimination. Do NOT ICA (signal IS the target). |
+| Respiratory | NPress, CPress, Thor, Abdo, Therm | 0.05–3 Hz | No | Normal breathing 0.15–0.5 Hz; preserve waveform morphology for apnea detection. |
+| SpO2/Pulse | SpO2, Pulse | None | No | Already 1 Hz sampled; any filtering destroys clinical values. |
+| Pleth | Pleth | 0.5–8 Hz | No | Pulse waveform envelope. |
+| Position | Position | None | No | Enum/step — meta only, not in signal array. |
+
+## Recommended Pipeline
+
+```yaml
+pipeline:
+  # Phase 1: Global cleanup
+  - notch:auto                  # 50/60 Hz on EEG + EMG routes only
+  - drop_bads:auto              # Remove flat/saturated channels
+
+  # Phase 2: Per-route filtering (codegen generates per-route bandpass calls)
+  - bandpass:0.3,35             # EEG route
+  - bandpass:0.3,10             # EOG route
+  - bandpass:10,100             # EMG route
+  - bandpass:0.05,3             # Respiratory route
+
+  # Phase 3: PSG-specific clinical detection (at native rate)
+  - respiratory_events          # Apnea/hypopnea/desat (AASM criteria)
+  - plm_detect                  # Periodic limb movements (WASM criteria)
+
+  # Phase 4: Downsample
+  - resample:100                # AASM standard; EEG/EOG/EMG only
+
+  # Phase 5: Epoch quality
+  - epoch_qc_sleep              # 30s epoch-level QC, hypnogram-aware
+```
+
+### Step Rationale
+
+1. **notch:auto** — Remove line noise. Applied only to EEG and EMG routes
+   (respiratory/SpO2 are too low-rate; EOG does not benefit).
+2. **drop_bads:auto** — Detect and remove flat/railed channels across all
+   routes before filtering (prevents filter ringing on dead channels).
+3. **Per-route bandpass** — Each signal type has fundamentally different
+   frequency content. A single bandpass cannot serve all.
+4. **respiratory_events** — Must run BEFORE resample; needs native 25 Hz
+   for accurate amplitude envelope on airflow/effort.
+5. **plm_detect** — Must run BEFORE resample; needs native 200 Hz for
+   0.5–10 s event duration accuracy on limb EMG.
+6. **resample:100** — AASM standard for staging. Applied to EEG/EOG/EMG.
+   Respiratory (25 Hz) and SpO2 (1 Hz) stay at native rate.
+7. **epoch_qc_sleep** — After all processing; scores each 30 s epoch
+   across channels, adapts thresholds to sleep stage when hypnogram available.
+
+## Critical Constraints
+
+- **DO NOT high-pass above 0.5 Hz** — slow waves (0.5–2 Hz) define N3.
+  Even 0.3 Hz is aggressive; 0.1 Hz is safer if DC drift is not extreme.
+- **DO NOT ICA on EOG/EMG** — these signals ARE the features for staging,
+  not artifacts to remove.
+- **DO NOT drop PSG auxiliary channels** — respiratory/SpO2/position are
+  clinically essential. The `sleep_staging` goal sets `inject_drop_nondata=False`.
+- **Hypnogram is OPTIONAL** — study may be unscored (all epochs `0x80`).
+  All operators degrade gracefully without labels.
+- **30-second epochs are non-negotiable** — AASM scoring unit. Do not use
+  other epoch lengths for staging-related analysis.
+- **Resample target ≤ 256 Hz** — sufficient for all sleep features
+  (spindle peak ~13 Hz, nothing above 35 Hz). 100 Hz is standard.
 
 ## Sleep Stages (AASM Scoring Manual)
 
-| Stage | EEG Features | Duration |
-|-------|-------------|----------|
+| Stage | EEG Features | Typical % TST |
+|-------|-------------|---------------|
 | Wake (W) | Alpha (8–13 Hz) posterior, eye blinks | Variable |
-| N1 (Light) | Theta (4–7 Hz), vertex sharp waves | 5% of TST |
-| N2 (Light) | Sleep spindles (12–14 Hz), K-complexes | 45–55% of TST |
-| N3 (Deep/SWS) | Delta (0.5–2 Hz) > 75 µV, ≥ 20% of epoch | 15–25% of TST |
-| REM | Low-voltage mixed, sawtooth waves, rapid eye movements | 20–25% of TST |
+| N1 | Theta (4–7 Hz), vertex sharp waves | 5% |
+| N2 | Sleep spindles (12–14 Hz), K-complexes | 45–55% |
+| N3 (SWS) | Delta (0.5–2 Hz) > 75 µV, ≥ 20% epoch | 15–25% |
+| REM | Low-voltage mixed, sawtooth waves, rapid eye movements | 20–25% |
 
 ## Key Graphoelements
 
@@ -55,81 +144,81 @@ modality: eeg
 | K-complex | 0.5–1.5 Hz | > 0.5 s | > 75 µV | Frontal |
 | Slow oscillation | 0.5–1 Hz | 0.8–2 s | > 75 µV | Frontal |
 | Sawtooth wave | 2–6 Hz | Trains | 20–50 µV | Central/frontal |
-| Vertex sharp wave | N/A | < 0.5 s | < 200 µV | Cz |
 
-## Recommended Pipeline
+## Multi-Channel Quality Indicators
 
-```yaml
-pipeline:
-  - notch:50              # Line noise
-  - bandpass:0.3,35       # Preserve delta + spindles
-  - resample:256          # Sufficient for sleep features
-  - drop_bads             # Check for flat/noisy channels
-  - scale:standard        # Normalize for classifier input
-```
-
-### Notes
-- Do NOT high-pass above 0.5 Hz — slow waves (0.5–2 Hz) are critical for staging
-- Low-pass at 35 Hz is sufficient (spindles peak at 12–14 Hz, nothing relevant above 35)
-- 30-second epochs are the standard unit for staging
-- Each epoch gets ONE label from {W, N1, N2, N3, REM}
-- Transition rules: must follow AASM adjacency (no W→N3 without intervening stages)
-- Multitaper spectral analysis preferred for frequency estimation in short windows
-- For spindle detection: bandpass 11–16 Hz → Hilbert envelope → threshold at mean + 1.5×std
-
-## Automated Staging Features
-
-| Feature Set | Description |
-|-------------|-------------|
-| Time-domain | Amplitude statistics, zero crossings, Hjorth parameters |
-| Frequency-domain | Band power (delta, theta, alpha, sigma, beta), spectral edge |
-| Time-frequency | Wavelet energy, spindle rate, slow oscillation coupling |
-| EOG | REM density (rapid eye movements per minute) |
-| EMG | Chin muscle tone (high in Wake, lowest in REM) |
-
-## Quality Metrics
-
-- Recording completeness: > 6 hours total recording time
-- Artifact percentage: < 10% of epochs unusable
-- Signal quality per channel: no flat/saturated periods > 30 seconds
-- Electrode impedance: stable throughout night (< 10 kΩ)
-- Total sleep time (TST): > 4 hours for valid staging
+| Indicator | Channel | Method | Clinical Use |
+|-----------|---------|--------|-------------|
+| EMG tone | Chin EMG | RMS envelope, percentile per stage | Wake vs REM discrimination |
+| REM density | EOG | Rapid movements per minute | REM characterization |
+| SpO2 nadir | SpO2 | Minimum in event window | Severity grading |
+| PLM index | Limb EMG | Events/hour (WASM series criteria) | RLS screening |
+| AHI | Airflow + SpO2 | Apnea+hypopnea events/hour | OSA severity |
 
 ## Complete Pipeline Example
 
 ```python
-import mne
 import numpy as np
-from sklearn.preprocessing import StandardScaler
+from easybci_lib.tools.neural_processing.io.loader import load_neural
+from easybci_lib.tools.neural_processing.io.psg_annotations import (
+    parse_hypnogram, parse_events,
+)
 
-# Load PSG data
-raw = mne.io.read_raw_edf("sub01_sleep.edf", preload=True, verbose=False)
+# Load PSG data (handles Compumedics .SLP bundles: mixed native rates →
+# single common rate, per-channel sensitivity scaling).
+loaded = load_neural("STUDY.SLP", target_hz=100.0)
+data = loaded["data"]               # (n_channels, n_samples), physical units
+sfreq = loaded["frequency"]         # 100.0
+channels = loaded["channels"]
+meta = loaded["meta"]
 
-# notch:50 → bandpass:0.3,35 → resample:256 → drop_bads → scale:standard
-raw.notch_filter(50.0, verbose=False)
-raw.filter(l_freq=0.3, h_freq=35, verbose=False)
-raw.resample(256.0, verbose=False)
+# Parse annotations (both degrade gracefully if missing/unscored)
+stages = parse_hypnogram(meta["hypnogram_path"])
+events, events_hint = parse_events(meta["events_path"])
 
-# Drop bad channels
-# raw.drop_channels(bad_list)
+# Route channels by type for per-route filtering
+eeg_idx = [i for i, c in enumerate(channels) if any(
+    k in c for k in ("F3", "F4", "C3", "C4", "O1", "O2"))]
+eog_idx = [i for i, c in enumerate(channels) if "E1" in c or "E2" in c]
+emg_idx = [i for i, c in enumerate(channels) if "EMG" in c]
+resp_idx = [i for i, c in enumerate(channels) if any(
+    k in c for k in ("Thor", "Abdo", "NPress", "CPress", "Therm"))]
 
-# Extract and scale
-data = raw.get_data().astype(np.float32)
-sfreq = raw.info['sfreq']
-channels = list(raw.ch_names)
-data = StandardScaler().fit_transform(data.T).T.astype(np.float32)
+from scipy.signal import butter, filtfilt, sosfilt
+
+def _bandpass(sig, lo, hi, fs):
+    sos = butter(4, [lo / (fs/2), hi / (fs/2)], btype="bandpass", output="sos")
+    return sosfilt(sos, sig, axis=-1).astype(np.float32)
+
+# Apply per-route bandpass
+for i in eeg_idx:
+    data[i] = _bandpass(data[i], 0.3, 35, sfreq)
+for i in eog_idx:
+    data[i] = _bandpass(data[i], 0.3, 10, sfreq)
+for i in emg_idx:
+    data[i] = _bandpass(data[i], 10, min(100, sfreq/2 - 1), sfreq)
+for i in resp_idx:
+    data[i] = _bandpass(data[i], 0.05, 3, sfreq)
 
 # Epoch into 30-second windows (AASM standard)
 epoch_samples = int(30.0 * sfreq)
 n_epochs = data.shape[1] // epoch_samples
-epochs = data[:, :n_epochs * epoch_samples].reshape(len(channels), n_epochs, epoch_samples)
-epochs = epochs.transpose(1, 0, 2)  # (n_epochs, n_channels, n_samples)
+epochs = data[:, :n_epochs * epoch_samples].reshape(
+    len(channels), n_epochs, epoch_samples)
+epochs = epochs.transpose(1, 0, 2)   # (n_epochs, n_channels, n_samples)
 
-# Feature extraction per epoch: band power
-from scipy.signal import welch
-delta_power = []  # 0.5-4 Hz
-for ep in epochs:
-    freqs, psd = welch(ep, fs=sfreq, nperseg=int(4*sfreq))
-    delta_idx = (freqs >= 0.5) & (freqs <= 4)
-    delta_power.append(psd[:, delta_idx].mean(axis=1))
+# Stage labels aligned to epochs (truncate/pad if length mismatch)
+epoch_stages = stages[:n_epochs] if stages else ["unscored"] * n_epochs
 ```
+
+## References
+
+1. Berry, R. B. et al. (2020). *The AASM manual for the scoring of
+   sleep and associated events*, v2.6. American Academy of Sleep Medicine.
+2. Iber, C. et al. (2007). *The AASM manual for the scoring of sleep*,
+   1st edition. AASM.
+3. Warby, S. C. et al. (2014). *Sleep-spindle detection: crowdsourcing
+   and evaluating performance of experts, non-experts and automated
+   methods*. Nature Methods 11(4): 385–392. doi:10.1038/nmeth.2855.
+4. Zucconi, M. et al. (2006). *WASM standards for recording and scoring
+   PLM*. Sleep Med. 7(2): 175–183. doi:10.1016/j.sleep.2005.12.008.

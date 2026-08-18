@@ -622,6 +622,41 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     return skills
 
 
+def _extract_operator_signature(content: str, frontmatter: Dict[str, Any]) -> str:
+    """Extract a compact parameter table from an L3 operator SKILL.md.
+
+    Looks for a markdown table under the "Parameter Format" heading and
+    returns it verbatim (typically 5-15 lines). Falls back to a short
+    summary from frontmatter when the table is not found.
+    """
+    import re
+    lines = content.split("\n")
+    in_param_section = False
+    table_lines: list = []
+    format_line: str = ""
+
+    for line in lines:
+        if re.match(r"^#{1,3}\s+Parameter\s+Format", line, re.IGNORECASE):
+            in_param_section = True
+            continue
+        if in_param_section:
+            if re.match(r"^#{1,3}\s+", line) and not re.match(r"^#{1,3}\s+Parameter", line):
+                break
+            if line.startswith("|") or line.startswith("`") and not table_lines:
+                table_lines.append(line)
+            elif table_lines and (line.startswith("|") or line.strip() == ""):
+                table_lines.append(line)
+            elif line.startswith("`") and not format_line:
+                format_line = line
+
+    if table_lines:
+        return "\n".join(l for l in table_lines if l.strip())
+
+    meta = frontmatter.get("metadata") or {}
+    step = meta.get("step_string", "unknown")
+    return f"step_string: {step} (parameter table not found — load full skill for details)"
+
+
 def _sort_skills(skills: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Keep every skill listing path ordered the same way."""
     return sorted(skills, key=lambda s: (s.get("category") or "", s["name"]))
@@ -1457,6 +1492,29 @@ def skill_view(
                 logger.debug(
                     "Could not preprocess skill content for %s", skill_name, exc_info=True
                 )
+
+        # ── L3 operator compact signature mode ────────────────────────
+        # L3 atomic operators are 200-400 lines; the LLM only needs
+        # parameter table + modalities + step_string for codegen. Return
+        # a compact signature by default, saving ~4K tok per operator.
+        _is_l3_operator = (
+            frontmatter.get("layer") == "L3"
+            and frontmatter.get("group") not in (None, "misc", "index")
+        )
+        if _is_l3_operator and not file_path:
+            sig = _extract_operator_signature(rendered_content, frontmatter)
+            return json.dumps({
+                "success": True,
+                "name": skill_name,
+                "description": frontmatter.get("description", ""),
+                "mode": "signature",
+                "step_string": (frontmatter.get("metadata") or {}).get("step_string", ""),
+                "modalities": (frontmatter.get("metadata") or {}).get("modalities", []),
+                "tags": tags,
+                "parameters": sig,
+                "full_available": True,
+                "hint": "Pass file_path='SKILL.md' to skill_view for the full operator documentation.",
+            }, ensure_ascii=False)
 
         result = {
             "success": True,

@@ -50,6 +50,8 @@ _FORMAT_MAP = {
     ".xdf": "xdf", ".xdfz": "xdf",
     # Pickle (EasyBCI native output format)
     ".pkl": "pkl", ".pickle": "pkl",
+    # Compumedics ProFusion / Somte PSG study bundle (a DIRECTORY named *.SLP)
+    ".slp": "compumedics",
 }
 
 
@@ -139,6 +141,9 @@ def load_neural(
         from easybci_lib.tools.neural_processing.io.nk_backend import load_nk
         result = load_nk(filepath, inspect_only=inspect_only, modality=modality,
                          max_duration=max_duration, target_hz=target_hz)
+    elif backend == "compumedics":
+        from easybci_lib.tools.neural_processing.io.compumedics_loader import load as _load_slp
+        result = _load_slp(filepath, inspect_only=inspect_only, target_hz=target_hz)
     elif backend == "unknown":
         result = _load_via_plugin_or_unknown(filepath, inspect_only=inspect_only,
                                              target_hz=target_hz)
@@ -172,6 +177,8 @@ def _detect_backend(path: Path) -> str:
             return _FORMAT_MAP[suffix.lower()]
     if path.is_dir() and path.suffix == ".ds":
         return "mne"
+    if path.is_dir() and (path / "STUDYCFG.XML").exists():
+        return "compumedics"
     return "unknown"
 
 
@@ -282,6 +289,12 @@ def _load_mne(filepath: str, preload: bool = True, max_duration: Optional[float]
     if path.suffix.lower() in (".edf", ".bdf"):
         from easybci_lib.tools.lazy_deps import ensure
         ensure("neural.edflib")
+
+    # Neuroscan Curry .cdt: MNE's reader imports curryreader — ensure it before
+    # read_raw so the native path is used instead of the raw-binary fallback.
+    if path.suffix.lower() == ".cdt":
+        from easybci_lib.tools.lazy_deps import ensure
+        ensure("neural.curry")
 
     # Format-specific quirks (from neuralset)
     if ".fif" in path.suffixes:

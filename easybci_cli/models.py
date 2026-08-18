@@ -130,8 +130,6 @@ def _openrouter_model_supports_tools(item: Any) -> bool:
     ``supported_parameters`` at all. Treat that as "unknown capability → allow"
     so the picker doesn't silently empty for those users. Only hide models
     whose ``supported_parameters`` is an explicit list that omits ``tools``.
-
-    Ported from Kilo-Org/kilocode#9068.
     """
     if not isinstance(item, dict):
         return True
@@ -195,7 +193,7 @@ def fetch_openrouter_models(
             continue
         # Hide models that don't advertise tool-calling support — easybci-agent
         # requires it and surfacing them leads to immediate runtime failures
-        # when the user selects them. Ported from Kilo-Org/kilocode#9068.
+        # when the user selects them.
         if not _openrouter_model_supports_tools(live_item):
             continue
         desc = "free" if _openrouter_model_is_free(live_item.get("pricing")) else ""
@@ -2037,7 +2035,7 @@ def validate_requested_model(
         # prefixed with "models/" (e.g. "models/gemini-2.5-flash") — native
         # Gemini-API convention.  Our curated list and user input both use
         # the bare ID, so a direct set-membership check drops every known
-        # Gemini model.  Strip the prefix before comparison.  See #12532.
+        # Gemini model.  Strip the prefix before comparison.
         if normalized == "gemini":
             api_models = [
                 m[len("models/"):] if isinstance(m, str) and m.startswith("models/") else m

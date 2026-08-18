@@ -826,8 +826,7 @@ class ProcessRegistry:
         If the direct `Popen` child has exited but a descendant process (e.g.
         a daemon spawned by `easybci update` restarting the gateway) is still
         holding the stdout pipe open, the reader blocks forever and poll()
-        keeps returning "running" indefinitely (issue #17327 — 74 polls over
-        7 minutes on Feishu).
+        keeps returning "running" indefinitely.
 
         This helper closes that window: when `session.exited` is still False
         but the direct child's `Popen.poll()` reports an exit code, drain any
@@ -899,7 +898,7 @@ class ProcessRegistry:
             return {"status": "not_found", "error": f"No process with ID {session_id}"}
 
         # Reconcile against real child state before reading session.exited.
-        # Guards against orphaned-pipe reader hangs (issue #17327).
+        # Guards against orphaned-pipe reader hangs.
         self._reconcile_local_exit(session)
 
         with session._lock:
@@ -994,7 +993,7 @@ class ProcessRegistry:
             session = self._refresh_detached_session(session)
             # Reconcile against real child state — guards against orphaned-
             # pipe reader hangs where the reader is blocked but the direct
-            # child has already exited (issue #17327).
+            # child has already exited.
             self._reconcile_local_exit(session)
             if session.exited:
                 self._completion_consumed.add(session_id)

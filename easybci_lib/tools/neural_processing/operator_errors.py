@@ -1,4 +1,4 @@
-"""T7 Sub-phase P-A.2 — Unified operator exception layer.
+"""Unified operator exception layer.
 
 Every operator step that fails must raise :class:`EasyBCIOperatorError`
 rather than letting the underlying numpy / mne / scipy exception escape.

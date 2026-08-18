@@ -256,7 +256,7 @@ class HonchoClientConfig:
     # identity (etc.) when resolving the user peer.
     # This keeps memory unified across platforms for single-user deployments
     # where Honcho's one peer-name is an unambiguous identity — otherwise
-    # each platform would fork memory into its own peer (#14984).  Default
+    # each platform would fork memory into its own peer.  Default
     # ``False`` preserves existing multi-user behaviour.
     pin_peer_name: bool = False
     # Toggles
@@ -563,7 +563,7 @@ class HonchoClientConfig:
     # Honcho enforces a 100-char limit on session IDs. Long gateway session keys
     # (Matrix "!room:server" + thread event IDs, etc.) can overflow this
     # limit after sanitization; the Honcho API then rejects every call for that
-    # session with "session_id too long". See issue #13868.
+    # session with "session_id too long".
     _HONCHO_SESSION_ID_MAX_LEN = 100
     _HONCHO_SESSION_ID_HASH_LEN = 8
 

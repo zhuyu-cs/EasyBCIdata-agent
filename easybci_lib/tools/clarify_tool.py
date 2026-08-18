@@ -101,8 +101,7 @@ def clarify_tool(
 
     if callback is None:
         # Log the call site so the next "not available" occurrence shows
-        # which dispatch path stripped the callback. (Bug #3 / Bug #6 from
-        # the 2026-06-17 WebUI test report.)
+        # which dispatch path stripped the callback.
         try:
             import inspect as _inspect
             stack = _inspect.stack()

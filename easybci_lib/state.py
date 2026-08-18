@@ -645,7 +645,7 @@ class SessionDB:
                 # old-schema FTS tables and triggers that IF NOT EXISTS won't
                 # overwrite, so we drop them explicitly and let the post-migration
                 # existence checks (below) recreate them from FTS_SQL /
-                # FTS_TRIGRAM_SQL, then backfill every message row. Fixes #16751.
+                # FTS_TRIGRAM_SQL, then backfill every message row.
                 for _trig in (
                     "messages_fts_insert",
                     "messages_fts_delete",
@@ -932,7 +932,7 @@ class SessionDB:
         Targets child sessions that were never finalized: parent is ended
         with reason='compression', child has messages but no end_reason/ended_at
         and api_call_count=0.  Non-destructive: preserves all messages and sets
-        end_reason='orphaned_compression'.  Fix for #20001.
+        end_reason='orphaned_compression'.
         """
         cutoff = time.time() - 604800  # 7 days
 
@@ -1924,7 +1924,7 @@ class SessionDB:
         """Load messages for a session AND all its lineage ancestors, in order.
 
         Full read-side stitching for the WebUI. Sessions created before the
-        in-place-compression fix (2026-08-13) were SPLIT by compression into a
+        in-place-compression fix were SPLIT by compression into a
         parent→child chain linked via ``parent_session_id`` — the parent holds
         the pre-compression turns, the child holds everything after. Clicking
         either one used to show only half the task. This walks the lineage
@@ -2010,7 +2010,7 @@ class SessionDB:
         (linked via ``parent_session_id``). The flush cursor is reset, so the
         child is where new messages actually land — the parent ends up with
         ``message_count = 0`` rows unless messages had already been flushed to
-        it before compression. See #15000.
+        it before compression.
 
         This helper walks ``parent_session_id`` forward from ``session_id`` and
         returns the first descendant in the chain that has at least one message
@@ -2326,7 +2326,7 @@ class SessionDB:
             raw_query = query.strip('"').strip()
             cjk_count = self._count_cjk(raw_query)
 
-            # Per-token CJK length check (#20494): trigram needs >=3 CJK chars
+            # Per-token CJK length check: trigram needs >=3 CJK chars
             # per token. A query like "广西 OR 桂林 OR 漓江" has cjk_count=6
             # (>=3) but each individual token is only 2 chars — trigram returns 0.
             # Route to LIKE when any non-operator CJK token is <3 CJK chars.
@@ -2393,7 +2393,7 @@ class SessionDB:
                 # <3 CJK chars. Fall back to LIKE substring search.
                 # For multi-token OR queries (e.g. "广西 OR 桂林 OR 漓江"),
                 # build one LIKE condition per non-operator token so each term
-                # is matched independently (#20494).
+                # is matched independently.
                 non_op_tokens = [
                     t for t in raw_query.split()
                     if t.upper() not in {"AND", "OR", "NOT"}
@@ -2789,7 +2789,7 @@ class SessionDB:
 
         When *sessions_dir* is provided, on-disk transcript files
         (``.json`` / ``.jsonl`` / ``request_dump_*``) for pruned sessions
-        are removed as part of the same sweep (issue #3015).
+        are removed as part of the same sweep.
 
         Never raises. On any failure, logs a warning and returns a dict
         with ``"error"`` set.

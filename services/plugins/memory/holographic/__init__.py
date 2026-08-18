@@ -3,8 +3,6 @@
 Registers as a MemoryProvider plugin, giving the agent structured fact storage
 with entity resolution, trust scoring, and HRR-based compositional retrieval.
 
-Original plugin by dusterbloom (PR #2351), adapted to the MemoryProvider ABC.
-
 Config in $EASYBCI_HOME/config.yaml (profile-scoped):
   plugins:
     easybci-memory-store:

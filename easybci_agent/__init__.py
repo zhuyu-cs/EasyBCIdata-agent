@@ -1,6 +1,6 @@
 """Agent internals -- extracted modules from run_agent.py.
 
-Submodules (Phase 1 extraction):
+Submodules:
   iteration_budget  — Thread-safe iteration counter
   parallelism       — Parallel tool execution constants & helpers
   sanitization      — Message/payload sanitization (surrogates, JSON repair)

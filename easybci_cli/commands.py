@@ -340,7 +340,7 @@ def should_bypass_active_session(command_name: str | None) -> bool:
     /insights, /title, /resume, /retry, /undo, /compress,
     /usage, /reload-mcp, /sethome, /reset) would silently
     interrupt the agent AND get discarded, producing a zero-char
-    response. See issue #5057 / PRs #6252, #10370, #4665.
+    response.
 
     ACTIVE_SESSION_BYPASS_COMMANDS remains the subset of commands with
     explicit Level-2 handlers; the rest fall through to the catch-all.

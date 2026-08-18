@@ -268,7 +268,7 @@ _PIPELINE_SCRIPT_TEMPLATE = '''"""Auto-generated preprocessing pipeline.
 EASYBCI_STEPS: {steps_repr}
 EASYBCI_GOAL: {analysis_goal}
 EASYBCI_MODALITY: {modality}
-EASYBCI_VERSION: 4
+EASYBCI_VERSION: 5
 EASYBCI_CODE_STANDARD: 0.0.1
 
 Standalone script — runs on a plain `pip install mne numpy scipy scikit-learn`
@@ -514,11 +514,19 @@ def _to_mne_raw(d):
 
 
 def _from_mne_raw(raw, prev_meta):
+    meta = dict(prev_meta)
+    # Refresh ch_types from the raw so it always matches raw.ch_names — an MNE
+    # op that drops/reorders channels would otherwise leave a stale ch_types
+    # and trip the NWB writer's length check.
+    try:
+        meta["ch_types"] = list(raw.get_channel_types())
+    except Exception:
+        meta.pop("ch_types", None)
     return {{
         "data": raw.get_data().astype(np.float32),
         "frequency": float(raw.info["sfreq"]),
         "channels": list(raw.ch_names),
-        "meta": dict(prev_meta),
+        "meta": meta,
         "_mne_info": raw.info,
     }}
 
@@ -722,6 +730,9 @@ def op_drop_bads(d, param):
     out["channels"] = kept_channels
     out["meta"] = dict(d.get("meta", {{}}))
     out["meta"]["dropped_channels"] = list(out["meta"].get("dropped_channels", [])) + dropped
+    _ct = out["meta"].get("ch_types")
+    if isinstance(_ct, list) and len(_ct) == len(channels):
+        out["meta"]["ch_types"] = [_ct[i] for i in keep]
     if nan_cleaned:
         out["meta"]["nan_interpolated_channels"] = list(
             out["meta"].get("nan_interpolated_channels", [])
@@ -756,6 +767,9 @@ def op_drop_nondata_channels(d, param):
     out["channels"] = [channels[i] for i in keep]
     out["meta"] = dict(d.get("meta", {{}}))
     out["meta"]["dropped_channels"] = list(out["meta"].get("dropped_channels", [])) + dropped
+    _ct = out["meta"].get("ch_types")
+    if isinstance(_ct, list) and len(_ct) == len(channels):
+        out["meta"]["ch_types"] = [_ct[i] for i in keep]
     out.pop("_mne_info", None)
     return out
 
@@ -814,7 +828,7 @@ def op_fill_nan(d, param):
 # DEFAULT_REJECT_KEYWORDS so the operator is self-contained. Always union'd
 # with keywords baked into the step param.
 _DEFAULT_REJECT_KEYWORDS = [
-    "Seiz", "Seizure", "Ictal", "SZ\\b", "pre-ictal", "post-ictal",
+    "Seiz", "Seizure", "Ictal", "SZ\\\\b", "pre-ictal", "post-ictal",
     "epilep", "convuls",
     "IID", "spike", "sharp wave", "polyspike", "discharge",
     "Stim", "stimulat", "electrical stim",
@@ -829,7 +843,7 @@ def _reject_compile(keywords):
         kw = str(kw).strip()
         if not kw:
             continue
-        if "\\b" in kw:
+        if "\\\\b" in kw:
             parts.append(kw)
         else:
             parts.append(r"(?<![0-9A-Za-z])" + _re.escape(kw))
@@ -890,7 +904,7 @@ def op_reject_by_labels(d, param):
     # overlapping windows collapse into one), expressed in seconds so the map
     # is correct even after a subsequent resample changes the sample rate.
     if sfreq > 0 and not keep.all():
-        flip = np.diff(np.concatenate(([1], keep.view(np.int8), [1])))
+        flip = np.diff(np.concatenate(([1], keep.astype(np.int64), [1])))
         starts = np.where(flip == -1)[0]
         stops = np.where(flip == 1)[0]
         rejected_intervals_s = [
@@ -1996,6 +2010,7 @@ _QC_SCRIPT_TEMPLATE = '''"""Auto-generated QC report.
 
 EASYBCI_STEPS: {steps_repr}
 EASYBCI_GOAL: {analysis_goal}
+EASYBCI_SCENARIO: {scenario}
 EASYBCI_VERSION: 3
 EASYBCI_CODE_STANDARD: 1.1.0
 
@@ -2023,6 +2038,19 @@ EASYBCI_SEED = 42
 _os.environ.setdefault("PYTHONHASHSEED", str(EASYBCI_SEED))
 _random.seed(EASYBCI_SEED)
 np.random.seed(EASYBCI_SEED)
+
+_SCENARIO = "{scenario}"
+
+# Scenario-specific QC thresholds:
+# research — lenient (preserving data is more important than rejecting artifacts)
+# clinical — strict (safety: flag anything that could mask clinically-relevant morphology)
+# deployment — moderate (balance between reliability and throughput)
+_QC_THRESHOLDS = {{
+    "research":   {{"finite_floor": 0.95, "snr_warn_drop_db": -6.0}},
+    "clinical":   {{"finite_floor": 0.995, "snr_warn_drop_db": -2.0}},
+    "deployment": {{"finite_floor": 0.99, "snr_warn_drop_db": -3.0}},
+}}
+_THR = _QC_THRESHOLDS.get(_SCENARIO, _QC_THRESHOLDS["research"])
 
 _MNE_EXTS = {{
     ".fif", ".edf", ".bdf", ".set", ".ds", ".cnt", ".gdf",
@@ -2277,10 +2305,24 @@ def _compute_metrics(raw_d, proc):
 
     ra_finite_frac = _finite_fraction(ra)
     ra_ndim = getattr(ra, "ndim", 0)
-    overall_grade = "Pass" if (
-        ra_finite_frac > 0.99 and ra_ndim >= 2
-        and int(ra.shape[0]) > 0 and int(ra.shape[-1]) > 0
-    ) else "Fail"
+
+    # Scenario-aware grading: research is lenient (preserving data over
+    # rejecting borderline artifacts); clinical is strict.
+    grade_warnings = []
+    finite_ok = ra_finite_frac > _THR["finite_floor"]
+    shape_ok = ra_ndim >= 2 and int(ra.shape[0]) > 0 and int(ra.shape[-1]) > 0
+    snr_drop = snr_after - snr_before
+    if snr_drop < _THR["snr_warn_drop_db"]:
+        grade_warnings.append(
+            "SNR dropped by {{:.1f}} dB (threshold {{:.1f}} dB for {{}} scenario)".format(
+                abs(snr_drop), _THR["snr_warn_drop_db"], _SCENARIO))
+
+    if not finite_ok:
+        grade_warnings.append(
+            "Finite fraction {{:.4f}} below {{}} threshold {{}}".format(
+                ra_finite_frac, _SCENARIO, _THR["finite_floor"]))
+
+    overall_grade = "Pass" if (finite_ok and shape_ok) else "Fail"
 
     return {{
         "before": {{
@@ -2297,11 +2339,16 @@ def _compute_metrics(raw_d, proc):
             "stats": _chunked_stats(ra),
             "psd_snr_estimate": snr_after,
         }},
-        "overall": {{"grade": overall_grade}},
+        "overall": {{
+            "grade": overall_grade,
+            "scenario": _SCENARIO,
+            "warnings": grade_warnings,
+            "snr_change_db": round(snr_drop, 2),
+        }},
     }}
 
 
-def _write_report(qc_dir, session_id, subject_id, data_path, steps, metrics):
+def _write_report(qc_dir, session_id, subject_id, data_path, steps, metrics, stem=""):
     payload = {{
         "session_id": session_id,
         "subject_id": subject_id,
@@ -2309,7 +2356,8 @@ def _write_report(qc_dir, session_id, subject_id, data_path, steps, metrics):
         "steps": list(steps),
         "metrics": metrics,
     }}
-    (qc_dir / "qc_report.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    prefix = "{{}}_".format(stem) if stem else ""
+    (qc_dir / "{{}}qc_report.json".format(prefix)).write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     md = [
         "# QC Report",
         "",
@@ -2330,7 +2378,7 @@ def _write_report(qc_dir, session_id, subject_id, data_path, steps, metrics):
         "```",
         "",
     ]
-    (qc_dir / "qc_report.md").write_text("\\n".join(md), encoding="utf-8")
+    (qc_dir / "{{}}qc_report.md".format(prefix)).write_text("\\n".join(md), encoding="utf-8")
 
 
 def _load_inputs(work_dir, argv):
@@ -2391,7 +2439,7 @@ def _qc_one(work_dir, inp, steps):
 
     qc_report_path = (
         work_dir / "preprocessed_output" / "QC_out"
-        / "sub-{{}}".format(sub_id) / "ses-{{}}".format(ses) / "qc_report.json"
+        / "sub-{{}}".format(sub_id) / "ses-{{}}".format(ses) / "{{}}_qc_report.json".format(stem)
     )
     if _already_done(qc_report_path, __file__):
         print("[qc] skip file_id={{}} (already processed)".format(file_id))
@@ -2435,7 +2483,7 @@ def _qc_one(work_dir, inp, steps):
     qc_dir.mkdir(parents=True, exist_ok=True)
 
     metrics = _compute_metrics(raw_d, proc)
-    _write_report(qc_dir, "ses-" + ses, sub_id, raw_path, steps, metrics)
+    _write_report(qc_dir, "ses-" + ses, sub_id, raw_path, steps, metrics, stem)
 
     return {{
         "file_id": file_id,
@@ -2505,6 +2553,7 @@ def generate_qc_script_v2(
     data_info: Dict[str, Any],
     modality: str = "eeg",
     analysis_goal: str = "generic",
+    scenario: str = "research",
     inspection_report: Dict[str, Any] | None = None,
 ) -> str:
     """Generate the canonical qc.py script for figures + QC report.
@@ -2524,6 +2573,7 @@ def generate_qc_script_v2(
         steps_repr=repr(steps_list),
         analysis_goal=analysis_goal,
         modality=modality,
+        scenario=scenario,
         nwb_loader_block=_NWB_PREPROCESSED_LOADER_BLOCK,
         already_done_helper=_ALREADY_DONE_HELPER_SRC,
     )
@@ -2539,7 +2589,6 @@ def generate_qc_script_v2(
 #     (PSD / channel variance / amplitude distribution / timeseries). No raw reload.
 #   non-invasive (eeg/meg/fnirs/...)                       → 4 single-state figures
 #     + 1 before/after timeseries panel (loads raw via MNE / pickle / npz).
-# Spec: improved_docs/plans/2026-06-22-nwb-visualization-rule-design.md
 
 
 _VIS_INVASIVE_TEMPLATE = '''"""Auto-generated multi-figure visualization (invasive modality — 4 single-state figs + per-channel time-frequency).
@@ -3320,7 +3369,7 @@ def generate_vis_script(
 _AI_READY_TEMPLATE = '''"""Auto-generated AI_ready epoching.
 
 EASYBCI_GOAL: {analysis_goal}
-EASYBCI_VERSION: 2
+EASYBCI_VERSION: 3
 
 Run: python build_ai_ready.py <preprocessed_nwb> <work_dir>
 
@@ -3658,8 +3707,10 @@ def _load_events_csv(csv_path, fs):
 
     Supports two schemas, auto-detected per row:
 
-    * legacy CSV -- comma-separated sample_index / event_code.
-      sample_index is already a sample offset (used verbatim).
+    * legacy CSV -- comma-separated sample_index / time_s / event_code.
+      time_s (seconds) is the authoritative, rate-invariant time base and is
+      mapped onto the current (resampled) fs; sample_index is a raw-rate offset
+      used only as a fallback when time_s is absent.
     * BIDS TSV -- tab-separated onset (seconds) / duration / trial_type /
       value. onset is converted to a sample offset via fs; the label prefers
       trial_type then falls back to value.
@@ -3678,7 +3729,7 @@ def _load_events_csv(csv_path, fs):
                 # BIDS: onset is in seconds → convert to a sample offset.
                 try:
                     onset_s = float(row["onset"])
-                    start = int(round(onset_s * float(fs)))
+                    start = int(round(onset_s * float(fs))) if fs else 0
                 except (TypeError, ValueError):
                     start = 0
                     onset_s = None
@@ -3686,13 +3737,27 @@ def _load_events_csv(csv_path, fs):
                 if raw is None or str(raw).strip() in ("", "n/a"):
                     raw = row.get("value")
             else:
-                # Legacy: sample_index is already a sample offset.
-                try:
-                    start = int(float(row.get("sample_index") or 0))
-                    onset_s = (start / float(fs)) if fs else None
-                except (TypeError, ValueError):
-                    start = 0
-                    onset_s = None
+                # Legacy. time_s (seconds) is the authoritative time base — it
+                # survives the pipeline's resample, so map it onto the current
+                # (resampled) fs. sample_index is captured at the RAW rate; using
+                # it verbatim against a resampled signal offsets every epoch by
+                # the resample ratio. Fall back to sample_index only when the
+                # sidecar has no time_s column.
+                _t = (row.get("time_s") or "").strip()
+                if _t:
+                    try:
+                        onset_s = float(_t)
+                        start = int(round(onset_s * float(fs))) if fs else 0
+                    except (TypeError, ValueError):
+                        start = 0
+                        onset_s = None
+                else:
+                    try:
+                        start = int(float(row.get("sample_index") or 0))
+                        onset_s = (start / float(fs)) if fs else None
+                    except (TypeError, ValueError):
+                        start = 0
+                        onset_s = None
                 raw = row.get("event_code")
 
             code = str(raw).strip() if raw is not None else ""

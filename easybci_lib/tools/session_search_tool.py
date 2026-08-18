@@ -479,7 +479,7 @@ def session_search(
             # pattern (asyncio.run() in a ThreadPoolExecutor) created a
             # disposable event loop that conflicted with cached
             # AsyncOpenAI/httpx clients bound to a different loop,
-            # causing deadlocks in gateway mode (#2681).
+            # causing deadlocks in gateway mode.
             from easybci_lib.model_tools import _run_async
             results = _run_async(_summarize_all())
         except concurrent.futures.TimeoutError:
@@ -505,7 +505,7 @@ def session_search(
             # match_info carries source/model from the *child* session that contained
             # the FTS5 hit; after _resolve_to_parent() the session_id points to the
             # root, so session_meta has the authoritative platform/source for the
-            # session the user actually cares about (#15909).
+            # session the user actually cares about.
             entry = {
                 "session_id": session_id,
                 "when": _format_timestamp(
@@ -519,7 +519,7 @@ def session_search(
                 entry["summary"] = result
             else:
                 # Fallback: raw preview so matched sessions aren't silently
-                # dropped when the summarizer is unavailable (fixes #3409).
+                # dropped when the summarizer is unavailable.
                 preview = (conversation_text[:500] + "\n…[truncated]") if conversation_text else "No preview available."
                 entry["summary"] = f"[Raw preview — summarization unavailable]\n{preview}"
 

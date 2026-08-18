@@ -25,11 +25,10 @@ class AnalysisGoalSpec:
     allow_aggressive_notch: bool = True
     allow_ica: bool = True
     produces_figures: bool = True
-    # DEMOTED to a default *suggestion* only (was a hard gate). AI-ready
-    # generation is now driven by the `deliverables` concept (see
-    # preprocess/deliverables.py), decided by the user at confirm time and
-    # persisted into the proposal / confirm marker / pipeline_record. This flag
-    # is retained for backward-compat + as the seed value when the LLM first
+    # This flag is only a default *suggestion*. AI-ready generation is driven
+    # by the `deliverables` concept (see preprocess/deliverables.py), decided by
+    # the user at confirm time and persisted into the proposal / confirm marker /
+    # pipeline_record. The flag is retained as the seed value when the LLM first
     # infers deliverables; codegen/contract_check no longer read it as a gate.
     produces_ai_ready: bool = True
     crystallize_eligible: bool = True
@@ -112,6 +111,22 @@ REGISTRY: Dict[str, AnalysisGoalSpec] = {
         allow_ica=False,
         produces_figures=False,
         notes="No offline ICA; QC figures not produced. mini-repo contract relaxes for this goal.",
+    ),
+    "sleep_staging": AnalysisGoalSpec(
+        name="sleep_staging",
+        display_name={"en": "Sleep Staging (PSG)", "zh": "睡眠分期（多导睡眠）"},
+        description=("Polysomnography sleep staging — keep EEG/EOG/EMG plus "
+                     "respiratory/SpO2/effort/position auxiliaries; 30 s AASM "
+                     "epochs; hypnogram labels when scored."),
+        inject_drop_bads=True,
+        inject_drop_nondata=False,
+        allow_aggressive_notch=True,
+        allow_ica=False,
+        produces_figures=True,
+        crystallize_eligible=True,
+        notes=("Do NOT high-pass above 0.5 Hz — slow waves (0.5–2 Hz) are "
+               "critical. Low-pass ~35 Hz suffices. Resample default 100 Hz "
+               "(AASM). Labels optional: study may be unscored."),
     ),
 }
 

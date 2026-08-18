@@ -32,7 +32,7 @@ def _resolve_skill_commands_platform() -> Optional[str]:
 
     Used to detect when the active platform has shifted so
     :func:`get_skill_commands` can drop a stale cache that was populated
-    for a different platform's ``skills.platform_disabled`` view (#14536).
+    for a different platform's ``skills.platform_disabled`` view.
 
     Resolves from (in order) ``EASYBCI_PLATFORM`` env var and
     ``EASYBCI_SESSION_PLATFORM`` from the gateway session context. Returns
@@ -309,7 +309,7 @@ def get_skill_commands() -> Dict[str, Dict[str, Any]]:
 
     Rescans when the active platform scope changes (e.g. a gateway
     process serving multiple platforms concurrently) so each platform
-    sees its own ``skills.platform_disabled`` view (#14536).
+    sees its own ``skills.platform_disabled`` view.
     """
     if (
         not _skill_commands
@@ -429,7 +429,7 @@ def build_skill_invocation_message(
 
     loaded_skill, skill_dir, skill_name = loaded
 
-    # Track active usage for Curator lifecycle management (#17782)
+    # Track active usage for Curator lifecycle management
     try:
         from easybci_lib.tools.skill_usage import bump_use
         bump_use(skill_name)
@@ -476,7 +476,7 @@ def build_preloaded_skills_prompt(
 
         loaded_skill, skill_dir, skill_name = loaded
 
-        # Track active usage for Curator lifecycle management (#17782)
+        # Track active usage for Curator lifecycle management
         try:
             from easybci_lib.tools.skill_usage import bump_use
             bump_use(skill_name)

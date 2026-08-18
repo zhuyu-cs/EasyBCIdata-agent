@@ -38,6 +38,15 @@ _RE_PHYSIO = re.compile(
     re.IGNORECASE,
 )
 
+# PSG auxiliary channels — physiological but ESSENTIAL to a sleep study.
+# In PSG context these are kept (not suggest-dropped). Names follow the
+# Compumedics/AASM montage seen in .SLP StudyCfg.
+_RE_PSG_AUX = re.compile(
+    r"(SpO2|SaO2|Pleth|Pulse|Ox[\s_]?Status|NPress|CPress|Airflow|Flow|"
+    r"Thor|Abdo|Effort|Snore|Sound|Therm|Thermistor|Position|Pos|Leg|Limb)",
+    re.IGNORECASE,
+)
+
 # Spike data has no channel-type concept.
 _NON_APPLICABLE_MODALITIES = {"spike", "spikes", "unit"}
 
@@ -56,6 +65,7 @@ def classify_channels(
     ch_types: Optional[List[str]] = None,
     modality: str = "",
     bad_channels: Optional[List[str]] = None,
+    psg_context: bool = False,
 ) -> Dict:
     """Classify each channel name into a category.
 
@@ -71,7 +81,7 @@ def classify_channels(
         return {
             "applicable": False, "used_fallback": False,
             "categories": {}, "summary": {},
-            "must_drop": [], "suggest_drop": [],
+            "must_drop": [], "suggest_drop": [], "psg_aux": [],
         }
 
     use_types = bool(ch_types) and len(ch_types) == len(channels)
@@ -96,6 +106,11 @@ def classify_channels(
     must_drop = [n for n, c in categories.items() if c == "marker"]
     suggest_drop = [n for n, c in categories.items() if c in ("physio", "misc")]
 
+    psg_aux = [n for n in channels if _RE_PSG_AUX.search(n)] if psg_context else []
+    if psg_context:
+        aux_set = set(psg_aux)
+        suggest_drop = [n for n in suggest_drop if n not in aux_set]
+
     return {
         "applicable": True,
         "used_fallback": not use_types,
@@ -103,4 +118,5 @@ def classify_channels(
         "summary": summary,
         "must_drop": must_drop,
         "suggest_drop": suggest_drop,
+        "psg_aux": psg_aux,
     }

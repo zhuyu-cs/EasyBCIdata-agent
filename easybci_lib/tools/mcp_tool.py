@@ -984,7 +984,7 @@ class MCPServerTask:
         # ``await session.initialize()`` so downstream code can inspect the
         # server's real advertised capabilities (``.capabilities.resources``,
         # ``.capabilities.prompts``) instead of assuming every ``ClientSession``
-        # method attribute corresponds to a supported server method. See #18051.
+        # method attribute corresponds to a supported server method.
         self.initialize_result: Optional[Any] = None
 
     def _is_http(self) -> bool:
@@ -1128,7 +1128,7 @@ class MCPServerTask:
 
         Periodically sends a lightweight keepalive (``list_tools``) to
         prevent TCP connections from going stale during long idle
-        periods (#17003).  If the keepalive fails, triggers a reconnect.
+        periods.  If the keepalive fails, triggers a reconnect.
         """
         # Keepalive interval in seconds.  Must be shorter than typical
         # LB / NAT idle-timeout (commonly 300-600s).
@@ -1314,8 +1314,8 @@ class MCPServerTask:
             # minutes between events, so a 60s read timeout drops the
             # connection after the first slow stretch. 300s matches the
             # Streamable HTTP code path's httpx read timeout below. Original
-            # observation from @amiller in PR #5981 (Router Teamwork,
-            # Supermemory on Cloudflare Workers idle-disconnect at ~60s).
+            # observation: Router Teamwork / Supermemory on Cloudflare Workers
+            # idle-disconnect at ~60s.
             _sse_kwargs: dict = {
                 "url": url,
                 "headers": headers or None,
@@ -1487,7 +1487,7 @@ class MCPServerTask:
                 # and the MCP server would stay dead until EasyBCI is fully
                 # restarted. Re-raise so the task's cancellation propagates
                 # correctly to asyncio's task machinery and ``shutdown()``'s
-                # ``await self._task`` completes. See #9930.
+                # ``await self._task`` completes.
                 self.session = None
                 raise
             except Exception as exc:
@@ -1618,7 +1618,7 @@ _servers: Dict[str, MCPServerTask] = {}
 # Circuit breaker: consecutive error counts per server.  After
 # _CIRCUIT_BREAKER_THRESHOLD consecutive failures, the handler returns
 # a "server unreachable" message that tells the model to stop retrying,
-# preventing the 90-iteration burn loop described in #10447.
+# preventing the 90-iteration burn loop.
 #
 # State machine:
 #   closed    — error count below threshold; all calls go through.
@@ -1844,7 +1844,7 @@ def _handle_auth_error_and_retry(
 # Substrings (lower-cased match) that indicate the MCP server rejected
 # the request because its server-side transport session expired /
 # was garbage-collected.  The caller's OAuth token is still valid —
-# only the transport-layer session state needs rebuilding.  See #13383.
+# only the transport-layer session state needs rebuilding.
 _SESSION_EXPIRED_MARKERS: tuple = (
     "invalid or expired session",
     "expired session",
@@ -1901,7 +1901,6 @@ def _handle_session_expired_and_retry(
     ``_reconnect_event`` causes the server task's lifecycle loop to
     tear down the current ``streamablehttp_client`` + ``ClientSession``
     and rebuild them, reusing the existing OAuth provider instance.
-    See #13383.
 
     Args:
         server_name: Name of the MCP server that raised.
@@ -2174,7 +2173,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     def _handler(args: dict, **kwargs) -> str:
         # Circuit breaker: if this server has failed too many times
         # consecutively, short-circuit with a clear message so the model
-        # stops retrying and uses alternative approaches (#10447).
+        # stops retrying and uses alternative approaches.
         #
         # Once the cooldown elapses, the breaker transitions to
         # half-open: we let the *next* call through as a probe. On
@@ -2228,10 +2227,9 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             # adapters that render images natively. Without this, image blocks
             # were silently dropped and the agent got an empty response.
             #
-            # Distilled from #17915 (c3115644151) and #10848 (gnanirahulnutakki),
-            # both too stale to cherry-pick. #10848's approach (integrate with
-            # EasyBCI' MEDIA tag + cache_image_from_bytes) was the cleaner of
-            # the two — plugs into existing infrastructure.
+            # The chosen approach (integrate with
+            # EasyBCI' MEDIA tag + cache_image_from_bytes) plugs into existing
+            # infrastructure.
             parts: List[str] = []
             for block in (result.content or []):
                 if hasattr(block, "text") and block.text:
@@ -2284,7 +2282,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             if recovered is not None:
                 return recovered
 
-            # Transport session expiry (#13383): same reconnect flow
+            # Transport session expiry: same reconnect flow
             # but skips OAuth recovery because the access token is
             # still valid — only the server-side session is stale.
             recovered = _handle_session_expired_and_retry(
@@ -2587,12 +2585,12 @@ def _normalize_mcp_input_schema(schema: dict | None) -> dict:
     Additional MCP-server robustness repairs applied recursively:
 
     * Missing or ``null`` ``type`` on an object-shaped node is coerced to
-      ``"object"`` (some servers omit it).  See PR #4897.
+      ``"object"`` (some servers omit it).
     * When an ``object`` node lacks ``properties``, an empty ``properties``
       dict is added so ``required`` entries don't dangle.
     * ``required`` arrays are pruned to only names that exist in
       ``properties``; otherwise Google AI Studio / Gemini 400s with
-      ``property is not defined``.  See PR #4651.
+      ``property is not defined``.
     * MCP/Pydantic optional fields commonly arrive as
       ``anyOf: [{...}, {"type": "null"}], default: null``.  Anthropic rejects
       nullable branches in tool input schemas, so nullable unions are collapsed
@@ -2831,8 +2829,7 @@ _UTILITY_CAPABILITY_METHODS = {
 # Context7 @upstash/context7-mcp, which advertises only ``tools``) had
 # all four utility stubs registered and every model call to them came
 # back with JSON-RPC ``-32601 Method not found``, which made the model
-# conclude the server was broken even when the real tools worked. See
-# #18051.
+# conclude the server was broken even when the real tools worked.
 _UTILITY_CAPABILITY_ATTRS = {
     "list_resources": "resources",
     "read_resource": "resources",
@@ -2929,7 +2926,7 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
     toolset_name = f"mcp-{name}"
 
     # Selective tool loading: honour include/exclude lists from config.
-    # Rules (matching issue #690 spec):
+    # Rules:
     #   tools.include — whitelist: only these tool names are registered
     #   tools.exclude — blacklist: all tools EXCEPT these are registered
     #   include takes precedence over exclude

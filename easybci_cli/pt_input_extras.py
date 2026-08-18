@@ -64,7 +64,7 @@ def install_ctrl_enter_alias() -> int:
     Stock prompt_toolkit doesn't map any of these. Without this alias,
     Kitty/mintty/xterm-with-modifyOtherKeys users over SSH never get a
     Ctrl+Enter newline — the keystroke arrives as a raw CSI sequence that
-    falls through to the default character-insert handler. See #22379.
+    falls through to the default character-insert handler.
 
     Returns the number of sequences whose mapping was changed.
     """

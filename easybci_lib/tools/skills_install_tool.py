@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""install_skill — agent-driven external skill search + install (Phase B).
+"""install_skill — agent-driven external skill search + install.
 
 The sanctioned alternative to waiting for a human to run ``easybci skills
 install`` on the CLI. When the agent discovers it is missing a methodology, it
@@ -7,12 +7,11 @@ can ``search`` candidate skills across all configured sources and ``install`` a
 chosen one — flowing through the *exact same* quarantine + security-scan gate as
 the CLI (:func:`easybci_cli.skills_hub.do_install`). No new security bypass.
 
-Air-gap degradation ladder (see ``improved_docs/plans/agent-self-extension/
-02-install-skill-tool.md`` §0): search aggregates candidates across
+Air-gap degradation ladder: search aggregates candidates across
 public sources → the configurable local-dir source → intranet HTTP index, each
 independently fail-open. When *no* source is reachable, the return carries
 ``degraded: true`` + a ``fix_hint`` naming three offline paths — never a silent
-empty result (principle §二·五 #2: observable, never silent).
+empty result (observable, never silent).
 
 Belongs to the ``skills`` toolset (alongside ``skill_manage`` / ``skills_list`` /
 ``skill_view``), which is covered by ``_EASYBCI_CORE_TOOLS``.

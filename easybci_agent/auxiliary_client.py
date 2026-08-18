@@ -282,7 +282,7 @@ _PROVIDER_VISION_MODELS: Dict[str, str] = {
 # kimi-coding / kimi-coding-cn: the Kimi Coding Plan routes through
 # api.kimi.com/coding (Anthropic Messages wire) which Kimi's own docs
 # describe as having no image_in capability. Vision lives on the separate
-# Kimi Platform (api.moonshot.ai, OpenAI-wire, pay-as-you-go).  See #17076.
+# Kimi Platform (api.moonshot.ai, OpenAI-wire, pay-as-you-go).
 _PROVIDERS_WITHOUT_VISION: frozenset = frozenset({
     "kimi-coding",
     "kimi-coding-cn",
@@ -623,7 +623,7 @@ class _ResponsesCompletionsAdapter:
             # this instance).  After we close the httpx transport above, the
             # cache must drop that entry — otherwise the next auxiliary call
             # (compression retry, memory flush, etc.) reuses the dead client
-            # and fails fast with a connection error.  See issue #23432.
+            # and fails fast with a connection error.
             try:
                 _evict_cached_client_instance(self._client)
             except Exception:
@@ -813,7 +813,7 @@ class AsyncResponsesAuxiliaryClient:
         self.api_key = sync_wrapper.api_key
         self.base_url = sync_wrapper.base_url
         # Mirror the sync wrapper's _real_client so cache eviction by leaf
-        # OpenAI client (e.g. _close_client_on_timeout in #23482) drops
+        # OpenAI client (e.g. _close_client_on_timeout) drops
         # this async entry too. Without this, sync and async cache entries
         # diverge on poisoning: the sync entry is evicted but the async
         # entry keeps reusing the closed transport, failing every
@@ -1325,7 +1325,7 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[st
     # Local servers (Ollama, llama.cpp, vLLM, LM Studio) don't require auth.
     # Use a placeholder key — the OpenAI SDK requires a non-empty string but
     # local servers ignore the Authorization header.  Same fix as cli.py
-    # _ensure_runtime_credentials() (PR #2556).
+    # _ensure_runtime_credentials().
     if not isinstance(custom_key, str) or not custom_key.strip():
         custom_key = "no-key-required"
 
@@ -1670,7 +1670,7 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     err_lower = str(exc).lower()
 
     # OpenAI SDK's RateLimitError sometimes omits .status_code —
-    # detect by class name so we don't miss these.  (PR #8023 pattern)
+    # detect by class name so we don't miss these.
     if type(exc).__name__ == "RateLimitError":
         return True
 
@@ -1717,7 +1717,6 @@ def _is_connection_error(exc: Exception) -> bool:
         # httpcore / httpx streaming premature-close errors.  These surface
         # when a proxy or provider drops the connection mid-stream and are
         # transient by nature — the request should be retried or rerouted.
-        # See issue #18458.
         "incomplete chunked read",
         "peer closed connection",
         "response ended prematurely",
@@ -1749,10 +1748,8 @@ def _is_unsupported_parameter_error(exc: Exception, param: str) -> bool:
     call sites can reactively retry without the offending key instead of
     surfacing a noisy auxiliary failure.
 
-    Generalizes the temperature-specific detector that originally shipped
-    with PR #15621 so the same retry strategy can cover ``max_tokens``,
-    ``seed``, ``top_p``, and any future quirk. Credit @nicholasrae (PR #15416)
-    for the generalization pattern.
+    Generalizes the temperature-specific detector so the same retry strategy
+    can cover ``max_tokens``, ``seed``, ``top_p``, and any future quirk.
     """
     param_lower = (param or "").lower()
     if not param_lower:
@@ -2499,7 +2496,7 @@ def resolve_provider_client(
                     provider, final_model, entry_api_mode or "chat_completions")
                 # anthropic_messages: route through the Anthropic Messages API
                 # via AnthropicAuxiliaryClient. Mirrors the anonymous-custom
-                # branch in _try_custom_endpoint(). See #15033.
+                # branch in _try_custom_endpoint().
                 if entry_api_mode == "anthropic_messages":
                     try:
                         from easybci_agent.anthropic_adapter import build_anthropic_client
@@ -2853,7 +2850,7 @@ def resolve_vision_provider_client(
                 # image_in capability" and vision lives on the separate Kimi
                 # Platform (api.moonshot.ai). Skip the main provider and fall
                 # through to the aggregator chain instead of returning a
-                # client that will 404 on every vision request (#17076).
+                # client that will 404 on every vision request.
                 logger.debug(
                     "Vision auto-detect: skipping main provider %s (no "
                     "vision support) — falling through to aggregator chain",
@@ -2968,7 +2965,7 @@ def auxiliary_max_tokens_param(value: int) -> dict:
 # whether the cached loop is the *current* loop; if not, the stale entry is
 # replaced in-place.  This bounds cache growth to one entry per unique
 # provider config rather than one per (config × event-loop), which previously
-# caused unbounded fd accumulation in long-running gateway processes (#10200).
+# caused unbounded fd accumulation in long-running gateway processes.
 _client_cache: Dict[tuple, tuple] = {}
 _client_cache_lock = threading.Lock()
 _CLIENT_CACHE_MAX_SIZE = 64  # safety belt — evict oldest when exceeded
@@ -3150,14 +3147,14 @@ def _get_cached_client(
 
     This keeps cache size bounded to one entry per unique provider config,
     preventing the fd-exhaustion that previously occurred in long-running
-    gateways where recycled worker threads created unbounded entries (#10200).
+    gateways where recycled worker threads created unbounded entries.
     """
     # Resolve the current event loop for async clients so we can validate
     # cached entries.  Loop identity is NOT in the cache key — instead we
     # check at hit time whether the cached loop is still current and open.
     # This prevents unbounded cache growth from recycled worker-thread loops
     # while still guaranteeing we never reuse a client on the wrong loop
-    # (which causes deadlocks, see #2681).
+    # (which causes deadlocks).
     current_loop = None
     if async_mode:
         try:
@@ -3455,7 +3452,7 @@ def _build_call_kwargs(
         # reject requests with duplicate tool names (HTTP 400).  The upstream
         # injection paths (run_agent.py) already dedup, but this guard
         # converts a hard API failure into a warning if an upstream regression
-        # reintroduces duplicates.  See: #18478
+        # reintroduces duplicates.
         _seen: set = set()
         _deduped: list = []
         for _t in tools:
@@ -3486,8 +3483,6 @@ def _validate_llm_response(response: Any, task: str = None) -> Any:
     Fails fast with a clear error instead of letting malformed payloads
     propagate to downstream consumers where they crash with misleading
     AttributeError (e.g. "'str' object has no attribute 'choices'").
-
-    See #7264.
     """
     if response is None:
         raise RuntimeError(
@@ -3769,7 +3764,7 @@ def call_llm(
         # and providers the user never configured that got picked up by
         # the auto-detection chain.
         #
-        # ── Rate-limit fallback (#13579) ─────────────────────────────
+        # ── Rate-limit fallback ─────────────────────────────
         # When the provider returns a 429 rate-limit (not billing), fall
         # back to an alternative provider instead of exhausting retries
         # against the same rate-limited endpoint.
@@ -3780,7 +3775,7 @@ def call_llm(
         )
         # Only try alternative providers when the user didn't explicitly
         # configure this task's provider.  Explicit provider = hard constraint;
-        # auto (the default) = best-effort fallback chain.  (#7559)
+        # auto (the default) = best-effort fallback chain.
         is_auto = resolved_provider in {"auto", "", None}
         if should_fallback and is_auto:
             if _is_payment_error(first_err):
@@ -3813,7 +3808,7 @@ def call_llm(
         # httpx transport, half-read stream, dead async loop).  Drop it from
         # the cache regardless of whether we found a fallback above so the
         # next auxiliary call rebuilds a fresh client instead of reusing the
-        # dead one.  See issue #23432.
+        # dead one.
         if _is_connection_error(first_err):
             try:
                 _evict_cached_client_instance(client)
@@ -4117,7 +4112,7 @@ async def async_call_llm(
                 return _validate_llm_response(
                     await async_fb.chat.completions.create(**fb_kwargs), task)
         # Mirror the sync path: drop poisoned clients on connection/timeout
-        # so the next aux call rebuilds.  See issue #23432.
+        # so the next aux call rebuilds.
         if _is_connection_error(first_err):
             try:
                 _evict_cached_client_instance(client)

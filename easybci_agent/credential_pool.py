@@ -905,7 +905,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
         # Only auto-discover external credentials (Claude Code, EasyBCI PKCE)
         # when the user has explicitly configured anthropic as their provider.
         # Without this gate, auxiliary client fallback chains silently read
-        # ~/.claude/.credentials.json without user consent.  See PR #4210.
+        # ~/.claude/.credentials.json without user consent.
         try:
             from easybci_cli.auth import is_provider_explicitly_configured
             if not is_provider_explicitly_configured("anthropic"):

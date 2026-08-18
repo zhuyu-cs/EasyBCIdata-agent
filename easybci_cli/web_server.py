@@ -816,13 +816,13 @@ async def get_schema():
 
 @app.get("/api/schema/goal-enum")
 async def get_analysis_goal_enum():
-    """Phase 3-2 — expose the canonical analysis_goal enum to the WebUI.
+    """Expose the canonical analysis_goal enum to the WebUI.
 
-    Reads the analysis_goals.REGISTRY single source of truth (Phase 3-2).
+    Reads the analysis_goals.REGISTRY single source of truth.
     Falls back to PLAN_PIPELINE_SCHEMA for legacy compatibility if REGISTRY
     is unavailable.
     """
-    # Phase 3-2: prefer the REGISTRY (9 goals incl. connectivity / pac / online_inference)
+    # Prefer the REGISTRY (9 goals incl. connectivity / pac / online_inference)
     try:
         from easybci_lib.tools.neural_processing.preprocess.analysis_goals import REGISTRY
         options = []
@@ -1490,13 +1490,12 @@ async def ensure_web_search(body: WebSearchEnsureRequest, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# OAuth provider endpoints — status + disconnect (Phase 1)
+# OAuth provider endpoints — status + disconnect
 # ---------------------------------------------------------------------------
 #
-# Phase 1 surfaces *which OAuth providers exist* and whether each is
+# These endpoints surface *which OAuth providers exist* and whether each is
 # connected, plus a disconnect button. The actual login flow (PKCE for
-# Anthropic, device-code for BCI Team) still runs in the CLI for now;
-# Phase 2 will add in-browser flows. For unconnected providers we return
+# Anthropic, device-code for BCI Team) runs in the CLI. For unconnected providers we return
 # the canonical ``easybci auth add <provider>`` command so the dashboard
 # can surface a one-click copy.
 
@@ -1611,7 +1610,7 @@ def _claude_code_only_status() -> Dict[str, Any]:
 
 # Provider catalog. The order matters — it's how we render the UI list.
 # ``cli_command`` is what the dashboard surfaces as the copy-to-clipboard
-# fallback while Phase 2 (in-browser flows) isn't built yet.
+# fallback.
 # ``flow`` describes the OAuth shape so the future modal can pick the
 # right UI: ``pkce`` = open URL + paste callback code, ``device_code`` =
 # show code + verification URL + poll, ``external`` = read-only (delegated
@@ -1767,7 +1766,7 @@ async def disconnect_oauth_provider(provider_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# OAuth Phase 2 — in-browser PKCE & device-code flows
+# OAuth — in-browser PKCE & device-code flows
 # ---------------------------------------------------------------------------
 #
 # Two flow shapes are supported:
@@ -1808,7 +1807,7 @@ _oauth_sessions_lock = threading.Lock()
 
 # Import OAuth constants from canonical source instead of duplicating.
 # Guarded so easybci web still starts if anthropic_adapter is unavailable;
-# Phase 2 endpoints will return 501 in that case.
+# the in-browser flow endpoints return 501 in that case.
 try:
     from easybci_agent.anthropic_adapter import (
         _OAUTH_CLIENT_ID as _ANTHROPIC_OAUTH_CLIENT_ID,
@@ -2373,10 +2372,10 @@ async def get_session_messages(session_id: str, request: Request):
                 _log.info("session %s: backfilled %d dropped rows from agent log", sid, healed)
         except Exception:
             _log.debug("session reconcile skipped", exc_info=True)
-        # Lineage-aware read: sessions split by pre-2026-08-13 compression are
+        # Lineage-aware read: sessions split by compression form
         # a parent→child chain; stitch the whole chain so clicking the root
         # (the sidebar lists roots only) shows the FULL task, not just the
-        # pre-compression half. Unsplit sessions (post-fix) return as-is.
+        # first half. Unsplit sessions return as-is.
         messages = db.get_messages_with_lineage(sid)
         # Cheap version stamp — message count + last timestamp + last role.
         # Strong enough to detect external mutations without scanning content.
@@ -2525,7 +2524,7 @@ async def get_session_artifacts(session_id: str, request: Request):
         if out_dir.exists() and out_dir.is_dir():
             payload["output_dir"] = str(out_dir)
 
-        # Deletable artifact paths for the Workspace context menus (Phase 3).
+        # Deletable artifact paths for the Workspace context menus.
         # pipeline_yaml_path points at the final pipeline source (code/pipeline.py
         # per the mini-repo contract); qc_dir_path at the whole QC_out directory.
         pipeline_py = wd / "code" / "pipeline.py"
@@ -2594,7 +2593,7 @@ async def get_session_artifacts(session_id: str, request: Request):
         if isinstance(evidence, list):
             payload["evidence"] = evidence
 
-        # Phase 3 §1.3 — surface analysis_goal + web_evidence so the
+        # Surface analysis_goal + web_evidence so the
         # Workspace's Pipeline tab can render the chip group without
         # re-parsing reasoning.md (single source of truth: pipeline_record).
         goal = record.get("analysis_goal")
@@ -2963,7 +2962,7 @@ async def serve_file(path: str):
 
 
 # ---------------------------------------------------------------------------
-# Workspace mutation: DELETE /api/files (Phase 1, plan webui-workspace-actions)
+# Workspace mutation: DELETE /api/files
 # ---------------------------------------------------------------------------
 
 # G1: deletes are only allowed *inside* a ``*_preprocess_work_dir/`` and never
@@ -3074,7 +3073,7 @@ def _dry_run_count(resolved: Path) -> Dict[str, int]:
 async def delete_file_or_dir(path: str, confirm: bool = False):
     """Delete a file or directory inside a mini-repo work_dir.
 
-    Safety layers (Phase 1 G1):
+    Safety layers:
       1. Path must resolve inside one of the dashboard's allowed roots.
       2. Path must sit inside a ``*_preprocess_work_dir/`` (never the root).
       3. Path must be on the writable / derived side (preprocessed_output,
@@ -3127,7 +3126,7 @@ async def delete_file_or_dir(path: str, confirm: bool = False):
 
 @app.get("/api/files/summary")
 async def directory_summary(path: str):
-    """Return a compact "at-a-glance" summary for a directory (Phase 1 G2).
+    """Return a compact "at-a-glance" summary for a directory.
 
     Powers the Source panel's default view so it can show
     "5 files · 12.4 MB · .edf×4 .json×1 · 64 channels · 120s @ 1000Hz"

@@ -946,7 +946,7 @@ class AsyncGeminiNativeClient:
         self.base_url = sync_client.base_url
         self.chat = _AsyncGeminiChatNamespace(self)
         # Expose the underlying sync client as _real_client so the auxiliary
-        # cache's eviction-by-leaf-client helper (#23482) can find and drop
+        # cache's eviction-by-leaf-client helper can find and drop
         # this async entry when the sync GeminiNativeClient is poisoned.
         # GeminiNativeClient is itself the leaf (no OpenAI client beneath
         # it), so we point at the sync_client directly.

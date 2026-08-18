@@ -8,8 +8,7 @@ Usage:
 
 For each session it prints per-role counts from SQLite and from the JSONL
 transcript, and flags sessions where JSONL has MORE user/assistant turns than
-SQLite — the signature of a dropped flush (modes M1/M2/M3 in the plan
-improved_docs/plans/webui-history-persistence/plan.md).
+SQLite — the signature of a dropped flush (modes M1/M2/M3).
 
 Why this reconciliation is authoritative: the gateway writes every new turn to
 JSONL unconditionally (services/gateway/session.py:1063 `append_to_transcript`),

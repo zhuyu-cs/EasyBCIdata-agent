@@ -8,7 +8,7 @@ accounts.google.com endpoints. The resulting access token is used by
 Synthesized from:
 - jenslys/opencode-gemini-auth (MIT) — overall flow shape, public OAuth creds, request format
 - clawdbot/extensions/google/ — refresh-token rotation, VPC-SC handling reference
-- PRs #10176 (@sliverp) and #10779 (@newarthur) — PKCE module structure, cross-process lock
+- PKCE module structure, cross-process lock
 
 Storage (``~/.easybci/auth/google_oauth.json``, chmod 0o600):
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""request_dependency — controlled agent dependency extension (Phase C).
+"""request_dependency — controlled agent dependency extension.
 
 The sanctioned alternative to a raw ``pip install`` in the terminal (which
 bypasses the project's exact-pinning, safety-scanning, and reproducibility

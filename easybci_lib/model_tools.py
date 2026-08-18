@@ -182,7 +182,7 @@ discover_builtin_tools()
 # internally uses a blocking future.result(timeout=120) wait, and the
 # gateway lazy-imports this module from inside the asyncio event loop on
 # the first user message — freezing platform heartbeats for up to
-# 120s whenever any configured MCP server was slow or unreachable (#16856).
+# 120s whenever any configured MCP server was slow or unreachable.
 #
 # Each entry point now runs discovery explicitly at its own startup:
 #   - gateway/run.py            -> start_gateway() uses run_in_executor
@@ -307,7 +307,7 @@ def get_tool_definitions(
         # long-lived Gateway process accumulates duplicate tool names across
         # agent inits and providers that enforce unique tool names
         # (DeepSeek, Xiaomi MiMo, Moonshot Kimi) reject the request with
-        # HTTP 400. Mirrors the cache-hit path above. (issue #17335)
+        # HTTP 400. Mirrors the cache-hit path above.
         _tool_defs_cache[cache_key] = result
         return list(result)
     return result
@@ -345,7 +345,7 @@ def _compute_tool_definitions(
     # Always apply disabled toolsets as a subtraction step at the end.
     # This ensures that even if a composite toolset (like easybci-cli)
     # is enabled, any tools belonging to a disabled toolset are strictly
-    # stripped out. See issue #17309.
+    # stripped out.
     if disabled_toolsets:
         for toolset_name in disabled_toolsets:
             if validate_toolset(toolset_name):

@@ -105,6 +105,7 @@ def route_pipeline(
     label_type: Optional[str] = None,
     label_info: Optional[Dict[str, Any]] = None,
     n_events: int = 0,
+    scenario: str = "research",
 ) -> RoutedPipeline:
     """Produce an adapted pipeline based on data characteristics.
 
@@ -122,6 +123,10 @@ def route_pipeline(
         Full label classification result from classify_label_type().
     n_events : int
         Number of detected events/intervals.
+    scenario : str
+        Delivery context: "research" (preserve info, standard steps), "clinical"
+        (conservative, never mask morphology), "deployment" (low-latency, skip
+        offline-only ops).
 
     Returns
     -------
@@ -135,7 +140,7 @@ def route_pipeline(
 
     for step in baseline:
         step_name = step.split(":")[0]
-        decision = _evaluate_step(step, step_name, profile, modality, paradigm)
+        decision = _evaluate_step(step, step_name, profile, modality, paradigm, scenario)
         decisions.append(decision)
 
         if decision.action == "include":
@@ -144,7 +149,7 @@ def route_pipeline(
             final_steps.append(decision.step)
 
     # Check for additional steps the profile suggests but baseline doesn't include
-    extra_decisions = _suggest_extra_steps(final_steps, profile, modality)
+    extra_decisions = _suggest_extra_steps(final_steps, profile, modality, scenario)
     for extra_d in extra_decisions:
         decisions.append(extra_d)
         if extra_d.action == "include":
@@ -175,13 +180,36 @@ def route_pipeline(
 
 
 def _evaluate_step(
-    step: str, step_name: str, profile: DataProfile, modality: str, paradigm: str
+    step: str, step_name: str, profile: DataProfile, modality: str, paradigm: str,
+    scenario: str = "research",
 ) -> RoutingDecision:
-    """Decide whether to include, skip, or modify a baseline step."""
+    """Decide whether to include, skip, or modify a baseline step.
+
+    Scenario policy:
+    - research: NEVER skip standard steps (notch, bandpass, resample); NEVER
+      tighten bandpass beyond baseline. Reproducibility and information
+      retention take priority over profile-adaptive optimisation.
+    - clinical: conservative — keep standard steps, avoid aggressive filtering
+      that could mask clinically-relevant morphology.
+    - deployment: allow aggressive optimisation (skip unnecessary steps,
+      tighten filters) for low-latency processing.
+    """
+    # research/clinical forbid skipping standard signal-processing steps
+    _preserve_standard_steps = scenario in ("research", "clinical")
 
     # --- NOTCH filter ---
     if step_name == "notch":
         if not profile.powerline_present:
+            if _preserve_standard_steps:
+                return RoutingDecision(
+                    step=step, action="include",
+                    reason=(
+                        f"No strong power line interference detected "
+                        f"({profile.powerline_amplitude_db:.1f} dB), but notch retained "
+                        f"for {scenario} scenario — standard reproducible pipeline "
+                        f"requires consistent steps across recordings."
+                    ),
+                )
             return RoutingDecision(
                 step=step, action="skip",
                 reason=f"No power line interference detected (peak prominence {profile.powerline_amplitude_db:.1f} dB < 6 dB threshold). "
@@ -208,21 +236,22 @@ def _evaluate_step(
         low, high = _parse_bandpass_params(step)
         nyquist = profile.sampling_rate / 2.0 if profile.sampling_rate > 0 else 500
 
-        # Adjust high cutoff if effective bandwidth is much lower
-        if profile.effective_bandwidth > 0 and high > 0:
-            # If 95% of signal power is below effective_bandwidth, consider tightening
-            # But don't tighten below paradigm-minimum (e.g., gamma for some paradigms)
-            suggested_high = min(high, max(profile.effective_bandwidth * 1.2, _min_high_freq(paradigm)))
-            if suggested_high < high * 0.7:
-                new_step = f"bandpass:{low},{suggested_high:.0f}"
-                return RoutingDecision(
-                    step=new_step, action="modify",
-                    reason=f"Effective signal bandwidth is {profile.effective_bandwidth:.0f} Hz. "
-                           f"Tightening high cutoff from {high} Hz to {suggested_high:.0f} Hz reduces noise without information loss.",
-                    original_step=step,
-                )
+        # research/clinical: NEVER tighten beyond the baseline — information
+        # retention is more important than noise reduction
+        if not _preserve_standard_steps:
+            # Adjust high cutoff if effective bandwidth is much lower
+            if profile.effective_bandwidth > 0 and high > 0:
+                suggested_high = min(high, max(profile.effective_bandwidth * 1.2, _min_high_freq(paradigm)))
+                if suggested_high < high * 0.7:
+                    new_step = f"bandpass:{low},{suggested_high:.0f}"
+                    return RoutingDecision(
+                        step=new_step, action="modify",
+                        reason=f"Effective signal bandwidth is {profile.effective_bandwidth:.0f} Hz. "
+                               f"Tightening high cutoff from {high} Hz to {suggested_high:.0f} Hz reduces noise without information loss.",
+                        original_step=step,
+                    )
 
-        # Adjust for significant drift
+        # Adjust for significant drift — all scenarios benefit from drift removal
         if profile.has_significant_drift and low is not None and low < 0.5:
             new_low = 0.5
             new_step = f"bandpass:{new_low},{high}" if high else f"bandpass:{new_low},"
@@ -246,17 +275,18 @@ def _evaluate_step(
                 step=step, action="skip",
                 reason=f"Current sampling rate ({profile.sampling_rate:.0f} Hz) is already at or below target ({target_freq} Hz). Resampling not needed.",
             )
-        # If sampling rate is very high and effective bandwidth is low, suggest more aggressive downsampling
-        if profile.effective_bandwidth > 0 and profile.sampling_rate > target_freq * 4:
-            min_rate = max(target_freq, int(profile.effective_bandwidth * 2.5))
-            if min_rate < target_freq:
-                new_step = f"resample:{min_rate}"
-                return RoutingDecision(
-                    step=new_step, action="modify",
-                    reason=f"Sampling rate ({profile.sampling_rate:.0f} Hz) is very high relative to effective bandwidth ({profile.effective_bandwidth:.0f} Hz). "
-                           f"Downsampling to {min_rate} Hz (>2.5x effective bandwidth) is safe and reduces data volume more.",
-                    original_step=step,
-                )
+        # research/clinical: never downsample more aggressively than baseline
+        if not _preserve_standard_steps:
+            if profile.effective_bandwidth > 0 and profile.sampling_rate > target_freq * 4:
+                min_rate = max(target_freq, int(profile.effective_bandwidth * 2.5))
+                if min_rate < target_freq:
+                    new_step = f"resample:{min_rate}"
+                    return RoutingDecision(
+                        step=new_step, action="modify",
+                        reason=f"Sampling rate ({profile.sampling_rate:.0f} Hz) is very high relative to effective bandwidth ({profile.effective_bandwidth:.0f} Hz). "
+                               f"Downsampling to {min_rate} Hz (>2.5x effective bandwidth) is safe and reduces data volume more.",
+                        original_step=step,
+                    )
         return RoutingDecision(
             step=step, action="include",
             reason=f"Downsampling from {profile.sampling_rate:.0f} Hz to {target_freq} Hz. Satisfies Nyquist criterion for bandpass upper bound.",
@@ -317,8 +347,16 @@ def _suggest_extra_steps(
     current_steps: List[str],
     profile: DataProfile,
     modality: str,
+    scenario: str = "research",
 ) -> List[RoutingDecision]:
-    """Suggest additional steps not in baseline but indicated by profile."""
+    """Suggest additional steps not in baseline but indicated by profile.
+
+    Scenario policy for extra step injection:
+    - research: prefer interpolation over dropping (preserves spatial info);
+      suggest ICA only with strong evidence (moderate artifact + enough data).
+    - clinical: avoid aggressive additions that may distort morphology.
+    - deployment: skip expensive steps (ICA) that add latency.
+    """
     extra: List[RoutingDecision] = []
 
     # Suggest fill_nan if NaNs present
@@ -332,29 +370,43 @@ def _suggest_extra_steps(
     # Suggest clip if extreme amplitudes and no clip already
     if profile.has_extreme_amplitudes and profile.artifact_ratio > 0.1:
         if not any(s.startswith("clip") for s in current_steps):
-            extra.append(RoutingDecision(
-                step="clip:500",
-                action="include",
-                reason=f"High artifact contamination ({profile.artifact_ratio:.0%} of windows). "
-                       f"Adding amplitude clipping to limit extreme outliers before scaling.",
-            ))
+            # research: clipping loses information — only clip at severe levels
+            _clip_threshold = 0.2 if scenario == "research" else 0.1
+            if profile.artifact_ratio > _clip_threshold:
+                extra.append(RoutingDecision(
+                    step="clip:500",
+                    action="include",
+                    reason=f"High artifact contamination ({profile.artifact_ratio:.0%} of windows). "
+                           f"Adding amplitude clipping to limit extreme outliers before scaling.",
+                ))
 
     # Suggest ICA if artifact ratio is moderate (not extreme) and modality supports it
-    if 0.05 < profile.artifact_ratio < 0.4 and modality in ("eeg", "meg"):
-        if not any(s.startswith("ica") for s in current_steps):
-            if profile.n_channels >= 16 and profile.duration_s >= 30:
-                extra.append(RoutingDecision(
-                    step="ica:eog",
-                    action="include",
-                    reason=f"Moderate artifact contamination ({profile.artifact_ratio:.0%}) with sufficient channels ({profile.n_channels}) "
-                           f"and duration ({profile.duration_s:.0f}s) for reliable ICA decomposition. Suggesting ICA for artifact removal.",
-                ))
+    # deployment: skip ICA (offline-only, high latency)
+    if scenario != "deployment":
+        if 0.05 < profile.artifact_ratio < 0.4 and modality in ("eeg", "meg"):
+            if not any(s.startswith("ica") for s in current_steps):
+                if profile.n_channels >= 16 and profile.duration_s >= 30:
+                    extra.append(RoutingDecision(
+                        step="ica:eog",
+                        action="include",
+                        reason=f"Moderate artifact contamination ({profile.artifact_ratio:.0%}) with sufficient channels ({profile.n_channels}) "
+                               f"and duration ({profile.duration_s:.0f}s) for reliable ICA decomposition. Suggesting ICA for artifact removal.",
+                    ))
 
     # Suggest interpolate_bads if bad channels detected but not in pipeline
     if profile.n_bad_channels > 0 and profile.n_bad_channels <= profile.n_channels * 0.15:
         if not any(s.startswith("interpolate_bads") for s in current_steps):
             if any(s.startswith("drop_bads") for s in current_steps):
-                pass  # drop_bads handles it
+                # research: prefer interpolation over dropping to preserve
+                # channel count for spatial methods
+                if scenario == "research":
+                    extra.append(RoutingDecision(
+                        step="interpolate_bads",
+                        action="include",
+                        reason=f"{profile.n_bad_channels} bad channels detected (<15% of total). "
+                               f"Research scenario: interpolation preserves channel count for "
+                               f"spatial methods (CSP, source localization, connectivity).",
+                    ))
             else:
                 extra.append(RoutingDecision(
                     step="interpolate_bads",

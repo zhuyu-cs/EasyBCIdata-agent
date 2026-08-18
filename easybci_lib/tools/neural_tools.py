@@ -181,11 +181,10 @@ def _peek_qc_payload_for(work_dir: str):
 # ---------------------------------------------------------------------------
 # Two-phase pipeline helpers — shared across Phase 1 gating
 # (_require_inspection_report) and Phase 2 AutoFixer attempt-cap state
-# (_bump_autofix_attempts / _clear_autofix_stage). See
-# docs/superpowers/specs/2026-06-16-data-preprocessing-two-phase-design.md
+# (_bump_autofix_attempts / _clear_autofix_stage).
 # ---------------------------------------------------------------------------
 
-MAX_AUTOFIX_ATTEMPTS = 3
+MAX_AUTOFIX_ATTEMPTS = 10
 
 
 def _resolve_work_dir_from_args(args: dict) -> Path | None:
@@ -367,11 +366,11 @@ def _recovery_exhausted_payload(*, stage: str, attempts: int, last: dict) -> dic
         "stdout_tail": last.get("stdout_tail", ""),
         "stderr_tail": last.get("stderr_tail", ""),
         "fix_hint": (
-            "AutoFixer exhausted after 3 attempts. Do NOT call write_file again. "
-            "Return to Phase 1 Step 6 PROPOSE: surface this failure to the user "
-            "along with inspection_report summary + the last traceback, then ask "
-            "them to adjust steps/params and re-confirm (mark_proposal_confirmed). "
-            "The counter will reset on the next confirm."
+            "AutoFixer exhausted its attempt budget. Do NOT call write_file "
+            "again and do NOT re-plan — the pipeline is linear with no path back "
+            "to Phase 1. Surface this failure to the user along with the "
+            "inspection_report summary + the last traceback, then STOP. The user "
+            "may start a fresh preprocessing request if they want to retry."
         ),
     }
 
@@ -1013,8 +1012,7 @@ PLAN_PIPELINE_SCHEMA = {
                     "'PAC / cross-frequency / theta-gamma coupling / 跨频耦合' → phase_amplitude_coupling; "
                     "'online / realtime / 实时 / 在线 / streaming inference' → online_inference. "
                     "If you cannot infer (user said 'just process this' / no signal), use "
-                    "'generic' — never leave empty, never invent a goal. The decision table "
-                    "lives in improved_docs/plans/goal-driven-preprocessing/02-phase1-goal-first.md §1.3."
+                    "'generic' — never leave empty, never invent a goal."
                 ),
             },
             "data_path": {"type": "string", "description": "Path to input neural data file (required for propose mode unless steps are passed in object form)"},
@@ -1395,6 +1393,23 @@ _SIGNAL_EXTENSIONS = {
 }
 
 
+def _is_single_recording_bundle(directory: str) -> bool:
+    """True when a directory is a single-recording bundle owned by a directory-type
+    loader (Compumedics .SLP = STUDYCFG.XML + CHANNELn.DAT), so it must load as ONE
+    recording via load_neural, not be scanned as a multi-file dataset.
+
+    The only extension seam: add another loader's matches() here to teach
+    inspect_data about a new directory-packaged format.
+    """
+    try:
+        from easybci_lib.tools.neural_processing.io.compumedics_loader import (
+            matches as _compumedics_matches,
+        )
+        return bool(_compumedics_matches(directory))
+    except Exception:
+        return False
+
+
 def _scan_directory_for_signals(directory: str) -> list:
     """Scan a directory for neural signal files, returning sorted paths."""
     dir_path = Path(directory)
@@ -1442,7 +1457,10 @@ def _handle_inspect_data(args, **kw):
     data_path = args["data_path"]
 
     # --- Directory input: sampling mode ---
-    if Path(data_path).is_dir():
+    # A single-recording bundle (Compumedics .SLP: STUDYCFG.XML + CHANNELn.DAT)
+    # is a directory that must load as ONE recording — route it through the
+    # normal single-file path below, not the multi-file dataset scan.
+    if Path(data_path).is_dir() and not _is_single_recording_bundle(data_path):
         return _handle_inspect_directory(data_path, args, kw)
 
     register_source_path(data_path)
@@ -2167,13 +2185,14 @@ def _handle_mark_proposal_confirmed(args, **kw):
     side files (proposal.json, goal.json, web_evidence.json, optionally
     reasoning.md) and root-level files (pipeline.yaml for the legacy step
     form) — then writes the proposal.confirmed marker and clears
-    autofix_state.json so Phase 2 starts with a clean 3-attempt budget per
+    autofix_state.json so Phase 2 starts with a clean attempt budget per
     stage. plan/ does not exist on disk until this moment.
 
     On ``abort``, cleans both the marker and the staged envelope so a
     future run starts from scratch. On ``modify``, cleans the marker only;
-    the staged envelope persists so the next propose_pipeline call can
-    overwrite it with the revised proposal.
+    the staged envelope persists so the next propose_pipeline call revises it
+    in place (overwrites it) — a same-stage revision, not a step back to
+    planning. The pipeline is linear; there is no return to an earlier stage.
     """
     from datetime import datetime as _dt
     work_dir = args.get("work_dir")
@@ -2316,13 +2335,22 @@ def _handle_mark_proposal_confirmed(args, **kw):
             "success": True, "marker_written": False, "aborted": True,
         })
 
-    # modify → keep staged.json so the next propose_pipeline call overwrites
-    # it with the revised proposal. Clear any stale confirmation marker so
-    # the agent cannot accidentally trip the Phase 2 gate with a previous
-    # confirmation.
+    # modify → revise the proposal in place: keep staged.json so the next
+    # propose_pipeline call overwrites it with the adjusted proposal, then
+    # re-present for confirmation. This is NOT a step back to planning — the
+    # flow is linear. Clear any stale confirmation marker so the agent cannot
+    # accidentally trip the Phase 2 gate with a previous confirmation.
     if marker.exists():
         marker.unlink()
-    return json.dumps({"success": True, "marker_written": False})
+    return json.dumps({
+        "success": True,
+        "marker_written": False,
+        "next_action": (
+            "Revise the requested step(s) and call propose_pipeline again to "
+            "overwrite the staged proposal in place, then re-present the full "
+            "pipeline for confirmation. Do not re-run inspection or re-plan."
+        ),
+    }, ensure_ascii=False)
 
 
 def _handle_inspect_directory(directory: str, args: dict, kw: dict) -> str:
@@ -2886,8 +2914,6 @@ def _do_handle_preprocess_neural(args, **kw):
     routing_path = work_dir / "middle_process" / "inputs_routing.json"
     multi_input = routing_path.is_file()
     if multi_input:
-        # Register every input for source-path tracking so source_data_guard
-        # protects them all, not just the one carried in args["data_path"].
         try:
             _table = json.loads(routing_path.read_text(encoding="utf-8"))
             for _inp in (_table.get("inputs") or []):
@@ -2895,8 +2921,16 @@ def _do_handle_preprocess_neural(args, **kw):
                 if _ip:
                     register_source_path(_ip)
         except Exception as exc:
-            logger.warning("routing table read failed (falling back to single-file): %s", exc)
-            multi_input = False
+            return json.dumps({
+                "success": False,
+                "error": (
+                    f"inputs_routing.json exists but cannot be parsed: {exc}. "
+                    f"The generated pipeline.py expects multi-input mode — "
+                    f"running in single-file mode would produce incorrect results. "
+                    f"Re-run deep_inspect to regenerate the routing table."
+                ),
+                "fix_hint": "Call deep_inspect again on each input file to rebuild middle_process/inputs_routing.json.",
+            })
 
     result = run_script(
         work_dir=str(work_dir),
@@ -3622,7 +3656,8 @@ def _handle_suggest_pipeline(args, **kw):
                 quality_score=dp.get("scores", {}).get("quality", 1.0),
             )
 
-            routed = route_pipeline(profile, modality, paradigm)
+            routed = route_pipeline(profile, modality, paradigm,
+                                    scenario=args.get("scenario") or "research")
             data_profile_dict = dp
         except Exception as exc:
             logger.debug("Adaptive routing failed: %s", exc)
@@ -3695,6 +3730,15 @@ def _handle_suggest_pipeline(args, **kw):
         except Exception as exc:
             logger.debug("Web research failed during suggest_pipeline: %s", exc)
 
+    # Inject scenario bias so the LLM adjusts parameter choices accordingly.
+    _scenario_bias = ""
+    try:
+        from easybci_lib.tools.neural_processing.preprocess.scenario import get_scenario
+        _sc = get_scenario(args.get("scenario") or "research")
+        _scenario_bias = _sc.param_bias_notes
+    except Exception:
+        pass
+
     # Build response
     result = {
         "success": True,
@@ -3704,6 +3748,8 @@ def _handle_suggest_pipeline(args, **kw):
         "description": " → ".join(steps),
         "complexity_level": level,
     }
+    if _scenario_bias:
+        result["scenario_bias"] = _scenario_bias
 
     # Include adaptive routing details
     if routed:
@@ -3827,7 +3873,7 @@ def _handle_suggest_pipeline(args, **kw):
             }
 
     if web_evidence and web_evidence.get("confidence", 0) > 0.3:
-        result["web_evidence"] = web_evidence
+        result["web_evidence"] = _compact_web_evidence_for_context(web_evidence)
         result["note"] = (
             f"Standard recommendations provided. Web research (confidence: "
             f"{web_evidence['confidence']:.0%}) suggests additional considerations. "
@@ -3843,8 +3889,8 @@ def _handle_suggest_pipeline(args, **kw):
     _dispatch_evidence = args.get("_web_evidence")
     if _dispatch_evidence is not None:
         question = _build_research_question(args)["question"]
-        result["web_evidence"] = _shape_web_evidence_payload(
-            _dispatch_evidence, question=question,
+        result["web_evidence"] = _compact_web_evidence_for_context(
+            _shape_web_evidence_payload(_dispatch_evidence, question=question)
         )
 
     # --- Contradiction detection: paradigm requires events but data has none ---
@@ -4375,7 +4421,7 @@ def _handle_propose_pipeline_evidence(args, **kw):
             _step_viz["rationale"] = rationale[_i]
         _viz_steps.append(_step_viz)
 
-    return json.dumps({
+    _evidence_propose_result = {
         "success": True,
         "work_dir": output_path,
         "staged_path": str(staged_path),
@@ -4385,8 +4431,8 @@ def _handle_propose_pipeline_evidence(args, **kw):
         "modality": modality,
         "paradigm": paradigm,
         "analysis_goal": analysis_goal,
-        "web_evidence": _evidence_payload,
-        "proposal": proposal,
+        "web_evidence": _compact_web_evidence_for_context(_evidence_payload),
+        "proposal": {k: v for k, v in proposal.items() if k != "web_evidence"},
         "reasoning_preview": reasoning_md_text,
         "presentation_block": reasoning_md_text,
         "presented_steps_expected": [
@@ -4421,7 +4467,15 @@ def _handle_propose_pipeline_evidence(args, **kw):
             "pass presented_steps (= presented_steps_expected) as PROOF you "
             "showed the full pipeline, or confirmation is rejected."
         ),
-    }, default=str)
+    }
+    try:
+        from easybci_lib.tools.neural_processing.preprocess.scenario import get_scenario
+        _sc = get_scenario(args.get("scenario") or "research")
+        if _sc.param_bias_notes:
+            _evidence_propose_result["scenario_bias"] = _sc.param_bias_notes
+    except Exception:
+        pass
+    return json.dumps(_evidence_propose_result, default=str)
 
 
 def _handle_propose_pipeline(args, **kw):
@@ -4705,7 +4759,7 @@ def _handle_propose_pipeline(args, **kw):
             step_viz["rationale"] = rationale[i]
         viz_steps.append(step_viz)
 
-    return json.dumps({
+    _propose_result = {
         "success": True,
         "work_dir": work_dir,
         "staged_path": str(staged_path),
@@ -4713,7 +4767,7 @@ def _handle_propose_pipeline(args, **kw):
         "summary": " | ".join(summary_parts),
         "analysis_goal": analysis_goal,
         "output_cleanup_applied": bool(_output_cleanup_applied),
-        "web_evidence": _evidence_payload,
+        "web_evidence": _compact_web_evidence_for_context(_evidence_payload),
         "awaiting_confirmation": True,
         "note": (
             "Proposal STAGED at middle_process/proposal.staged.json. "
@@ -4728,7 +4782,15 @@ def _handle_propose_pipeline(args, **kw):
             "steps": viz_steps,
             "yaml": yaml_str,
         },
-    })
+    }
+    try:
+        from easybci_lib.tools.neural_processing.preprocess.scenario import get_scenario
+        _sc = get_scenario(args.get("scenario") or "research")
+        if _sc.param_bias_notes:
+            _propose_result["scenario_bias"] = _sc.param_bias_notes
+    except Exception:
+        pass
+    return json.dumps(_propose_result)
 
 
 def _assemble_reuse_provenance(proposal: dict, *, reuse_source: str,
@@ -4760,6 +4822,27 @@ def _handle_plan_pipeline(args, **kw):
 
 def _do_handle_plan_pipeline(args, **kw):
     """Unified pipeline planning: dispatches to suggest or propose mode."""
+    # Hard gate: reject re-entry when the previous run's autofix budget was
+    # exhausted. The pipeline is linear — once Phase 2 fails irreparably, the
+    # user must start a fresh request (new work_dir). Without this gate, an
+    # LLM could ignore the fix_hint and loop indefinitely.
+    _wd = _resolve_work_dir_from_args(args)
+    if _wd is not None:
+        _afs = _read_autofix_state(str(_wd))
+        if isinstance(_afs, dict):
+            for _stage, _rec in _afs.items():
+                if isinstance(_rec, dict) and int(_rec.get("attempts", 0)) >= MAX_AUTOFIX_ATTEMPTS:
+                    return json.dumps({
+                        "success": False,
+                        "error": (
+                            f"Cannot re-plan: autofix budget was exhausted for stage "
+                            f"'{_stage}' ({_rec.get('attempts')} attempts). The pipeline "
+                            f"is linear — there is no path back to planning after Phase 2 "
+                            f"failure. Start a fresh preprocessing request on a new work_dir."
+                        ),
+                        "recovery_exhausted": True,
+                    })
+
     # Archive any previously-finalized run on this work_dir (same session).
     _maybe_archive_prior_run(args, kw, phase="plan_pipeline")
 
@@ -4929,6 +5012,71 @@ def _do_handle_plan_pipeline(args, **kw):
     return _handle_suggest_pipeline(args, **kw)
 
 
+_CITATION_SNIPPET_BUDGET = 4000
+
+
+def _compact_web_evidence_for_context(payload: dict) -> dict:
+    """Return a minimal web_evidence dict for tool-return context.
+
+    The full payload (with citations/snippets/key_information) lives on disk
+    in plan/web_evidence.json.  The agent only needs actionable signal:
+    recommendations, extracted parameters, and confidence.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    status = payload.get("status", "")
+    if status != "ok":
+        return {"status": status, "reason": payload.get("reason", "")}
+    compact: dict = {"status": "ok", "confidence": payload.get("confidence")}
+    recs = payload.get("recommendations")
+    if recs:
+        compact["recommendations"] = recs
+    params = payload.get("parameters_extracted")
+    if params:
+        compact["parameters_extracted"] = params
+    conflicts = payload.get("conflicts")
+    if conflicts:
+        compact["conflicts"] = conflicts
+    applied = payload.get("applied_to_steps")
+    if applied:
+        compact["applied_to_steps"] = applied
+    return compact
+
+
+def _budget_trim_citations(raw_citations: list) -> list:
+    """Trim citation snippets under a total character budget.
+
+    Strategy:
+    - Snippets already within per-item share pass through untouched.
+    - Over-budget snippets are truncated proportionally so the total
+      snippet chars stays under _CITATION_SNIPPET_BUDGET.
+    - key_information is never trimmed (already the synthesis product).
+    """
+    if not raw_citations:
+        return []
+
+    total_snippet = sum(
+        len(c.get("snippet", "") or "") for c in raw_citations if isinstance(c, dict)
+    )
+    if total_snippet <= _CITATION_SNIPPET_BUDGET:
+        return list(raw_citations)
+
+    n = len(raw_citations)
+    per_item = _CITATION_SNIPPET_BUDGET // max(n, 1)
+
+    trimmed = []
+    for c in raw_citations:
+        if not isinstance(c, dict):
+            trimmed.append(c)
+            continue
+        tc = dict(c)
+        snippet = tc.get("snippet", "") or ""
+        if isinstance(snippet, str) and len(snippet) > per_item:
+            tc["snippet"] = snippet[:per_item] + "…"
+        trimmed.append(tc)
+    return trimmed
+
+
 def _shape_web_evidence_payload(evidence: dict, *, question: str = "") -> dict:
     """Coerce the raw research_preprocessing response into the canonical
     ``web_evidence`` shape stored in ``plan/web_evidence.json`` and surfaced
@@ -4974,6 +5122,8 @@ def _shape_web_evidence_payload(evidence: dict, *, question: str = "") -> dict:
         if evidence.get("diagnostics"):
             out["diagnostics"] = evidence["diagnostics"]
         return out
+    raw_citations = evidence.get("citations") or []
+    trimmed_citations = _budget_trim_citations(raw_citations)
     payload = {
         "status": "ok",
         "question": question,
@@ -4981,7 +5131,7 @@ def _shape_web_evidence_payload(evidence: dict, *, question: str = "") -> dict:
         "level": evidence.get("level"),
         "recommendations": evidence.get("recommendations") or [],
         "parameters_extracted": evidence.get("parameters_extracted") or [],
-        "citations": evidence.get("citations") or [],
+        "citations": trimmed_citations,
         "confidence": evidence.get("confidence"),
     }
     if evidence.get("conflicts") is not None:
@@ -5041,6 +5191,7 @@ def _build_research_question(args: dict) -> dict:
     paradigm = args.get("paradigm") or "general"
     modality = args.get("modality") or "unknown"
     goal = (args.get("analysis_goal") or "generic").strip() or "generic"
+    scenario = (args.get("scenario") or "research").strip() or "research"
     fingerprint = args.get("fingerprint") or {}
     n_ch = fingerprint.get("n_channels") if isinstance(fingerprint, dict) else None
     fs = (
@@ -5058,12 +5209,21 @@ def _build_research_question(args: dict) -> dict:
     bits.append(
         "SOTA recommendations for bandpass / notch / ICA / artifact rejection / segmentation"
     )
+    _SCENARIO_SEARCH_CONTEXT = {
+        "research": "reproducible research best practices; published standard parameters",
+        "clinical": "clinical guidelines; conservative processing preserving morphology",
+        "deployment": "real-time low-latency processing; causal filters only",
+    }
+    _scenario_ctx = _SCENARIO_SEARCH_CONTEXT.get(scenario)
+    if _scenario_ctx:
+        bits.append(_scenario_ctx)
     question = "; ".join(bits)
     # Stable cache key: only the semantic dimensions that change the ANSWER
-    # (modality + paradigm + analysis_goal). Volatile fields (n_channels, fs)
-    # are deliberately excluded so two runs on the same paradigm/goal that
-    # differ only in channel count / sampling rate share one cache entry.
-    cache_key = f"goal={goal}"
+    # (modality + paradigm + analysis_goal + scenario). Volatile fields
+    # (n_channels, fs) are deliberately excluded so two runs on the same
+    # paradigm/goal/scenario that differ only in channel count / sampling rate
+    # share one cache entry.
+    cache_key = f"goal={goal}|scenario={scenario}"
     return {
         "question": question,
         "modality": modality,
@@ -5072,6 +5232,7 @@ def _build_research_question(args: dict) -> dict:
         "context": {
             "fingerprint": fingerprint,
             "analysis_goal": goal,
+            "scenario": scenario,
         },
     }
 
@@ -5368,12 +5529,49 @@ def _do_handle_generate_code(args, **kw):
             ),
         })
 
+    # B4 guard: reconcile LLM-supplied steps with the confirmed proposal on
+    # disk. If proposal.json exists and has a steps list, use THAT as ground
+    # truth — the user approved those specific operators at Step 7.
+    try:
+        _proposal_path = Path(work_dir) / "plan" / "proposal.json"
+        if _proposal_path.is_file():
+            _prop = json.loads(_proposal_path.read_text(encoding="utf-8"))
+            _confirmed_steps = _prop.get("steps")
+            if isinstance(_confirmed_steps, list) and _confirmed_steps:
+                # Normalize to string form for comparison
+                def _step_to_str(s):
+                    if isinstance(s, dict):
+                        op = s.get("operator", "")
+                        params = s.get("params", {})
+                        if params and isinstance(params, dict):
+                            pvals = ",".join(str(v) for v in params.values())
+                            return f"{op}:{pvals}" if pvals else op
+                        return op
+                    return str(s)
+                _confirmed_str = [_step_to_str(s) for s in _confirmed_steps]
+                _arg_str = [_step_to_str(s) if isinstance(s, dict) else str(s) for s in steps]
+                # Extract just operators for structural comparison
+                _conf_ops = [s.split(":")[0] if isinstance(s, str) else s for s in _confirmed_str]
+                _arg_ops = [s.split(":")[0] if isinstance(s, str) else s for s in _arg_str]
+                if _conf_ops != _arg_ops:
+                    logger.warning(
+                        "generate_code steps diverge from confirmed proposal: "
+                        "args=%r vs confirmed=%r — using confirmed steps",
+                        _arg_ops, _conf_ops,
+                    )
+                    steps = _confirmed_str
+    except Exception:
+        pass
+
     from easybci_lib.tools.neural_processing.preprocess.deliverables import (
         normalize_deliverables as _normalize_deliverables,
     )
 
     events = data_info.get("events") or []
-    has_events = bool(events) and len(events) > 0
+    if isinstance(events, (int, float)):
+        has_events = events > 0
+    else:
+        has_events = bool(events) and len(events) > 0
     # The LLM's data_info.events fingerprint is often empty even when BIDS
     # sidecar event files exist on disk. deep_inspect records the discovered
     # sidecar in the routing table's events_path — treat that as authoritative
@@ -5394,14 +5592,17 @@ def _do_handle_generate_code(args, **kw):
             pass
     has_labels = bool(label_config)
 
-    # Deliverables drive beyond-NWB generation (was goal.produces_ai_ready).
+    # Deliverables drive beyond-NWB generation.
     # Ground truth is the confirm marker (Phase 1 → Phase 2 gate); the LLM's
     # arg is a fallback only. NWB (preprocessed) is always produced regardless.
     deliverables = None
+    _codegen_scenario = "research"
     try:
         _marker_obj = json.loads(marker.read_text(encoding="utf-8"))
         if isinstance(_marker_obj, dict) and isinstance(_marker_obj.get("deliverables"), list):
             deliverables = _marker_obj["deliverables"]
+        if isinstance(_marker_obj, dict) and _marker_obj.get("scenario"):
+            _codegen_scenario = str(_marker_obj["scenario"]).strip() or "research"
     except Exception:  # noqa: BLE001
         pass
     if deliverables is None:
@@ -5455,7 +5656,7 @@ def _do_handle_generate_code(args, **kw):
         ),
         "qc.py": generate_qc_script_v2(
             steps=steps, data_info=data_info, modality=modality,
-            analysis_goal=analysis_goal,
+            analysis_goal=analysis_goal, scenario=_codegen_scenario,
             inspection_report=inspection_report,
         ),
         "vis.py": generate_vis_script(
@@ -5554,6 +5755,32 @@ def _do_handle_generate_code(args, **kw):
     except ImportError:
         pass
 
+    # Build key_config summary so the LLM has enough context to proceed
+    # without reading back the generated scripts (token-saving measure).
+    key_config: dict = {
+        "n_steps": len(steps) if isinstance(steps, list) else 0,
+        "output_format": "nwb",
+    }
+    if needs_ai_ready:
+        key_config["segment_duration"] = segment_duration
+        key_config["stride"] = stride
+        if label_config and isinstance(label_config, dict):
+            key_config["label_config"] = label_config
+        elif events:
+            _event_ids = sorted(set(
+                str(e.get("id", e.get("event_id", "")))
+                for e in (events if isinstance(events, list) else [])
+                if isinstance(e, dict)
+            ))[:20]
+            if _event_ids:
+                key_config["event_ids_sample"] = _event_ids
+    if inspection_report and isinstance(inspection_report, dict):
+        _fp = inspection_report.get("fingerprint") or {}
+        if _fp.get("n_channels"):
+            key_config["n_channels"] = _fp["n_channels"]
+        if _fp.get("sampling_freq_hz"):
+            key_config["sfreq_hz"] = _fp["sampling_freq_hz"]
+
     payload = {
         "success": True,
         "written": written,
@@ -5562,6 +5789,7 @@ def _do_handle_generate_code(args, **kw):
         "deliverables": deliverables,
         "analysis_goal": analysis_goal,
         "work_dir": str(work_dir),
+        "key_config": key_config,
         **_lint_generated_pipeline(code_dir / "pipeline.py"),
     }
     if ai_ready_skipped_reason is not None:
@@ -5570,7 +5798,7 @@ def _do_handle_generate_code(args, **kw):
 
 
 def _lint_generated_pipeline(pipeline_path: Path) -> dict:
-    """T7 P-C — run the code-standard checker on the freshly-written
+    """Run the code-standard checker on the freshly-written
     pipeline.py.  Returns a dict snippet to merge into the generate_code
     success payload (or a structured error block when the script violates
     the standard so the agent can repair via write_file).
@@ -6409,9 +6637,14 @@ registry.register(
     dynamic_schema_overrides=_goal_enum_schema_override(PLAN_PIPELINE_SCHEMA),
 )
 
+# suggest_pipeline / propose_pipeline are aliases of plan_pipeline sharing
+# the same handler. They are registered under a separate internal toolset
+# ("neural-alias") so they don't appear in resolve_toolset("neural") and
+# their schemas are never emitted to the model (saves ~3.4K tok). They
+# remain dispatchable for backward compat (SKILL.md / proven-pipeline refs).
 registry.register(
     name="suggest_pipeline",
-    toolset="neural",
+    toolset="neural-alias",
     schema=PLAN_PIPELINE_SCHEMA,
     handler=_handle_plan_pipeline,
     check_fn=_check_neural_requirements,
@@ -6421,7 +6654,7 @@ registry.register(
 
 registry.register(
     name="propose_pipeline",
-    toolset="neural",
+    toolset="neural-alias",
     schema=PLAN_PIPELINE_SCHEMA,
     handler=_handle_plan_pipeline,
     check_fn=_check_neural_requirements,

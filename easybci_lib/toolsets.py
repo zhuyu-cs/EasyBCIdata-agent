@@ -37,9 +37,11 @@ from typing import List, Dict, Any, Set, Optional
 _NEURAL_ORCHESTRATION_TOOLS = [
     "inspect_neural",
     "deep_inspect",
-    "propose_pipeline",
+    # suggest_pipeline / propose_pipeline are hidden aliases of plan_pipeline —
+    # they share the same handler and schema. Only plan_pipeline is exposed to
+    # the model to avoid ~3.4K tok of duplicate schema overhead. The aliases
+    # remain registered (hidden=True) so dispatch still resolves them.
     "mark_proposal_confirmed",
-    "suggest_pipeline",
     "generate_code",
     "compare_pipelines",
     "confirm_output_format",
@@ -74,7 +76,7 @@ _EASYBCI_CORE_TOOLS = [
     "vision_analyze",
     # Skills
     "skills_list", "skill_view",
-    # Agent-driven external skill search + install (Phase B). Belongs to the
+    # Agent-driven external skill search + install. Belongs to the
     # `skills` toolset alongside skill_manage; listed here so every code-capable
     # session (CLI + WebUI) can reach it. Flows through the same quarantine +
     # security-scan gate as the CLI; degrades gracefully offline (local-dir
@@ -100,7 +102,7 @@ _EASYBCI_CORE_TOOLS = [
     # listed here too, otherwise `neural` stops being a subset of the
     # `easybci-cli` / `easybci-webui` composites and `_get_platform_tools`'s
     # subset inference silently drops the ENTIRE neural toolset from sessions.
-    # See tools_config._get_platform_tools; regression fixed 2026-07-27.)
+    # See tools_config._get_platform_tools.)
     "repair_layout", "resume_preprocessing",
     # Neural-preprocessing orchestration helpers (inspect_neural,
     # propose_pipeline, generate_code, skill_manage, clarify,

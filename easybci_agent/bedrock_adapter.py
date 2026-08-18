@@ -265,7 +265,7 @@ def has_aws_credentials(env: Optional[Dict[str, str]] = None) -> bool:
     Lambda execution roles, and other IMDS-based sources that don't set
     environment variables.
 
-    This two-tier approach mirrors the pattern from OpenClaw PR #62673:
+    This two-tier approach reflects how cloud environments work:
     cloud environments (EC2, ECS, Lambda) provide credentials via instance
     metadata, not environment variables. The env-var check is a fast path
     for local development; the boto3 fallback covers all cloud deployments.
@@ -434,7 +434,7 @@ def _convert_content_to_converse(content) -> List[Dict]:
 
     Filters out empty text blocks — Bedrock's Converse API rejects messages
     where a text content block has an empty ``text`` field (ValidationException:
-    "text content blocks must be non-empty"). Ref: issue #9486.
+    "text content blocks must be non-empty").
     """
     if content is None:
         return [{"text": " "}]
@@ -903,7 +903,6 @@ def build_converse_kwargs(
             # DeepSeek R1, reasoning-only models).  Sending toolConfig to
             # these models causes a ValidationException → retry loop → failure.
             # Strip tools for known non-tool-calling models and warn the user.
-            # Ref: PR #7920 feedback from @ptlally, pattern from PR #4346.
             if _model_supports_tool_use(model):
                 kwargs["toolConfig"] = {"tools": converse_tools}
             else:

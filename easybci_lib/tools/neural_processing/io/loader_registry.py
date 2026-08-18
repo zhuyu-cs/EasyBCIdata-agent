@@ -5,7 +5,7 @@ write a small loader plugin and register it here. Plugins live under
 ``get_easybci_home()/io_loaders/<name>.py`` (profile-isolated, persisted so the
 next session / dataset reuses them — the flywheel).
 
-Design invariants (see improved_docs/plans/extensible-io-loaders/design.md):
+Design invariants:
 
 - **Built-ins win.** ``find()`` is only consulted at ``load_neural``'s
   ``backend == "unknown"`` boundary, so a plugin can never shadow a format a

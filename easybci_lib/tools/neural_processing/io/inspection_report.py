@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 # v1 → v2 added optional ``identity`` field carrying RecordingIdentity.
 # v2 → v3 added optional ``file_id`` (sha256-of-first-1MB[:8]) so multi-input
 # work_dirs can address per-file reports under ``middle_process/inspect/<file_id>/``.
-# Older v1/v2 reports remain readable — identity / file_id are allowed to be
-# None / absent.
-SCHEMA_VERSION = "3"
-_COMPATIBLE_SCHEMA_VERSIONS = {"1", "2", "3"}
+# v3 → v4 added optional ``events_summary`` (structured digest of sidecar CSV/TSV).
+# Older reports remain readable — new fields are allowed to be None / absent.
+SCHEMA_VERSION = "4"
+_COMPATIBLE_SCHEMA_VERSIONS = {"1", "2", "3", "4"}
 
 
 @dataclass
@@ -87,6 +87,22 @@ class MemoryEstimate:
 
 
 @dataclass
+class EventsSummary:
+    """Structured digest of a sidecar events/labels CSV/TSV file.
+
+    Produced by deep_inspect so the LLM never needs to read raw event files.
+    """
+    source_file: str
+    n_rows: int
+    columns: list[str]
+    time_range_s: list[float] | None
+    event_code_distribution: dict[str, int]
+    unique_trials: int | None
+    sample_rows: list[dict]
+    file_hash_prefix: str
+
+
+@dataclass
 class InspectionReport:
     generated_at: str
     data_path: str
@@ -101,6 +117,7 @@ class InspectionReport:
     warnings: list[str] = field(default_factory=list)
     identity: Optional[RecordingIdentity] = None
     file_id: str = ""
+    events_summary: Optional[EventsSummary] = None
     schema_version: str = SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -119,6 +136,7 @@ class InspectionReport:
             "warnings": list(self.warnings),
             "identity": self.identity.to_dict() if self.identity else None,
             "file_id": self.file_id,
+            "events_summary": asdict(self.events_summary) if self.events_summary else None,
         }
 
     @classmethod
@@ -135,6 +153,11 @@ class InspectionReport:
             RecordingIdentity.from_dict(identity_d)
             if isinstance(identity_d, dict) else None
         )
+        events_summary_d = d.get("events_summary")
+        events_summary = (
+            EventsSummary(**events_summary_d)
+            if isinstance(events_summary_d, dict) else None
+        )
         return cls(
             schema_version=version,
             generated_at=d["generated_at"],
@@ -150,6 +173,7 @@ class InspectionReport:
             warnings=list(d.get("warnings", [])),
             identity=identity,
             file_id=str(d.get("file_id") or ""),
+            events_summary=events_summary,
         )
 
 

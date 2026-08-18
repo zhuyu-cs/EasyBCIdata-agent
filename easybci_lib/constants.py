@@ -55,8 +55,7 @@ def get_easybci_home() -> Path:
                 f"profile is {active!r}. Falling back to ~/.easybci, which "
                 f"is the DEFAULT profile — not {active!r}. Any data this "
                 f"process writes will land in the wrong profile. The "
-                f"subprocess spawner should pass EASYBCI_HOME explicitly "
-                f"(see issue #18594)."
+                f"subprocess spawner should pass EASYBCI_HOME explicitly."
             )
             try:
                 sys.stderr.write(msg + "\n")

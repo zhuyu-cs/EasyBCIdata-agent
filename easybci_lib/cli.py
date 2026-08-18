@@ -131,8 +131,7 @@ def _strip_reasoning_tags(text: str) -> str:
 
     Also strips tool-call XML blocks some open models leak into visible
     content (``<tool_call>``, ``<function_calls>``, Gemma-style
-    ``<function name="…">…</function>``). Ported from
-    openclaw/openclaw#67318.
+    ``<function name="…">…</function>``).
     """
     cleaned = text
     for tag in _REASONING_TAGS:
@@ -157,7 +156,7 @@ def _strip_reasoning_tags(text: str) -> str:
             cleaned,
             flags=re.IGNORECASE,
         )
-    # Tool-call XML blocks (openclaw/openclaw#67318).
+    # Tool-call XML blocks.
     for tc_tag in ("tool_call", "tool_calls", "tool_result",
                    "function_call", "function_calls"):
         cleaned = re.sub(
@@ -697,7 +696,7 @@ def _run_cleanup():
         if _active_agent_ref and hasattr(_active_agent_ref, 'shutdown_memory_provider'):
             # Forward the agent's own transcript so memory providers'
             # ``on_session_end`` hooks see the real conversation instead of
-            # an empty list (#15165). ``_session_messages`` is set on
+            # an empty list. ``_session_messages`` is set on
             # ``AIAgent.__init__`` and refreshed every turn via
             # ``_persist_session``. Fall back to no-arg on test stubs /
             # partially-initialised agents where the attribute is missing.
@@ -711,7 +710,7 @@ def _run_cleanup():
 
 
 # =============================================================================
-# Git Worktree Isolation (#652)
+# Git Worktree Isolation
 # =============================================================================
 
 # Tracks the active worktree for cleanup on exit
@@ -949,7 +948,7 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         except Exception as _prune_exc:
             logger.debug("Ghost session prune skipped: %s", _prune_exc)
 
-        # One-time finalize of orphaned compression continuations (#20001).
+        # One-time finalize of orphaned compression continuations.
         try:
             if not session_db.get_meta("orphaned_compression_finalize_v1"):
                 finalized = session_db.finalize_orphaned_compression_sessions()
@@ -1440,7 +1439,7 @@ def _cprint(text: str):
         # Use get_running_loop() instead of get_event_loop() to avoid the
         # DeprecationWarning / RuntimeWarning emitted by Python 3.10+ when
         # get_event_loop() is called from a thread that has no current event
-        # loop set (e.g. the process_loop background thread).  Fixes #19285.
+        # loop set (e.g. the process_loop background thread).
         current_loop = _asyncio.get_running_loop()
     except RuntimeError:
         current_loop = None
@@ -1780,7 +1779,7 @@ def _strip_leaked_bracketed_paste_wrappers(text: str) -> str:
 # prompt_toolkit's _on_resize() + renderer send ``ESC[6n`` queries to the
 # terminal; under resize storms or tab switches the terminal's reply can
 # race past the input parser and end up in the input buffer as literal
-# text (see issue #14692). Also matches the visible-form ``^[[<row>;<col>R``
+# text. Also matches the visible-form ``^[[<row>;<col>R``
 # that appears when the ESC byte was stripped by a prior filter.
 _DSR_CPR_ESC_RE = re.compile(r"\x1b\[\d+;\d+R")
 _DSR_CPR_VISIBLE_RE = re.compile(r"\^\[\[\d+;\d+R")
@@ -1815,8 +1814,6 @@ def _preserve_ctrl_enter_newline() -> bool:
     submit instead. Local POSIX TTYs that deliver Enter as LF (docker exec,
     some thin PTYs without SSH) still need c-j bound to submit, so we keep
     that binding for those.
-
-    See issue #22379.
     """
     if any(os.environ.get(v) for v in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")):
         return True
@@ -1847,7 +1844,7 @@ def _bind_prompt_submit_keys(kb, handler) -> None:
     plain Enter / c-m). We leave c-j unbound there so the c-j newline
     handler registered separately can fire — giving the user an
     Enter-involving newline keystroke without terminal settings changes.
-    See _preserve_ctrl_enter_newline() and issue #22379.
+    See _preserve_ctrl_enter_newline().
     """
     kb.add("enter")(handler)
     if not _preserve_ctrl_enter_newline():
@@ -2329,7 +2326,7 @@ class EasybciCLI:
             or os.getenv("OPENROUTER_BASE_URL", "")
         ) or None
         # Match key to resolved base_url: OpenRouter URL → prefer OPENROUTER_API_KEY,
-        # custom endpoint → prefer OPENAI_API_KEY (issue #560).
+        # custom endpoint → prefer OPENAI_API_KEY.
         # Note: _ensure_runtime_credentials() re-resolves this before first use.
         if self.base_url and base_url_host_matches(self.base_url, "openrouter.ai"):
             self.api_key = api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -2532,7 +2529,7 @@ class EasybciCLI:
         # hidden until the next user input. Set by _recover_after_resize() so a
         # SIGWINCH cannot stamp a freshly-drawn status bar on top of one that
         # the terminal just reflowed into scrollback — the cause of duplicated
-        # bars / "blank line flooding" reports (#19280, #22976).
+        # bars / "blank line flooding" reports.
         self._status_bar_suppressed_after_resize = False
         self._resize_recovery_lock = threading.Lock()
         self._resize_recovery_timer = None
@@ -2616,7 +2613,7 @@ class EasybciCLI:
         input.  On column shrink the terminal reflows already-rendered status
         bar rows into scrollback before prompt_toolkit can erase them; drawing
         a fresh full-width bar immediately makes the old and new versions
-        look duplicated (#19280, #22976).  Clearing the suppression on the
+        look duplicated.  Clearing the suppression on the
         next prompt restores the bar cleanly.
         """
         self._status_bar_suppressed_after_resize = True
@@ -3277,7 +3274,7 @@ class EasybciCLI:
             path = Path(match.group(1))
             # Use try/except instead of path.exists() to avoid TOCTOU race:
             # the paste file may be deleted between check and read, causing
-            # the input to be silently dropped (#17666).
+            # the input to be silently dropped.
             try:
                 return path.read_text(encoding="utf-8")
             except (OSError, IOError):
@@ -3851,7 +3848,7 @@ class EasybciCLI:
             except Exception:
                 pass
 
-        # Normalize model for the resolved provider.  Fixes #651.
+        # Normalize model for the resolved provider.
         model_changed = self._normalize_model_for_provider(resolved_provider)
 
         # AIAgent/OpenAI client holds auth at init time, so rebuild if key,
@@ -3940,7 +3937,7 @@ class EasybciCLI:
                 return False
             # If the requested session is the (empty) head of a compression
             # chain, walk to the descendant that actually holds the messages.
-            # See #15000 and SessionDB.resolve_resume_session_id.
+            # See SessionDB.resolve_resume_session_id.
             try:
                 resolved_id = self._session_db.resolve_resume_session_id(self.session_id)
             except Exception:
@@ -4046,7 +4043,7 @@ class EasybciCLI:
             global _active_agent_ref
             _active_agent_ref = self.agent
             # Route agent status output through prompt_toolkit so ANSI escape
-            # sequences aren't garbled by patch_stdout's StdoutProxy (#2262).
+            # sequences aren't garbled by patch_stdout's StdoutProxy.
             self.agent._print_fn = _cprint
             self._active_agent_route_signature = (
                 effective_model,
@@ -4187,7 +4184,7 @@ class EasybciCLI:
             return False
 
         # If the requested session is the (empty) head of a compression chain,
-        # walk to the descendant that actually holds the messages. See #15000.
+        # walk to the descendant that actually holds the messages.
         try:
             resolved_id = self._session_db.resolve_resume_session_id(self.session_id)
         except Exception:
@@ -5454,7 +5451,7 @@ class EasybciCLI:
             # conversation. reset=True signals providers to flush accumulated
             # per-session state (_session_turns, _turn_counter, _document_id).
             # Fires BEFORE the plugin on_session_reset hook (shell hooks only
-            # see the new id; Python providers see the transition). See #6672.
+            # see the new id; Python providers see the transition).
             try:
                 _mm = getattr(self.agent, "_memory_manager", None)
                 if _mm is not None:
@@ -5653,7 +5650,7 @@ class EasybciCLI:
             return
 
         # If the target is the empty head of a compression chain, redirect to
-        # the descendant that actually holds the transcript. See #15000.
+        # the descendant that actually holds the transcript.
         try:
             resolved_id = self._session_db.resolve_resume_session_id(target_id)
         except Exception:
@@ -5713,7 +5710,7 @@ class EasybciCLI:
             # Notify memory providers that session_id rotated to a resumed
             # session. reset=False — the provider's accumulated state is
             # still valid; it just needs to target the new session_id for
-            # subsequent writes. See #6672.
+            # subsequent writes.
             try:
                 _mm = getattr(self.agent, "_memory_manager", None)
                 if _mm is not None:
@@ -5882,7 +5879,7 @@ class EasybciCLI:
             # Notify memory providers that session_id forked to a new branch.
             # reset=False — the branched session carries the transcript
             # forward, so provider state tracks the lineage. parent_session_id
-            # links the branch back to the original. See #6672.
+            # links the branch back to the original.
             try:
                 _mm = getattr(self.agent, "_memory_manager", None)
                 if _mm is not None:
@@ -6035,7 +6032,7 @@ class EasybciCLI:
         Mirrors the thread-aware guard in ``_run_curses_picker``: ``run_in_terminal``
         returns a coroutine that must be awaited by the prompt_toolkit event loop,
         which only exists on the main thread.  Slash commands are dispatched from
-        the ``process_loop`` daemon thread (see issue #23185), so calling
+        the ``process_loop`` daemon thread, so calling
         ``run_in_terminal`` from there orphans the coroutine — ``_ask`` never runs,
         and user keystrokes leak into the composer instead.  Fall back to a direct
         ``input()`` when we're off the main thread.
@@ -6873,7 +6870,7 @@ class EasybciCLI:
         elif canonical == "redraw":
             # Manual recovery for terminal buffer drift from multiplexer
             # tab switches, subshell ``clear``, SSH window restores, etc.
-            # See issue #8688 (cmux). Ctrl+L is bound to the same helper.
+            # Ctrl+L is bound to the same helper.
             self._force_full_redraw()
             _cprint(f"  {_DIM}✓ UI redrawn{_RST}")
         elif canonical == "clear":
@@ -7322,6 +7319,7 @@ class EasybciCLI:
                 )
                 # Silence raw spinner; route thinking through TUI widget when no foreground agent is active.
                 bg_agent._print_fn = lambda *_a, **_kw: None
+                bg_agent._skip_session_log = True
 
                 def _bg_thinking(text: str) -> None:
                     # Concurrent bg tasks may race on _spinner_text; acceptable for best-effort UI.
@@ -7343,7 +7341,7 @@ class EasybciCLI:
 
                 # Display result in the CLI (thread-safe via patch_stdout).
                 # Force a TUI refresh first so spinner/status bar don't overlap
-                # with the output (fixes #2718).
+                # with the output.
                 if self._app:
                     self._app.invalidate()
                     time.sleep(0.05)  # brief pause for refresh
@@ -7384,7 +7382,7 @@ class EasybciCLI:
                     sys.stdout.flush()
 
             except Exception as e:
-                # Same TUI refresh pattern as success path (#2718)
+                # Same TUI refresh pattern as success path
                 if self._app:
                     self._app.invalidate()
                     time.sleep(0.05)
@@ -7812,7 +7810,7 @@ class EasybciCLI:
         # Use raw ANSI codes via _cprint so the output is routed through
         # prompt_toolkit's renderer.  self.console.print() with Rich markup
         # writes directly to stdout which patch_stdout's StdoutProxy mangles
-        # into garbled sequences like '?[33mTool progress: NEW?[0m' (#2262).
+        # into garbled sequences like '?[33mTool progress: NEW?[0m'.
         from easybci_cli.colors import Colors as _Colors
         labels = {
             "off": f"{_Colors.DIM}Tool progress: OFF{_Colors.RESET} — silent mode, just the final response.",
@@ -8030,7 +8028,7 @@ class EasybciCLI:
                 # Include system prompt + tool schemas in the estimate —
                 # a transcript-only number understates real request pressure
                 # and can even appear to grow after compression because a
-                # dense handoff summary replaces many short turns (#6217).
+                # dense handoff summary replaces many short turns.
                 _sys_prompt = getattr(self.agent, "_cached_system_prompt", "") or ""
                 _tools = getattr(self.agent, "tools", None) or None
                 approx_tokens = estimate_request_tokens_rough(
@@ -8049,7 +8047,7 @@ class EasybciCLI:
                 # Passing _cached_system_prompt caused duplication because
                 # _build_system_prompt appends system_message to prompt_parts
                 # which already contain the agent identity — resulting in the
-                # identity block appearing twice (issue #15281).
+                # identity block appearing twice.
                 compressed, _ = self.agent._compress_context(
                     original_history,
                     None,
@@ -8057,7 +8055,7 @@ class EasybciCLI:
                     focus_topic=focus_topic or None,
                 )
                 self.conversation_history = compressed
-                # Session-id invariant (2026-08-13): compression is IN-PLACE
+                # Session-id invariant: compression is IN-PLACE
                 # (A2) — _compress_context keeps the SAME session_id + file and
                 # has already persisted the full pre-compression history to
                 # SQLite and realigned the flush cursor. So the id must not
@@ -9428,7 +9426,7 @@ class EasybciCLI:
                         # output from the agent thread.  Without this, the
                         # StdoutProxy buffer only flushes on renderer passes
                         # triggered by input events — on macOS this causes
-                        # the CLI to appear frozen until the user types. (#1624)
+                        # the CLI to appear frozen until the user types.
                         self._invalidate(min_interval=0.15)
                 else:
                     # Fallback for non-interactive mode (e.g., single-query)
@@ -9495,7 +9493,7 @@ class EasybciCLI:
             # Update history with full conversation
             self.conversation_history = result.get("messages", self.conversation_history) if result else self.conversation_history
 
-            # Session-id invariant (2026-08-13): compression is in-place and
+            # Session-id invariant: compression is in-place and
             # the agent locks its id for the run, so it must not diverge from
             # the CLI's. If it ever does, REFUSE to follow the rotated id
             # (following it would orphan the original session file and split
@@ -9520,8 +9518,7 @@ class EasybciCLI:
                     from easybci_agent.title_generator import maybe_auto_title
                     # Route title-generation failures through the agent's
                     # user-visible warning channel so a depleted auxiliary
-                    # provider doesn't silently leave sessions untitled
-                    # (issue #15775).
+                    # provider doesn't silently leave sessions untitled.
                     _title_failure_cb = getattr(
                         self.agent, "_emit_auxiliary_failure", None
                     ) if self.agent else None
@@ -9919,7 +9916,7 @@ class EasybciCLI:
             _welcome_color = "#FFF8DC"
         self._console_print(f"[{_welcome_color}]{_welcome_text}[/]")
 
-        # Redaction opt-out warning (#17691): ON by default, loud when off.
+        # Redaction opt-out warning: ON by default, loud when off.
         # The redactor snapshots its state at import time so any toggle now
         # won't affect the running process — we just want the operator to
         # see that they're running without the safety net.
@@ -10265,7 +10262,7 @@ class EasybciCLI:
                 without requiring terminal settings changes. Ctrl+J (the raw
                 LF keystroke) also triggers this by virtue of being the same
                 key code — a harmless side effect since Ctrl+J has no
-                conflicting EasyBCI binding. See issue #22379.
+                conflicting EasyBCI binding.
                 """
                 event.current_buffer.insert_text('\n')
 
@@ -10553,7 +10550,7 @@ class EasybciCLI:
         # the keystroke reaches the application's stdin — prompt_toolkit never
         # sees it, and prompt_toolkit's key spec parser doesn't even recognise
         # 'c-S-c' anyway (the Shift modifier is meaningless on control-sequence
-        # keys). #19884 added a handler for this; #19895 patched the resulting
+        # keys). A prior handler was added for this, then patched for the resulting
         # startup crash with try/except. Both were based on a misreading of how
         # terminal key events propagate. Deleting the dead handler outright.
 
@@ -10708,8 +10705,8 @@ class EasybciCLI:
             """
             # Diagnostic canary: measure how long the paste handler blocks
             # the prompt_toolkit event loop. If this exceeds ~500ms we log
-            # it so recurring "CLI freezes on paste" reports (issue #16263,
-            # macOS Tahoe 26 + iTerm2/Ghostty) arrive with data attached.
+            # it so recurring "CLI freezes on paste" reports (macOS Tahoe 26
+            # + iTerm2/Ghostty) arrive with data attached.
             _paste_handler_start = time.perf_counter()
             _paste_raw_size = len(event.data or "")
             pasted_text = event.data or ""
@@ -11746,13 +11743,13 @@ class EasybciCLI:
             for DEBUG) inside the handler.  That KeyError then escapes
             before ``raise KeyboardInterrupt()`` can fire, which bypasses
             prompt_toolkit's normal interrupt unwind and surfaces as the
-            EIO cascade from issue #13710.  Wrap the log in a bare
+            EIO cascade.  Wrap the log in a bare
             ``try/except`` so the handler can never raise through it.
             """
             try:
                 logger.debug("Received signal %s, triggering graceful shutdown", signum)
             except Exception:
-                pass  # never let logging raise from a signal handler (#13710 regression)
+                pass  # never let logging raise from a signal handler
             try:
                 if getattr(self, "agent", None) and getattr(self, "_agent_running", False):
                     self.agent.interrupt(f"received signal {signum}")
@@ -11776,7 +11773,7 @@ class EasybciCLI:
         
         # Install a custom asyncio exception handler that suppresses the
         # "Event loop is closed" RuntimeError from httpx transport cleanup
-        # and the "0 is not registered" KeyError from broken stdin (#6393).
+        # and the "0 is not registered" KeyError from broken stdin.
         # The RuntimeError fix is defense-in-depth — the primary fix is
         # neuter_async_httpx_del which disables __del__ entirely.  The
         # KeyError fix handles macOS + uv-managed Python environments where
@@ -11786,15 +11783,15 @@ class EasybciCLI:
             if isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc):
                 return  # silently suppress
             if isinstance(exc, KeyError) and "is not registered" in str(exc):
-                return  # suppress selector registration failures (#6393)
+                return  # suppress selector registration failures
             if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.EIO:
-                return  # suppress I/O errors from broken stdout on interrupt (#13710)
+                return  # suppress I/O errors from broken stdout on interrupt
             # Fall back to default handler for everything else
             loop.default_exception_handler(context)
 
         # Validate stdin before launching prompt_toolkit — on macOS with
         # uv-managed Python, fd 0 can be invalid or unregisterable with the
-        # asyncio selector, causing "KeyError: '0 is not registered'" (#6393).
+        # asyncio selector, causing "KeyError: '0 is not registered'".
         try:
             os.fstat(0)
         except OSError:
@@ -11809,7 +11806,7 @@ class EasybciCLI:
 
         # On macOS with uv-managed Python, kqueue's selector cannot register
         # fd 0, raising OSError(EINVAL) from kqueue.control() when prompt_toolkit
-        # calls loop.add_reader (#6393). Probe kqueue and, if it can't watch
+        # calls loop.add_reader. Probe kqueue and, if it can't watch
         # stdin, switch to a SelectSelector-backed event loop policy.
         if sys.platform == "darwin":
             try:
@@ -11851,12 +11848,12 @@ class EasybciCLI:
         except (EOFError, KeyboardInterrupt, BrokenPipeError):
             pass
         except (KeyError, OSError) as _stdin_err:
-            # Catch selector registration failures from broken stdin (#6393)
-            # and I/O errors from broken stdout during interrupt (#13710).
+            # Catch selector registration failures from broken stdin
+            # and I/O errors from broken stdout during interrupt.
             _errno = getattr(_stdin_err, "errno", None) if isinstance(_stdin_err, OSError) else None
             _msg = str(_stdin_err)
             if _errno == errno.EIO:
-                pass  # suppress broken-stdout I/O errors on interrupt (#13710)
+                pass  # suppress broken-stdout I/O errors on interrupt
             elif (
                 _errno in (errno.EINVAL, errno.EBADF)
                 or "is not registered" in _msg
@@ -12001,7 +11998,7 @@ def main(
 
     # Skip worktree for list commands (they exit immediately)
     if not list_tools and not list_toolsets:
-        # ── Git worktree isolation (#652) ──
+        # ── Git worktree isolation ──
         # Create an isolated worktree so this agent instance doesn't collide
         # with other agents working on the same repo.
         use_worktree = worktree or w or CLI_CONFIG.get("worktree", False)

@@ -133,7 +133,7 @@ _DEEPSEEK_CANONICAL_MODELS: frozenset[str] = frozenset({
 
 # First-class V-series IDs (``deepseek-v4-pro``, ``deepseek-v4-flash``,
 # future ``deepseek-v5-*``, dated variants like ``deepseek-v4-flash-20260423``).
-# Verified empirically 2026-04-24: DeepSeek's Chat Completions API returns
+# DeepSeek's Chat Completions API returns
 # ``provider: DeepSeek`` / ``model: deepseek-v4-flash-20260423`` when called
 # with ``model=deepseek/deepseek-v4-flash``, so these names are not aliases
 # of ``deepseek-chat`` and must not be folded into it.

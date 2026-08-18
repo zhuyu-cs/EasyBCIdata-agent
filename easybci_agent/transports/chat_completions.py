@@ -32,7 +32,7 @@ def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> 
     # ``gemini`` provider also serves Gemma (and historically PaLM/Bard);
     # those reject the field with HTTP 400 "Unknown name 'thinking_config':
     # Cannot find field" — including the polite ``{"includeThoughts": False}``
-    # form. Omit the field entirely on non-Gemini models. (#17426)
+    # form. Omit the field entirely on non-Gemini models.
     if not normalized_model.startswith("gemini"):
         return None
 

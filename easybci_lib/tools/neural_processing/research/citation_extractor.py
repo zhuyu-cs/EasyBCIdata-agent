@@ -42,7 +42,7 @@ Return ONLY a single JSON object with this exact shape — no preamble,
 no markdown fencing. IMPORTANT: emit "key_params" FIRST so the structured
 field is preserved even if the response is truncated:
 {{
-  "key_params": ["<param>=<value>", ...],   // e.g. "bandpass_low=1", "ica_method=runica"; empty list if none
+  "key_params": ["<operator>:<param1>,<param2>", ...],   // use pipeline step format, e.g. "bandpass:1,40", "notch:50", "resample:256", "ica:fastica", "car:", "drop_bads:auto"; empty list if none found
   "key_information": "<2-4 sentences focused on the search question, summarizing what THIS citation contributes. Use specific numeric parameters/step names from the citation when present. If the citation truly contains nothing about the question, return an empty string here and an empty key_params list.>"
 }}"""
 

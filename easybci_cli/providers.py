@@ -570,7 +570,7 @@ def resolve_custom_provider(
 
     # If the stored provider is the bare string "custom" (corrupt state
     # from a prior model-switch bug), fall back to the first custom
-    # provider entry so existing configs self-heal.  (GH #17478)
+    # provider entry so existing configs self-heal.
     bare_custom_fallback = requested == "custom"
     first_valid = None
 

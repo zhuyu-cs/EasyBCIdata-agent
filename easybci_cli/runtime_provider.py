@@ -40,7 +40,7 @@ def _loopback_hostname(host: str) -> bool:
 def _config_base_url_trustworthy_for_bare_custom(cfg_base_url: str, cfg_provider: str) -> bool:
     """Decide whether ``model.base_url`` may back bare ``custom`` runtime resolution.
 
-    GitHub #14676: the model picker can select Custom while ``model.provider`` still reflects a
+    The model picker can select Custom while ``model.provider`` still reflects a
     previous provider. Reject non-loopback URLs unless the YAML provider is already ``custom``,
     so a stale OpenRouter/Z.ai base_url cannot hijack local ``custom`` sessions.
     """
@@ -235,7 +235,7 @@ def _resolve_runtime_from_pool_entry(
         # Honour model.base_url from config.yaml when the configured provider
         # matches this provider — same pattern as the Anthropic branch above.
         # Only override when the pool entry has no explicit base_url (i.e. it
-        # fell back to the hardcoded default).  Env var overrides win (#6039).
+        # fell back to the hardcoded default).  Env var overrides win.
         pconfig = PROVIDER_REGISTRY.get(provider)
         pool_url_is_default = pconfig and base_url.rstrip("/") == pconfig.inference_base_url.rstrip("/")
         if configured_provider == provider and pool_url_is_default:
@@ -248,7 +248,6 @@ def _resolve_runtime_from_pool_entry(
             # persisted api_mode: the opencode providers serve both
             # anthropic_messages and chat_completions models, so the previous
             # session's mode must not leak across /model switches.
-            # Refs #16878.
             from easybci_cli.models import opencode_model_api_mode
             api_mode = opencode_model_api_mode(provider, effective_model)
         elif configured_mode and _provider_supports_explicit_api_mode(provider, configured_provider):
@@ -589,10 +588,10 @@ def _resolve_openrouter_runtime(
     ).rstrip("/")
 
     # Choose API key based on whether the resolved base_url targets OpenRouter.
-    # When hitting OpenRouter, prefer OPENROUTER_API_KEY (issue #289).
+    # When hitting OpenRouter, prefer OPENROUTER_API_KEY.
     # When hitting a custom endpoint (e.g. Z.ai, local LLM), prefer
     # OPENAI_API_KEY so the OpenRouter key doesn't leak to an unrelated
-    # provider (issues #420, #560).
+    # provider.
     _is_openrouter_url = base_url_host_matches(base_url, "openrouter.ai")
     if _is_openrouter_url:
         api_key_candidates = [
@@ -601,7 +600,7 @@ def _resolve_openrouter_runtime(
             os.getenv("OPENAI_API_KEY"),
         ]
     else:
-        # Custom endpoint: use api_key from config when using config base_url (#1760).
+        # Custom endpoint: use api_key from config when using config base_url.
         # When the endpoint is Ollama Cloud, check OLLAMA_API_KEY — it's
         # the canonical env var for ollama.com authentication. Match on
         # HOST, not substring — a custom base_url whose path contains
@@ -624,7 +623,7 @@ def _resolve_openrouter_runtime(
     source = "explicit" if (explicit_api_key or explicit_base_url) else "env/config"
 
     # When "custom" was explicitly requested, preserve that as the provider
-    # name instead of silently relabeling to "openrouter" (#2562).
+    # name instead of silently relabeling to "openrouter".
     # Also provide a placeholder API key for local servers that don't require
     # authentication — the OpenAI SDK requires a non-empty api_key string.
     effective_provider = "custom" if requested_norm == "custom" else "openrouter"
@@ -1163,7 +1162,7 @@ def resolve_runtime_provider(
         # Honour model.base_url from config.yaml when the configured provider
         # matches this provider — mirrors the Anthropic path above.  Without
         # this, users who set model.base_url to e.g. api.minimaxi.com/anthropic
-        # (China endpoint) still get the hardcoded api.minimax.io default (#6039).
+        # (China endpoint) still get the hardcoded api.minimax.io default.
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = ""
         if cfg_provider == provider:
@@ -1184,7 +1183,6 @@ def resolve_runtime_provider(
                 # deepseek-v4-flash) and switching models via /model would
                 # otherwise carry the previous mode forward, stripping /v1
                 # from base_url for chat_completions models and 404'ing.
-                # Refs #16878.
                 from easybci_cli.models import opencode_model_api_mode
                 _effective = target_model or model_cfg.get("default", "")
                 api_mode = opencode_model_api_mode(provider, _effective)

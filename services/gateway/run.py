@@ -267,7 +267,7 @@ def _is_fresh_gateway_interruption(
 # requirements all behave the same on the gateway as they do in the CLI.
 #
 # ``reasoning`` and ``reasoning_details`` were the original three preserved
-# by PR #2974 (schema v6).  ``reasoning_content``, ``responses_reasoning_items``,
+# fields (schema v6).  ``reasoning_content``, ``responses_reasoning_items``,
 # ``responses_message_items``, and ``finish_reason`` were added to the DB later
 # but the gateway's replay whitelist was never expanded to match — so any
 # pure-text assistant turn (no ``tool_calls``) silently dropped them on
@@ -309,7 +309,7 @@ def _build_replay_entry(role: str, content: Any, msg: Dict[str, Any]) -> Dict[st
     contract above.
 
     Empty values: most fields are dropped when falsy (matching the original
-    PR #2974 behaviour) since an empty list/string for those carries no
+    behaviour) since an empty list/string for those carries no
     information.  The exception is ``reasoning_content``: DeepSeek/Kimi
     thinking-mode replay treats an empty string as a meaningful sentinel
     that ``_copy_reasoning_content_for_api`` upgrades to a single space.
@@ -581,7 +581,6 @@ if _config_path.exists():
         # the guards below read `if X not in os.environ` and let stale
         # .env entries (e.g. EASYBCI_MAX_ITERATIONS=60 written by an old
         # `easybci setup` run) silently shadow the user's current config.
-        # See PR #18413 / the 60-vs-500 max_turns incident.
         _agent_cfg = _cfg.get("agent", {})
         if _agent_cfg and isinstance(_agent_cfg, dict):
             if "max_turns" in _agent_cfg:
@@ -1121,7 +1120,6 @@ def _normalize_empty_agent_response(
 
     Consolidates the existing ``failed`` handler and adds a catch-all for
     the case where the agent did work (api_calls > 0) but returned no text.
-    Fix for #18765.
     """
     if response:
         return response
@@ -2305,7 +2303,7 @@ class GatewayRunner:
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
-        # --- Authorization gate (#17775) ---
+        # --- Authorization gate ---
         # The cold path (_handle_message) checks _is_user_authorized before
         # creating a session.  The busy path must enforce the same check;
         # otherwise unauthorized users in shared threads
@@ -2697,7 +2695,7 @@ class GatewayRunner:
             if hasattr(agent, "shutdown_memory_provider"):
                 # Pass the agent's own conversation transcript so memory
                 # providers' ``on_session_end`` hooks see the real messages
-                # instead of the empty default (#15165). ``_session_messages``
+                # instead of the empty default. ``_session_messages``
                 # is set on ``AIAgent`` (run_agent.py:1518) and refreshed at
                 # the end of every ``run_conversation`` turn via
                 # ``_persist_session``; on an agent built through
@@ -3002,7 +3000,7 @@ class GatewayRunner:
             )
         except Exception:
             pass
-        # Redaction status: ON by default (#17691). Surface a prominent
+        # Redaction status: ON by default. Surface a prominent
         # warning if an operator has explicitly opted out so they don't
         # forget the downgrade is active — the redactor snapshots its
         # state at import time, so this log line is the source of truth
@@ -3168,7 +3166,7 @@ class GatewayRunner:
 
         # Suspend sessions that were active when the gateway last exited.
         # This prevents stuck sessions from being blindly resumed on restart,
-        # which can create an unrecoverable loop (#7536).  Suspended sessions
+        # which can create an unrecoverable loop.  Suspended sessions
         # auto-reset on the next incoming message, giving the user a clean start.
         #
         # SKIP suspension after a clean (graceful) shutdown — the previous
@@ -3190,7 +3188,7 @@ class GatewayRunner:
             except Exception as e:
                 logger.warning("Session suspension on startup failed: %s", e)
 
-        # Stuck-loop detection (#7536): if a session has been active across
+        # Stuck-loop detection: if a session has been active across
         # 3+ consecutive restarts, it's probably stuck in a loop (the same
         # history keeps causing the agent to hang).  Auto-suspend it so the
         # user gets a clean slate on the next message.
@@ -3962,7 +3960,7 @@ class GatewayRunner:
                 Called twice in the shutdown path: once eagerly after a
                 drain timeout forces agent interrupt (so we reclaim bash/
                 sleep children before systemd TimeoutStopSec escalates to
-                SIGKILL on the cgroup — #8202), and once as a final
+                SIGKILL on the cgroup), and once as a final
                 catch-all at the end of _stop_impl() for the graceful
                 path or anything respawned mid-teardown.
 
@@ -4071,7 +4069,7 @@ class GatewayRunner:
                 # deferring this to the end of stop() risks systemd escalating
                 # to SIGKILL on the cgroup first — at which point bash/sleep
                 # children left behind by an interrupted terminal tool get
-                # killed by systemd instead of us (issue #8202).  The final
+                # killed by systemd instead of us.  The final
                 # catch-all cleanup below still runs for the graceful path.
                 _kill_tool_subprocesses("post-interrupt")
                 logger.info(
@@ -4163,7 +4161,7 @@ class GatewayRunner:
             # that died with their ThreadPoolExecutor (notably background ticks) only
             # get swept here.  Without this, long-running gateways accumulate
             # async httpx transports until they hit EMFILE on macOS's default
-            # RLIMIT_NOFILE=256.  See #14210.
+            # RLIMIT_NOFILE=256.
             try:
                 from easybci_agent.auxiliary_client import shutdown_cached_clients
                 shutdown_cached_clients()
@@ -4213,7 +4211,7 @@ class GatewayRunner:
                 )
 
             # Track sessions that were active at shutdown for stuck-loop
-            # detection (#7536).  On each restart, the counter increments
+            # detection.  On each restart, the counter increments
             # for sessions that were running.  If a session hits the
             # threshold (3 consecutive restarts while active), the next
             # startup auto-suspends it — breaking the loop.
@@ -4710,7 +4708,7 @@ class GatewayRunner:
             # /reset and /new must bypass the running-agent guard so they
             # actually dispatch as commands instead of being queued as user
             # text (which would be fed back to the agent with the same
-            # broken history — #2170).  Interrupt the agent first, then
+            # broken history).  Interrupt the agent first, then
             # clear the adapter's pending queue so the stale "/reset" text
             # doesn't get re-processed as a user message after the
             # interrupt completes.
@@ -4872,7 +4870,7 @@ class GatewayRunner:
             # /reload-mcp, /sethome, /reset (all registered as platform
             # slash commands) would interrupt the agent AND get
             # silently discarded by the slash-command safety net,
-            # producing a zero-char response. See #5057, #6252, #10370.
+            # producing a zero-char response.
             if _cmd_def_inner:
                 return (
                     f"⏳ Agent is running — `/{_cmd_def_inner.name}` can't run "
@@ -5627,7 +5625,7 @@ class GatewayRunner:
             or getattr(session_entry, "is_fresh_reset", False)
         )
         # Consume the is_fresh_reset flag immediately so it doesn't leak
-        # onto subsequent messages in the same session (issue #6508).
+        # onto subsequent messages in the same session.
         if getattr(session_entry, "is_fresh_reset", False):
             session_entry.is_fresh_reset = False
         if _is_new_session:
@@ -5702,7 +5700,7 @@ class GatewayRunner:
         # Long-lived gateway sessions can accumulate enough history that
         # every new message rehydrates an oversized transcript, causing
         # repeated truncation/context failures.  Detect this early and
-        # compress proactively — before the agent even starts.  (#628)
+        # compress proactively — before the agent even starts.
         #
         # Token source priority:
         # 1. Actual API-reported prompt_tokens from the last turn
@@ -5854,7 +5852,6 @@ class GatewayRunner:
                 # but catches runaway growth before it becomes unrecoverable.
                 # Threshold is configurable via
                 # compression.hygiene_hard_message_limit.
-                # (#2153)
                 _HARD_MSG_LIMIT = _hyg_hard_msg_limit
                 _needs_compress = (
                     _approx_tokens >= _compress_token_threshold
@@ -5901,6 +5898,7 @@ class GatewayRunner:
                                 )
                                 try:
                                     _hyg_agent._print_fn = lambda *a, **kw: None
+                                    _hyg_agent._skip_session_log = True
 
                                     loop = asyncio.get_running_loop()
                                     _compressed, _ = await loop.run_in_executor(
@@ -6151,12 +6149,12 @@ class GatewayRunner:
                     )
 
             # Normalize empty responses: surface errors, partial failures, and
-            # the case where agent did work but returned no text. Fix for #18765.
+            # the case where agent did work but returned no text.
             response = _normalize_empty_agent_response(
                 agent_result, response, history_len=len(history),
             )
 
-            # Session-id invariant (2026-08-13): the agent's id is locked for
+            # Session-id invariant: the agent's id is locked for
             # the run and compression is in-place, so it cannot diverge. If it
             # somehow does, REFUSE to redirect transcript writes to a rotated
             # id (that would split the task into a second session file); log
@@ -6267,13 +6265,13 @@ class GatewayRunner:
             # IMPORTANT: For context-overflow failures (compression exhausted,
             # generic 400 on large sessions) we must NOT persist the user's
             # message — doing so would grow the session further and cause the
-            # same failure on the next attempt, an infinite loop. (#1630, #9893)
+            # same failure on the next attempt, an infinite loop.
             #
             # Transient failures (429, timeout, connection error, provider 5xx)
             # are different: the session is not oversized, and silently dropping
             # the user message causes severe context loss on retry — the agent
             # forgets what was just asked.  Persist the user turn so the
-            # conversation is preserved. (#7100)
+            # conversation is preserved.
             agent_failed_early = bool(agent_result.get("failed"))
             _err_str_for_classify = str(agent_result.get("error", "")).lower()
             # Use specific multi-word phrases (not bare "exceed" or "token")
@@ -6307,7 +6305,7 @@ class GatewayRunner:
             # When compression is exhausted, the session is permanently too
             # large to process.  Auto-reset it so the next message starts
             # fresh instead of replaying the same oversized context in an
-            # infinite fail loop.  (#9893)
+            # infinite fail loop.
             if agent_result.get("compression_exhausted") and session_entry and session_key:
                 logger.info(
                     "Auto-resetting session %s after compression exhaustion.",
@@ -6355,7 +6353,7 @@ class GatewayRunner:
                 # Transient failure (429/timeout/5xx): persist only the user
                 # message so the next message can load a transcript that
                 # reflects what was said.  Skip the assistant error text since
-                # it's a gateway-generated hint, not model output. (#7100)
+                # it's a gateway-generated hint, not model output.
                 self.session_store.append_to_transcript(
                     session_entry.session_id,
                     {"role": "user", "content": message_text, "timestamp": ts},
@@ -6378,7 +6376,7 @@ class GatewayRunner:
                 else:
                     # The agent already persisted these messages to SQLite via
                     # _flush_messages_to_session_db(), so skip the DB write here
-                    # to prevent the duplicate-write bug (#860).  We still write
+                    # to prevent the duplicate-write bug.  We still write
                     # to JSONL for backward compatibility and as a backup.
                     agent_persisted = self._session_db is not None
                     for msg in new_messages:
@@ -8315,6 +8313,7 @@ class GatewayRunner:
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
+                agent._skip_session_log = True
                 try:
                     return agent.run_conversation(
                         user_message=enriched_prompt,
@@ -8770,10 +8769,11 @@ class GatewayRunner:
             )
             try:
                 tmp_agent._print_fn = lambda *a, **kw: None
+                tmp_agent._skip_session_log = True
 
                 # Estimate with system prompt + tool schemas included so the
                 # figure reflects real request pressure, not a transcript-only
-                # underestimate (#6217). Must be computed after tmp_agent is
+                # underestimate. Must be computed after tmp_agent is
                 # built so _cached_system_prompt/tools are populated.
                 _sys_prompt = getattr(tmp_agent, "_cached_system_prompt", "") or ""
                 _tools = getattr(tmp_agent, "tools", None) or None
@@ -8943,7 +8943,7 @@ class GatewayRunner:
         if not target_id:
             return t("gateway.resume.not_found", name=name)
         # Compression creates child continuations that hold the live transcript.
-        # Follow that chain so gateway /resume matches CLI behavior (#15000).
+        # Follow that chain so gateway /resume matches CLI behavior.
         try:
             target_id = self._session_db.resolve_resume_session_id(target_id)
         except Exception as e:
@@ -8967,7 +8967,7 @@ class GatewayRunner:
         # rebuilds with the correct session_id end-to-end — mirrors
         # /branch and /reset. Without this, the cached AIAgent (and its
         # memory provider, which cached `_session_id` during initialize())
-        # keeps writing into the wrong session's record. See #6672.
+        # keeps writing into the wrong session's record.
         self._evict_cached_agent(session_key)
 
         # Get the title for confirmation
@@ -10780,7 +10780,7 @@ class GatewayRunner:
 
         logger.debug("Process watcher ended: %s", session_id)
 
-    _MAX_INTERRUPT_DEPTH = 3  # Cap recursive interrupt handling (#816)
+    _MAX_INTERRUPT_DEPTH = 3  # Cap recursive interrupt handling
 
     # Config keys whose values MUST invalidate the gateway's cached agent
     # when they change.  The agent bakes these into its compressor / context
@@ -11089,9 +11089,9 @@ class GatewayRunner:
         other would make get_activity_summary() misleading.
         For interrupt-recursive turns both are preserved so the inactivity
         watchdog can accumulate stuck-turn idle time and fire the 30-min
-        timeout (#15654).  The depth-0 reset is still needed: a session
+        timeout.  The depth-0 reset is still needed: a session
         idle for 29 min would otherwise trip the watchdog before the new
-        turn makes its first API call (#9051).
+        turn makes its first API call.
         """
         if interrupt_depth == 0:
             agent._last_activity_ts = time.time()
@@ -11857,8 +11857,8 @@ class GatewayRunner:
                         # tool lines keep editing the ORIGINAL progress message
                         # above the new content, making the chat appear out of
                         # order. Mirrors GatewayStreamConsumer.on_segment_break
-                        # on the content side. (Issue: tool + content
-                        # linearization regression after PR #7885.)
+                        # on the content side. (Guards a tool + content
+                        # linearization regression.)
                         progress_msg_id = None
                         progress_lines = []
                         last_progress_msg[0] = None
@@ -12427,7 +12427,7 @@ class GatewayRunner:
             # don't forward ``callback=`` (registry.dispatch via
             # handle_function_call, sub-agents, bg-review, …) still resolve
             # a working callback. See easybci_lib/tools/clarify_tool.py for
-            # the lookup. Bug #3 from the 2026-06-17 report: a WebUI turn
+            # the lookup. A WebUI turn that
             # invoked clarify but got "Clarify tool is not available in this
             # execution context" — likely some dispatch path stripped the
             # kwarg before reaching the registry handler lambda.
@@ -12589,7 +12589,7 @@ class GatewayRunner:
             # the previous agent turn was interrupted mid-work (gateway
             # restart, crash, SIGTERM).  Prepend a system note so the model
             # finishes processing the pending tool results before addressing
-            # the user's new message.  (#4493)
+            # the user's new message.
             #
             # Session-level resume_pending (set on drain-timeout shutdown)
             # escalates the wording — the transcript's last role may be
@@ -12597,7 +12597,7 @@ class GatewayRunner:
             # give a stronger, reason-aware instruction that subsumes the
             # tool-tail case.
             #
-            # Freshness gate (#16802): both branches are gated on the age
+            # Freshness gate: both branches are gated on the age
             # of the last persisted transcript row.  That is the correct
             # "when did we last do anything here" signal for both the
             # resume_pending path (restart watchdog) and the tool-tail
@@ -12768,7 +12768,7 @@ class GatewayRunner:
             #
             # Uses path-based deduplication against _history_media_paths (collected
             # before run_conversation) instead of index slicing. This is safe even
-            # when context compression shrinks the message list. (Fixes #160)
+            # when context compression shrinks the message list.
             if "MEDIA:" not in final_response:
                 media_tags = []
                 for msg in result.get("messages", []):
@@ -12789,9 +12789,9 @@ class GatewayRunner:
                             unique_tags.append(tag)
                     final_response = final_response + "\n" + "\n".join(unique_tags)
             
-            # Session-id invariant (2026-08-13): a live task must NEVER rotate
+            # Session-id invariant: a live task must NEVER rotate
             # to a new session id — doing so would split one conversation into
-            # two session_<id>.json files. Compression is now IN-PLACE (A2), and
+            # two session_<id>.json files. Compression is IN-PLACE, and
             # AIAgent.session_id is locked for the duration of a run, so the
             # agent's id can no longer diverge from the one we dispatched with.
             # We keep this as a tripwire: if a divergence is ever observed, we
@@ -12825,7 +12825,6 @@ class GatewayRunner:
                     # Route title-generation failures through the agent's
                     # user-visible warning channel so a depleted auxiliary
                     # provider doesn't silently leave sessions untitled
-                    # (issue #15775).
                     _title_failure_cb = getattr(
                         agent, "_emit_auxiliary_failure", None
                     )
@@ -13019,7 +13018,7 @@ class GatewayRunner:
             # timeout instead of a wall-clock limit: the agent can run for
             # hours if it's actively calling tools / receiving stream tokens,
             # but a hung API call or stuck tool with no activity for the
-            # configured duration is caught and killed.  (#4815)
+            # configured duration is caught and killed.
             #
             # Config: agent.gateway_timeout in config.yaml, or
             # EASYBCI_AGENT_TIMEOUT env var (env var takes precedence).
@@ -13194,7 +13193,8 @@ class GatewayRunner:
             # the actually-active model instead of the config default.
             # Skip eviction when the run failed — evicting a failed agent
             # forces MCP reinit on the next message for no benefit (the
-            # same error will recur).  This was the root cause of #7130:
+            # same error will recur).  This was the root cause of a
+            # burn-loop:
             # a bad model ID triggered fallback → eviction → recreation →
             # MCP reinit → same 400 → loop, burning 91% CPU for hours.
             _agent = agent_holder[0]
@@ -13289,7 +13289,7 @@ class GatewayRunner:
                     adapter._active_sessions[session_key].clear()
 
                 # Cap recursion depth to prevent resource exhaustion when the
-                # user sends multiple messages while the agent keeps failing. (#816)
+                # user sends multiple messages while the agent keeps failing.
                 if _interrupt_depth >= self._MAX_INTERRUPT_DEPTH:
                     logger.warning(
                         "Interrupt recursion depth %d reached for session %s — "
@@ -13811,7 +13811,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
         # Fast (<10ms) snapshot of who's asking us to shut down — runs
         # synchronously inside the asyncio signal handler, so we keep it
-        # purely stdlib + /proc reads, no subprocesses.  See PR #15826
+        # purely stdlib + /proc reads, no subprocesses.
         # (May 2026): the previous implementation called `ps aux` here
         # synchronously, blocking the event loop for up to 3s while
         # adapter teardown couldn't begin.
@@ -13921,7 +13921,6 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # unreachable.  discover_mcp_tools() uses a blocking 120s wait
     # internally; calling it from the loop thread would freeze platform
     # heartbeats (platform polling loops, etc.) until it returned.
-    # See #16856.
     try:
         from easybci_lib.tools.mcp_tool import discover_mcp_tools
         _loop = asyncio.get_running_loop()

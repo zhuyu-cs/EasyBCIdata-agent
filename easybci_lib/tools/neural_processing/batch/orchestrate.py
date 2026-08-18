@@ -420,7 +420,7 @@ def _data_info_from_table(table) -> dict:
     return {}
 
 
-def _scaffold_repo(wd: Path, steps, modality, analysis_goal, paradigm, table) -> dict:
+def _scaffold_repo(wd: Path, steps, modality, analysis_goal, paradigm, table, scenario="research") -> dict:
     """Run build_mini_repo (writes plan/ + code/pipeline.py + run.py +
     requirements.txt + README) and additionally write code/qc.py + code/vis.py
     (build_mini_repo deliberately omits them)."""
@@ -451,7 +451,8 @@ def _scaffold_repo(wd: Path, steps, modality, analysis_goal, paradigm, table) ->
         code_dir.mkdir(parents=True, exist_ok=True)
         (code_dir / "qc.py").write_text(
             generate_qc_script_v2(steps=list(steps), data_info=data_info,
-                                  modality=modality, analysis_goal=analysis_goal),
+                                  modality=modality, analysis_goal=analysis_goal,
+                                  scenario=scenario),
             encoding="utf-8")
         (code_dir / "vis.py").write_text(
             generate_vis_script(modality=modality, analysis_goal=analysis_goal),

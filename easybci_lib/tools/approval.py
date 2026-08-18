@@ -776,8 +776,7 @@ DANGEROUS_PATTERNS = [
     # `_normalize_command_for_detection` lowercases input before pattern
     # matching, so case variants of S/s and A/a collapse — both forms
     # are gated below. Lazy `[^;|&\n]*?` allows flag arguments (e.g.
-    # `sudo -u root -S whoami`) without spanning command separators. See
-    # #17873 category 4.
+    # `sudo -u root -S whoami`) without spanning command separators.
     (r'\bsudo\b[^;|&\n]*?\s+(?:-s\b|--stdin\b|-a\b|--askpass\b)',
      "sudo with privilege flag (stdin/askpass/shell/list)"),
     # Combined short-flag form: -nS, -ns, -sa, -las — sudo flags packed
@@ -1100,7 +1099,7 @@ def prompt_dangerous_approval(command: str, description: str,
     # CLI session) and no approval callback is registered on this thread,
     # the input() fallback below would spawn a daemon thread whose read
     # can never see Enter -- the user's keystrokes go to prompt_toolkit,
-    # not input(), producing an invisible 60s deadlock (issue #15216).
+    # not input(), producing an invisible 60s deadlock.
     # Deny fast and log loudly instead so the caller can surface a real
     # error to the agent. Any thread that needs interactive approval must
     # install a callback via tools.terminal_tool.set_approval_callback()

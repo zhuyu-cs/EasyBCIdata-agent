@@ -14,7 +14,7 @@ import re
 logger = logging.getLogger(__name__)
 
 # Sensitive query-string parameter names (case-insensitive exact match).
-# Ported from nearai/ironclaw#2529 — catches tokens whose values don't match
+# Catches tokens whose values don't match
 # any known vendor prefix regex (e.g. opaque tokens, short OAuth codes).
 _SENSITIVE_QUERY_PARAMS = frozenset({
     "access_token",
@@ -37,7 +37,6 @@ _SENSITIVE_QUERY_PARAMS = frozenset({
 
 # Sensitive form-urlencoded / JSON body key names (case-insensitive exact match).
 # Exact match, NOT substring — "token_count" and "session_id" must NOT match.
-# Ported from nearai/ironclaw#2529.
 _SENSITIVE_BODY_KEYS = frozenset({
     "access_token",
     "refresh_token",
@@ -57,7 +56,7 @@ _SENSITIVE_BODY_KEYS = frozenset({
 
 # Snapshot at import time so runtime env mutations (e.g. LLM-generated
 # `export EASYBCI_REDACT_SECRETS=false`) cannot disable redaction
-# mid-session.  ON by default — secure default per issue #17691. Users who
+# mid-session.  ON by default — secure default. Users who
 # need raw credential values in tool output (e.g. working on the redactor
 # itself) can opt out via `security.redact_secrets: false` in config.yaml
 # (bridged to this env var in easybci_cli/main.py, gateway/run.py, and
@@ -143,7 +142,6 @@ _JWT_RE = re.compile(
 
 # URLs containing query strings — matches `scheme://...?...[# or end]`.
 # Used to scan text for URLs whose query params may contain secrets.
-# Ported from nearai/ironclaw#2529.
 _URL_WITH_QUERY_RE = re.compile(
     r"(https?|wss?|ftp)://"          # scheme
     r"([^\s/?#]+)"                    # authority (may include userinfo)

@@ -2,7 +2,7 @@
 two-phase pipeline flow.
 
 Trades wall-clock + RAM at Phase 1 for accurate operator/parameter choices
-at Phase 2. See docs/superpowers/specs/2026-06-16-data-preprocessing-two-phase-design.md.
+at Phase 2.
 """
 
 from __future__ import annotations
@@ -23,11 +23,13 @@ from easybci_lib.tools.neural_processing.io.inspection_report import (
     ArtifactSummary,
     ChannelStat,
     ChannelSummary,
+    EventsSummary,
     Fingerprint,
     InspectionReport,
     MemoryEstimate,
     PsdSummary,
     compute_file_id,
+    load_inspection_report,
     save_inspection_report,
 )
 from easybci_lib.tools.neural_processing.io.routing_table import (
@@ -137,15 +139,36 @@ def deep_inspect(
     ).hexdigest()[:8]
     report.file_id = file_id
 
+    # Summarize sidecar events CSV/TSV so the LLM never needs to read raw files.
+    events_csv_path = _discover_events_csv(data_path)
+    if events_csv_path:
+        try:
+            report.events_summary = _summarize_events_csv(events_csv_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("events CSV summary failed: %s", exc)
+
     # Persist BOTH: per-file report under middle_process/inspect/<file_id>/
-    # (multi-input single source of truth) AND the legacy root path
-    # (back-compat for code that hasn't been migrated yet).
+    # (multi-input single source of truth) AND the root-level path (consumed
+    # by plan/codegen as the "representative" report for parameter decisions).
+    # Multi-input: the root is written ONLY on the first call (first-writer-wins)
+    # so that plan_pipeline/generate_code get a stable, predictable report rather
+    # than whichever file happened to be inspected last. Exception: a degraded
+    # root is replaced by a non-degraded report (prefer quality data for hints).
     work_dir_path = Path(work_dir)
     per_file_path = (
         work_dir_path / "middle_process" / "inspect" / file_id / _REPORT_FILENAME
     )
     save_inspection_report(report, per_file_path)
-    save_inspection_report(report, out_path)
+    _should_write_root = not out_path.is_file()
+    if not _should_write_root and not report.degraded:
+        try:
+            _existing = load_inspection_report(out_path)
+            if _existing.degraded:
+                _should_write_root = True
+        except Exception:
+            pass
+    if _should_write_root:
+        save_inspection_report(report, out_path)
 
     # Upsert into the routing table. Conflicts (same (sub, ses, stem) under
     # different file_id) are logged + the per-file report still lands; the
@@ -164,7 +187,7 @@ def deep_inspect(
                 inspection_report_path=str(
                     per_file_path.relative_to(work_dir_path)
                 ),
-                events_path=_discover_events_csv(data_path),
+                events_path=events_csv_path,
                 override_script=None,
             )
             upsert_routing_entry(work_dir_path, entry)
@@ -261,6 +284,101 @@ def _discover_events_csv(data_path: Path | str) -> Optional[str]:
             return str(cand)
 
     return None
+
+
+def _summarize_events_csv(events_path: str | Path) -> Optional[EventsSummary]:
+    """Read a sidecar events CSV/TSV and produce a structured summary.
+
+    Returns None on parse failure or if the file is empty.
+    Caps at 10000 rows to avoid memory issues on very large files.
+    """
+    import csv
+    import hashlib as _hl
+
+    p = Path(events_path)
+    if not p.is_file():
+        return None
+
+    try:
+        raw = p.read_bytes()
+    except OSError:
+        return None
+
+    file_hash = _hl.sha256(raw[:1 << 20]).hexdigest()[:8]
+
+    text = raw.decode("utf-8-sig", errors="replace")
+    delimiter = "\t" if p.suffix.lower() in (".tsv",) else ","
+
+    try:
+        reader = csv.DictReader(text.splitlines(), delimiter=delimiter)
+        columns = reader.fieldnames or []
+        if not columns:
+            return None
+
+        rows: list[dict] = []
+        for i, row in enumerate(reader):
+            if i >= 10000:
+                break
+            rows.append(row)
+    except Exception:
+        return None
+
+    if not rows:
+        return None
+
+    n_rows = len(rows)
+    sample_rows = [{k: v for k, v in r.items()} for r in rows[:3]]
+
+    time_col = None
+    for candidate in ("time", "onset", "time_s", "latency", "sample_index"):
+        if candidate in columns:
+            time_col = candidate
+            break
+
+    time_range: list[float] | None = None
+    if time_col:
+        try:
+            times = [float(r[time_col]) for r in rows if r.get(time_col)]
+            if times:
+                time_range = [round(min(times), 3), round(max(times), 3)]
+        except (ValueError, TypeError):
+            pass
+
+    code_col = None
+    for candidate in ("event_code", "trigger_code", "type", "value",
+                      "description", "trial_type", "stim_type"):
+        if candidate in columns:
+            code_col = candidate
+            break
+
+    event_code_distribution: dict[str, int] = {}
+    if code_col:
+        for r in rows:
+            v = str(r.get(code_col, "") or "").strip()
+            if v:
+                event_code_distribution[v] = event_code_distribution.get(v, 0) + 1
+
+    trial_col = None
+    for candidate in ("trial_id", "trial", "trial_number", "epoch"):
+        if candidate in columns:
+            trial_col = candidate
+            break
+
+    unique_trials: int | None = None
+    if trial_col:
+        trial_vals = {r.get(trial_col) for r in rows if r.get(trial_col)}
+        unique_trials = len(trial_vals)
+
+    return EventsSummary(
+        source_file=p.name,
+        n_rows=n_rows,
+        columns=list(columns),
+        time_range_s=time_range,
+        event_code_distribution=event_code_distribution,
+        unique_trials=unique_trials,
+        sample_rows=sample_rows,
+        file_hash_prefix=file_hash,
+    )
 
 
 def _scan(

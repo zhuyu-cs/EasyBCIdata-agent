@@ -56,7 +56,7 @@ class ContextEngine(ABC):
     # override via __init__ or property; defaults are sensible for most
     # engines.
     #
-    # protect_first_n semantics (since PR #13754): count of non-system head
+    # protect_first_n semantics: count of non-system head
     # messages always preserved verbatim, IN ADDITION to the system prompt
     # which is always implicitly protected.  Default 3 keeps the
     # historical "system + first 3 non-system messages" head shape.

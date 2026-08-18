@@ -61,7 +61,7 @@ _SUMMARY_TOKENS_CEILING = 12_000
 # Placeholder used when pruning old tool results
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 
-# --- Pinned findings (Phase E) --------------------------------------------
+# --- Pinned findings --------------------------------------------
 # The agent can mark a key mid-task value it must not lose to lossy compaction
 # by writing a line beginning with ``PINNED:`` (case-insensitive) anywhere in
 # its text. Compaction extracts these deterministically and re-emits them
@@ -206,7 +206,7 @@ def _truncate_tool_call_args_json(args: str, head_chars: int = 200) -> str:
     i.e. an unterminated string and a missing closing brace. MiniMax, for
     example, rejects this with ``invalid function arguments json string``
     and the session gets stuck re-sending the same broken history on every
-    turn. See issue #11762 for the observed loop.
+    turn.
 
     This helper parses the arguments, shrinks long string leaves inside the
     parsed structure, and re-serialises. Non-string values (paths, ints,
@@ -772,7 +772,7 @@ class ContextCompressor(ContextEngine):
         return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
-    # Pinned findings (Phase E) — deterministic verbatim preservation
+    # Pinned findings — deterministic verbatim preservation
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1091,7 +1091,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # Redact the summary output as well — the summarizer LLM may
             # ignore prompt instructions and echo back secrets verbatim.
             summary = redact_sensitive_text(content.strip())
-            # Phase E: deterministically re-emit agent-pinned key values
+            # Deterministically re-emit agent-pinned key values
             # VERBATIM (carried from the prior summary + this round's turns),
             # so lossy summarization can't drop mid-task facts the agent must
             # keep for downstream work (e.g. sampling_rate, bad channels,
@@ -1118,7 +1118,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # If the summary model is different from the main model and the
             # error looks permanent (model not found, 503, 404), fall back to
             # using the main model instead of entering cooldown that leaves
-            # context growing unbounded.  (#8620 sub-issue 4)
+            # context growing unbounded.
             _status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
             _err_str = str(e).lower()
             _is_model_not_found = (
@@ -1138,7 +1138,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # or as a wrapping ``APIResponseValidationError`` whose message
             # carries the substring "expecting value".  Treat these like a
             # transient provider failure: one retry on the main model, then a
-            # short cooldown.  Issue #22244.
+            # short cooldown.
             _is_json_decode = (
                 isinstance(e, json.JSONDecodeError)
                 or "expecting value" in _err_str
@@ -1149,7 +1149,6 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # "response ended prematurely", "unexpected eof").  These are
             # transient network events; treat them like a timeout so we fall
             # back to the main model instead of entering a 60-second cooldown.
-            # See issue #18458.
             _is_streaming_closed = _is_connection_error(e)
             if _is_json_decode and not _is_model_not_found and not _is_timeout:
                 logger.error(
@@ -1393,7 +1392,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
     ) -> int:
         """Guarantee the most recent user message is in the protected tail.
 
-        Context compressor bug (#10896): ``_align_boundary_backward`` can pull
+        Context compressor bug: ``_align_boundary_backward`` can pull
         ``cut_idx`` past a user message when it tries to keep tool_call/result
         groups together.  If the last user message ends up in the *compressed*
         middle region the LLM summariser writes it into "Pending User Asks",
@@ -1490,7 +1489,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         cut_idx = self._align_boundary_backward(messages, cut_idx)
 
         # Ensure the most recent user message is always in the tail so the
-        # active task is never lost to compression (fixes #10896).
+        # active task is never lost to compression.
         cut_idx = self._ensure_last_user_message_in_tail(messages, cut_idx, head_end)
 
         return max(cut_idx, head_end + 1)
@@ -1669,7 +1668,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
 
         # When the summary lands as a standalone role="user" message,
         # weak models read the verbatim "## Active Task" quote of a past
-        # user request as fresh input (#11475, #14521). Append the explicit
+        # user request as fresh input. Append the explicit
         # end marker — the same one used in the merge-into-tail path — so
         # the model has a clear "summary above, not new input" signal.
         if not _merge_summary_into_tail and summary_role == "user":

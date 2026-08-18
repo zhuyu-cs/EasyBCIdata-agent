@@ -3,8 +3,6 @@
 Server-side LLM fact extraction, semantic search with reranking, and
 automatic deduplication via the Mem0 Platform API.
 
-Original PR #2933 by kartik-mem0, adapted to MemoryProvider ABC.
-
 Config via environment variables:
   MEM0_API_KEY       — Mem0 Platform API key (required)
   MEM0_USER_ID       — User identifier (default: easybci-user)

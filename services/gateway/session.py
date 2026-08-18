@@ -355,7 +355,6 @@ class SessionEntry:
     # reuse was_auto_reset for this because that flag fires the "session
     # expired due to inactivity" user-facing notice and a misleading
     # context-note prepend — both wrong for an explicit manual reset.
-    # See issue #6508.
     is_fresh_reset: bool = False
     
     # Set by the background expiry watcher after it finalizes an expired
@@ -366,7 +365,7 @@ class SessionEntry:
 
     # When True the next call to get_or_create_session() will auto-reset
     # this session (create a new session_id) so the user starts fresh.
-    # Set by /stop to break stuck-resume loops (#7536).
+    # Set by /stop to break stuck-resume loops.
     suspended: bool = False
 
     # When True the session was interrupted by a gateway restart/shutdown
@@ -375,7 +374,7 @@ class SessionEntry:
     # the user stays on the same transcript and the agent auto-continues
     # from where it left off.  Cleared after the next successful turn.
     # Escalation to ``suspended`` is handled by the existing
-    # ``.restart_failure_counts`` stuck-loop counter (#7536), not by a
+    # ``.restart_failure_counts`` stuck-loop counter, not by a
     # parallel counter on this entry.
     resume_pending: bool = False
     resume_reason: Optional[str] = None  # e.g. "restart_timeout"
@@ -674,7 +673,7 @@ class SessionStore:
                 entry = self._entries[session_key]
 
                 if entry.suspended:
-                    # Forced wipe (e.g. /stop broke a stuck loop — #7536).
+                    # Forced wipe (e.g. /stop broke a stuck loop).
                     was_auto_reset = True
                     auto_reset_reason = "suspended"
                     reset_had_activity = entry.total_tokens > 0
@@ -752,7 +751,7 @@ class SessionStore:
         """Mark a session as suspended so it auto-resets on next access.
 
         Used by ``/stop`` to prevent stuck sessions from being resumed
-        after a gateway restart (#7536).  Returns True if the session
+        after a gateway restart.  Returns True if the session
         existed and was marked.
         """
         with self._lock:
@@ -873,8 +872,8 @@ class SessionStore:
         """Mark recently-active sessions as resumable after an unexpected exit.
 
         Called on gateway startup after a crash or fast restart to preserve
-        in-flight sessions instead of destroying their conversation history
-        (#7536).  Only marks sessions updated within *max_age_seconds* to
+        in-flight sessions instead of destroying their conversation history.
+        Only marks sessions updated within *max_age_seconds* to
         avoid touching long-idle sessions.  Sets ``resume_pending=True`` so
         the next incoming message on the same session_key auto-resumes from
         the existing transcript.
@@ -1037,7 +1036,7 @@ class SessionStore:
             skip_db: When True, only write to JSONL and skip the SQLite write.
                      Used when the agent already persisted messages to SQLite
                      via its own _flush_messages_to_session_db(), preventing
-                     the duplicate-write bug (#860).
+                     the duplicate-write bug.
         """
         # Write to SQLite (unless the agent already handled it)
         if self._db and not skip_db:

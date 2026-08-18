@@ -1016,7 +1016,7 @@ def _build_child_agent(
     effective_provider = override_provider or getattr(parent_agent, "provider", None)
     effective_base_url = override_base_url or parent_agent.base_url
     effective_api_key = override_api_key or parent_api_key
-    # Bug #20558 / PR #20563: api_mode must NOT be inherited when the child uses a
+    # api_mode must NOT be inherited when the child uses a
     # different provider than the parent — each provider has its own API surface
     # (e.g. MiniMax uses anthropic_messages, DeepSeek uses chat_completions).
     # Inheriting the parent's mode causes 404 errors when the child routes to the
@@ -1040,7 +1040,7 @@ def _build_child_agent(
     # When override_provider is set (e.g. delegation.provider: minimax-cn),
     # the subagent must use direct API calls — not the parent's ACP transport.
     # Inheriting acp_command unconditionally causes run_agent.py to initialize
-    # an ACP client, bypassing override credentials entirely (issue #16816).
+    # an ACP client, bypassing override credentials entirely.
     if override_provider and not override_acp_command:
         effective_acp_command = None
         effective_acp_args = []
@@ -1130,6 +1130,7 @@ def _build_child_agent(
         iteration_budget=None,  # fresh budget per subagent
     )
     child._print_fn = getattr(parent_agent, "_print_fn", None)
+    child._skip_session_log = True
     # Set delegation depth so children can't spawn grandchildren
     child._delegate_depth = child_depth
     # Stash the post-degrade role for introspection (leaf if the
@@ -1180,7 +1181,7 @@ def _dump_subagent_timeout_diagnostic(
     """Write a structured diagnostic dump for a subagent that timed out
     before making any API call.
 
-    See issue #14726: users hit "subagent timed out after 300s with no response"
+    Users hit "subagent timed out after 300s with no response"
     with zero API calls and no way to inspect what happened. This helper
     writes a dedicated log under ``~/.easybci/logs/subagent-<sid>-<ts>.log``
     capturing the child's config, system-prompt / tool-schema sizes, activity
@@ -1493,7 +1494,7 @@ def _run_single_child(
             initargs=(_get_subagent_approval_callback(),),
         )
         # Capture the worker thread so the timeout diagnostic can dump its
-        # Python stack (see #14726 — 0-API-call hangs are opaque without it).
+        # Python stack (0-API-call hangs are opaque without it).
         _worker_thread_holder: Dict[str, Optional[threading.Thread]] = {"t": None}
 
         def _run_with_thread_capture():
@@ -1527,7 +1528,7 @@ def _run_single_child(
 
             # When a subagent times out BEFORE making any API call, dump a
             # diagnostic to help users (and us) see what the child was doing.
-            # See #14726 — without this, 0-API-call hangs are black boxes.
+            # Without this, 0-API-call hangs are black boxes.
             diagnostic_path: Optional[str] = None
             child_api_calls = 0
             try:
@@ -1697,8 +1698,8 @@ def _run_single_child(
             # Stripped before the dict is serialised back to the model.
             "_child_role": getattr(child, "_delegate_role", None),
             # Captured before child.close() so the parent aggregator can fold
-            # the child's total spend into the parent's session cost.  Port of
-            # Kilo-Org/kilocode#9448 — previously the footer only reflected the
+            # the child's total spend into the parent's session cost.
+            # Previously the footer only reflected the
             # parent's direct API calls and under-counted subagent-heavy runs.
             # Stripped before the dict is serialised back to the model.
             "_child_cost_usd": (
@@ -2239,7 +2240,7 @@ def delegate_task(
     except Exception:
         _invoke_hook = None
     # Aggregate child spend here so the parent's footer/UI reflect the true
-    # cost of a subagent-heavy turn.  Port of Kilo-Org/kilocode#9448.  Each
+    # cost of a subagent-heavy turn.  Each
     # child's cost was captured in _run_single_child before its AIAgent was
     # closed; we fold them into the parent in one pass alongside the
     # subagent_stop hook loop so we don't walk `results` twice.

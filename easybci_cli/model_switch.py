@@ -549,7 +549,7 @@ def resolve_display_context_length(
 
     When ``custom_providers`` is provided, per-model ``context_length``
     overrides from ``custom_providers[].models.<id>.context_length`` are
-    honored — this closes #15779 where ``/model`` switch ignored user-set
+    honored — previously ``/model`` switch ignored user-set
     overrides.
 
     Prefer the provider-aware value; fall back to ``model_info.context_window``
@@ -1043,13 +1043,13 @@ def list_authenticated_providers(
     )
 
     results: List[dict] = []
-    seen_slugs: set = set()  # lowercase-normalized to catch case variants (#9545)
+    seen_slugs: set = set()  # lowercase-normalized to catch case variants
     seen_mdev_ids: set = set()  # prevent duplicate entries for aliases (e.g. kimi-coding + kimi-coding-cn)
     # Effective base URLs of every built-in row we emit (normalized lower+rstrip).
     # Section 4 uses this to hide ``custom_providers`` entries that point at the
     # same endpoint as a built-in (e.g. a user-defined "my-dashscope" on
     # https://coding-intl.dashscope.aliyuncs.com/v1 collides with the built-in
-    # alibaba-coding-plan row when DASHSCOPE_API_KEY is present). Fixes #16970.
+    # alibaba-coding-plan row when DASHSCOPE_API_KEY is present).
     _builtin_endpoints: set = set()
 
     def _norm_url(url: str) -> str:
@@ -1154,7 +1154,7 @@ def list_authenticated_providers(
     for easybci_id, mdev_id in PROVIDER_TO_MODELS_DEV.items():
         # Skip aliases that map to the same models.dev provider (e.g.
         # kimi-coding and kimi-coding-cn both → kimi-for-coding).
-        # The first one with valid credentials wins (#10526).
+        # The first one with valid credentials wins.
         if mdev_id in seen_mdev_ids:
             continue
         pdata = data.get(mdev_id)
@@ -1274,7 +1274,7 @@ def list_authenticated_providers(
         # Fallback: check external credential files directly.
         # The credential pool gates anthropic behind
         # is_provider_explicitly_configured() to prevent auxiliary tasks
-        # from silently consuming Claude Code tokens (PR #4210).
+        # from silently consuming Claude Code tokens.
         # But the /model picker is discovery-oriented — we WANT to show
         # providers the user can switch to, even if they aren't currently
         # configured.
@@ -1551,7 +1551,7 @@ def list_authenticated_providers(
                 ):
                     # Guard against bare "custom" slug left by a prior
                     # failed switch — always resolve to the canonical
-                    # custom:<name> form.  (GH #17478)
+                    # custom:<name> form.
                     slug = (
                         current_provider
                         if current_provider and current_provider != "custom"
@@ -1617,7 +1617,7 @@ def list_authenticated_providers(
             if _pair_key[0] and _pair_key[1] and _pair_key in _section3_emitted_pairs:
                 continue
             # Skip if a built-in row (sections 1/2/2b) already represents this
-            # endpoint. Fixes #16970: a user-defined "my-dashscope" pointing at
+            # endpoint. A user-defined "my-dashscope" pointing at
             # https://coding-intl.dashscope.aliyuncs.com/v1 duplicates the
             # built-in alibaba-coding-plan row whenever DASHSCOPE_API_KEY is
             # set. The built-in row carries the curated model list, correct

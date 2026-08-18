@@ -192,7 +192,7 @@ def plan_recovery(
       2 (retry 2): Memory-based fix from past successful remedies
       3 (retry 3+): Suggest manual intervention or web research
 
-    T7 Sub-phase P-F — when ``operator_error`` is supplied as a
+    When ``operator_error`` is supplied as a
     :class:`easybci_lib.tools.neural_processing.operator_errors.EasyBCIOperatorError`:
       * ``recoverable=False`` → return an empty plan with action="surface"
         so the executor escalates straight to the user without burning
@@ -221,7 +221,7 @@ def plan_recovery(
     -------
     RecoveryPlan with fix actions and explanation.
     """
-    # T7 P-F — handle structured operator errors before generic recovery.
+    # Handle structured operator errors before generic recovery.
     try:
         from easybci_lib.tools.neural_processing.operator_errors import (
             EasyBCIOperatorError,

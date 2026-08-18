@@ -508,7 +508,7 @@ class BaseEnvironment(ABC):
         # Redirect stdout to /dev/null: on macOS (bash 3.2 and certain
         # Homebrew bash builds) sourcing a file containing ``declare -x``
         # can emit the declarations to stdout, leaking ~60 lines of env
-        # vars into every tool response (issue #15459).  Linux bash is
+        # vars into every tool response.  Linux bash is
         # silent here, but the redirect is harmless.
         if self._snapshot_ready:
             parts.append(
@@ -583,7 +583,7 @@ class BaseEnvironment(ABC):
         # pipe via ``fork()``.  Even after ``bash`` itself exits, the pipe
         # stays open because the grandchild still holds it — so the drain
         # thread never returns and the tool hangs for the full lifetime of
-        # the grandchild (issue #8340: users reported indefinite hangs when
+        # the grandchild (users reported indefinite hangs when
         # restarting uvicorn with ``setsid ... & disown``).
         #
         # The fix: select() with a short poll interval, and stop draining

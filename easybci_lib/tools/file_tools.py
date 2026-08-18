@@ -479,6 +479,31 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         if block_error:
             return json.dumps({"error": block_error})
 
+        # ── Source data read barrier ──────────────────────────────────
+        # Raw data files (registered via inspect_data / deep_inspect) must
+        # never enter LLM context. The LLM sees only structured fingerprints.
+        # Also blocks sibling files (event CSVs, label files) in the same
+        # source directory — those carry full trial-level data that bloats
+        # context without adding value (the inspection_report already
+        # summarizes events/labels).
+        try:
+            from easybci_agent.source_data_guard import is_source_data, is_inside_protected_dir
+            _resolved_str_guard = str(_resolved)
+            if is_source_data(_resolved_str_guard) or is_inside_protected_dir(_resolved_str_guard):
+                return json.dumps({
+                    "error": (
+                        f"Cannot read source data file '{path}' directly into context. "
+                        "Source data must be accessed through inspect_data / deep_inspect "
+                        "which produce structured fingerprints and summaries. "
+                        "If you need events/labels information, check the inspection_report's "
+                        "events_summary field in middle_process/inspection_report.json."
+                    ),
+                    "path": path,
+                    "blocked_by": "source_data_read_barrier",
+                }, ensure_ascii=False)
+        except ImportError:
+            pass
+
         # ── Dedup check ───────────────────────────────────────────────
         # If we already read this exact (path, offset, limit) and the
         # file hasn't been modified since, return a lightweight stub
@@ -743,7 +768,7 @@ def _update_read_timestamp(filepath: str, task_id: str) -> None:
     refreshes the stored timestamp to match the file's new state.
 
     Also invalidates the dedup cache for the written path so that
-    subsequent reads return fresh content (fixes #13144).
+    subsequent reads return fresh content.
     """
     # Invalidate dedup first (before acquiring lock for timestamp update).
     _invalidate_dedup_for_path(filepath, task_id)
@@ -990,7 +1015,19 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
             pattern=pattern, path=path, target=target, file_glob=file_glob,
             limit=limit, offset=offset, output_mode=output_mode, context=context
         )
+        # ── Source data content redaction ─────────────────────────────
+        # Strip match content from source data files so raw data never
+        # enters LLM context via grep results.
         if hasattr(result, 'matches'):
+            try:
+                from easybci_agent.source_data_guard import is_source_data
+                for m in result.matches:
+                    fp = getattr(m, 'file', None) or getattr(m, 'path', None) or ""
+                    if fp and is_source_data(str(fp)):
+                        if hasattr(m, 'content'):
+                            m.content = "[source data — use inspect_data/deep_inspect for structured access]"
+            except ImportError:
+                pass
             for m in result.matches:
                 if hasattr(m, 'content') and m.content:
                     m.content = redact_sensitive_text(m.content, code_file=True)

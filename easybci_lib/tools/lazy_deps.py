@@ -115,6 +115,15 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "neural.pyxdf": ("pyxdf==1.17.5",),
     "neural.pandas": ("pandas==2.3.3",),
     "neural.pynwb": ("pynwb==3.1.3", "hdmf==4.3.1"),
+    # Neuroscan Curry .cdt — MNE's Curry reader imports curryreader. Also
+    # shipped in the base neural extra; this entry is a first-use safety net so
+    # a session without the extra can still read .cdt without the raw-binary
+    # fallback.
+    "neural.curry": ("curryreader==0.1.2",),
+    # MS-Access event DB (Compumedics EVENTS.MDB). pandas-access also needs the
+    # system `mdbtools` package (mdb-export) — best-effort; pipeline degrades
+    # gracefully when either is absent (see io/psg_annotations.parse_events).
+    "neural.mdb": ("pandas-access==0.0.1",),
 
     # ─── Tools ─────────────────────────────────────────────────────────────
     # ACP adapter (VS Code / Zed / JetBrains integration)

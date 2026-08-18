@@ -5,18 +5,15 @@ work_dir layout MUST read from ``CANONICAL`` (or ``resolve_for_goal(...)``
 when it needs goal-conditional flags). Do not re-declare these constants
 elsewhere — grep for ``layout_spec.CANONICAL`` when adding a new consumer.
 
-See ``improved_docs/plans/strict-layout-enforcement/00-overview.md`` for
-the design.
+Consumers:
 
-Consumers (grow as later phases land):
-
-- ``contract_check.py``      Phase 0 (this)
-- ``layout_repair.py``       Phase 1 — detect + fix
-- ``neural_tools.py``        Phase 2 — verify_and_repair hook
-- ``services/gateway/run.py``Phase 2 — verify_and_repair hook
-- ``export/finalize.py``     Phase 2 — verify_and_repair on finalize
-- ``repair_layout`` tool     Phase 3 — schema derives required paths
-- ``pipeline`` SKILL.md      Phase 4 — Step 12 rewrite references CANONICAL
+- ``contract_check.py``       layout contract issues
+- ``layout_repair.py``        detect + fix
+- ``neural_tools.py``         verify_and_repair hook
+- ``services/gateway/run.py`` verify_and_repair hook
+- ``export/finalize.py``      verify_and_repair on finalize
+- ``repair_layout`` tool      schema derives required paths
+- ``pipeline`` SKILL.md       Step 12 references CANONICAL
 
 Any new consumer must be added here so we can grep the surface later.
 """

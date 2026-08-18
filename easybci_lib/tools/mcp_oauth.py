@@ -168,7 +168,7 @@ def _write_json(path: Path, data: dict) -> None:
     ``chmod`` opened a TOCTOU window where the temp file briefly inherited
     the process umask (commonly 0o644 = world-readable), exposing OAuth
     tokens to other local users between create and chmod. Mirrors the fix
-    in ``agent/google_oauth.py`` (#19673).
+    in ``agent/google_oauth.py``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     # Tighten parent dir to 0o700 so siblings can't traverse to the creds.
@@ -503,8 +503,8 @@ def _configure_callback_port(cfg: dict) -> int:
 
     NOTE: also sets the legacy module-level ``_oauth_port`` so existing
     calls to ``_wait_for_callback`` keep working. The legacy global is
-    the root cause of issue #5344 (port collision on concurrent OAuth
-    flows); replacing it with a ContextVar is out of scope for this
+    the root cause of port collision on concurrent OAuth
+    flows; replacing it with a ContextVar is out of scope for this
     consolidation PR.
     """
     global _oauth_port

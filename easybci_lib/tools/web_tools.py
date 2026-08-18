@@ -45,7 +45,7 @@ import re
 import asyncio
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
-# After the web-provider plugin migration (PR #25182), the Firecrawl SDK
+# After the web-provider plugin migration, the Firecrawl SDK
 # proxy, client construction, and response-shape normalizers all live in
 # plugins.web.firecrawl.provider. We re-export the names that external
 # code, integration tests, and unit-test patches reach for so the public
@@ -244,7 +244,7 @@ def _is_backend_available(backend: str) -> bool:
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
-# After PR #25182, the firecrawl client, lazy SDK proxy, dual-auth config
+# After the web-provider plugin migration, the firecrawl client, lazy SDK proxy, dual-auth config
 # resolution, response normalizers, and check_firecrawl_api_key() all live
 # in plugins.web.firecrawl.provider and are re-exported at the top of this
 # module so external callers (integration tests, tool-registry gating) and
@@ -265,7 +265,7 @@ def _web_requires_env() -> list[str]:
 
 
 # ─── Parallel / Tavily / Firecrawl helpers — moved into plugins ──────────────
-# After PR #25182, the per-vendor client construction, request helpers, and
+# After the web-provider plugin migration, the per-vendor client construction, request helpers, and
 # response normalizers all live in plugins.web.<vendor>.provider:
 #   - parallel: plugins/web/parallel/provider.py
 #   - tavily:   plugins/web/tavily/provider.py
@@ -724,7 +724,7 @@ def clean_base64_images(text: str) -> str:
 
 
 # ─── Exa / Parallel inline helpers — moved into plugins ──────────────────────
-# After PR #25182, the exa client + search/extract and parallel client +
+# After the web-provider plugin migration, the exa client + search/extract and parallel client +
 # search/extract helpers all live in their respective plugins:
 #   - plugins/web/exa/provider.py
 #   - plugins/web/parallel/provider.py

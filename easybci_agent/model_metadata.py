@@ -212,7 +212,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     "kimi": 262144,
     # Tencent — Hy3 Preview (Hunyuan) with 256K context window.
     # OpenRouter live metadata reports 262144 (256 × 1024); align the
-    # static fallback so cache and offline both agree (issue #22268).
+    # static fallback so cache and offline both agree.
     "hy3-preview": 262144,
     # Nemotron — NVIDIA's open-weights series (128K context across all sizes)
     "nemotron": 131072,
@@ -238,7 +238,7 @@ DEFAULT_CONTEXT_LENGTHS = {
 }
 
 # xAI Grok models that ACCEPT the `reasoning.effort` parameter on
-# api.x.ai. Verified live against /v1/responses 2026-05-10:
+# api.x.ai:
 #
 #   ACCEPTS effort:  grok-3-mini, grok-3-mini-fast, grok-4.20-multi-agent-0309,
 #                    grok-4.3
@@ -1329,7 +1329,6 @@ def get_model_context_length(
     # 0b. custom_providers per-model override — check before any probe.
     # This closes the gap where /model switch and display paths used to fall
     # back to 128K despite the user having a per-model context_length set.
-    # See #15779.
     if custom_providers and base_url and model:
         try:
             from easybci_cli.config import get_custom_provider_context_length

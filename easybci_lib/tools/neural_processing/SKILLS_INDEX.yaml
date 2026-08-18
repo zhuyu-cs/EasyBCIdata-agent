@@ -232,8 +232,10 @@ layers:
       - seeg
       - ecog
     - name: sleep_staging
-      description: ''
+      description: 'Polysomnography (PSG) sleep staging: keep EEG/EOG/EMG + respiratory/SpO2/effort/position; 30s AASM epochs; hypnogram labels.'
       path: paradigms/clinical/sleep_staging/SKILL.md
+      modalities:
+      - eeg
     - name: utah_array_motor
       description: Utah array (96 ch, motor cortex) — threshold MUA decoding for human
         motor BCI (BrainGate-class)
@@ -816,6 +818,25 @@ layers:
       - ecog
       - spike
       - fnirs
+    psg:
+    - name: respiratory_events
+      description: Detect apnea, hypopnea, and SpO2 desaturation events from PSG respiratory channels (AASM criteria)
+      path: operators/psg/respiratory_events/SKILL.md
+      step_string: respiratory_events
+      modalities:
+      - eeg
+    - name: plm_detect
+      description: Periodic Limb Movement (PLM) detection from leg EMG per WASM/AASM criteria
+      path: operators/psg/plm_detect/SKILL.md
+      step_string: plm_detect
+      modalities:
+      - eeg
+    - name: epoch_qc_sleep
+      description: 30-second epoch-level multi-channel quality scoring with hypnogram-aware thresholds
+      path: operators/psg/epoch_qc_sleep/SKILL.md
+      step_string: epoch_qc_sleep
+      modalities:
+      - eeg
     misc:
     - name: operators-index
       description: Index of all L3 atomic operators, grouped by algorithm family

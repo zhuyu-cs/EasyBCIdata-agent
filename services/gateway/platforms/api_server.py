@@ -948,7 +948,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 request_overrides = {}
 
         # Load fallback provider chain so the API server platform has the
-        # same fallback behaviour as Matrix (fixes #4954).
+        # same fallback behaviour as Matrix.
         fallback_model = GatewayRunner._load_fallback_model()
 
         agent = AIAgent(
@@ -1233,8 +1233,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 Replaces the old ``tool_progress_callback("tool.started",
                 ...)`` emit so SSE consumers receive a single event per
                 tool start, carrying both the legacy ``tool``/``emoji``/
-                ``label`` payload (for #6972 frontends) and the new
-                ``toolCallId``/``status`` correlation fields (#16588).
+                ``label`` payload (for legacy frontends) and the new
+                ``toolCallId``/``status`` correlation fields.
 
                 Skips tools whose names start with ``_`` so internal
                 events (``_thinking``, …) stay off the wire — matching
@@ -1338,7 +1338,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Decide finish_reason. OpenAI uses "length" for truncation, "stop"
         # for normal completion, and downstream SDKs accept "error" / custom
-        # codes. See issue #22496.
+        # codes.
         if is_partial and err_msg and "truncat" in err_msg.lower():
             finish_reason = "length"
         elif is_failed or (not completed and err_msg):
@@ -1460,8 +1460,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 Tagged tuples ``("__tool_progress__", payload)`` are sent
                 as a custom ``event: easybci.tool.progress`` SSE event so
                 frontends can display them without storing the markers in
-                conversation history.  See #6972 for the original event,
-                #16588 for the ``toolCallId``/``status`` lifecycle fields.
+                conversation history. The legacy event payload carries the
+                ``tool``/``emoji``/``label`` fields; the ``toolCallId``/``status`` lifecycle fields
+                were added later.
                 """
                 if isinstance(item, tuple) and len(item) == 2 and item[0] == "__tool_progress__":
                     event_data = json.dumps(item[1])
@@ -2747,8 +2748,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # preprocessing flow. Without this guard, a chat-only / early-stop
         # turn that merely set work_dir via mkdir + skill_view triggers a
         # 'modality=unknown' husk mini-repo whose plan/README later cannot
-        # be overwritten by a real second turn (see Bug #1/#2 in 2026-06-17
-        # report). Partial-status finalizes still proceed because the user
+        # be overwritten by a real second turn. Partial-status finalizes still proceed because the user
         # interrupted *something*, even if no intent file is on disk yet.
         if status == "ok" and not self._has_preprocessing_intent(work_dir):
             logger.info(
@@ -2807,7 +2807,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         Used by ``_maybe_finalize_neural_run`` to suppress premature finalize
         on chat-only / early-stop turns that would otherwise write a
-        misleading 'unknown' husk mini-repo (see 2026-06-17 bug report).
+        misleading 'unknown' husk mini-repo.
 
         Returns True when any one of these is on disk:
           - ``plan/proposal.json``         — propose_pipeline ran
@@ -2995,7 +2995,7 @@ class APIServerAdapter(BasePlatformAdapter):
             # trailing entry when it matches user_message). Without this
             # discount, prior_user was always ≥1 on the WebUI path and the
             # heuristic title NEVER fired — leaving every WebUI session NULL and
-            # showing the "Untitled Session" placeholder. (2026-08-13)
+            # showing the "Untitled Session" placeholder.
             history = conversation_history or []
             prior_user = sum(
                 1 for m in history
@@ -3442,7 +3442,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
                 # Check for structured failure (non-retryable client errors like
                 # 401/400 return failed=True instead of raising, so the except
-                # block below never fires — issue #15561).
+                # block below never fires).
                 if isinstance(result, dict) and result.get("failed"):
                     error_msg = result.get("error") or "agent run failed"
                     # Auto-finalize on structured failure (partial mode).
@@ -3948,7 +3948,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 return False
 
             # Refuse to start network-accessible with a placeholder key.
-            # Ported from openclaw/openclaw#64586.
             if is_network_accessible(self._host) and self._api_key:
                 try:
                     from easybci_cli.auth import has_usable_secret

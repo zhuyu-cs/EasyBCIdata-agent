@@ -44,7 +44,7 @@ _PROFILE_DIRS = [
     # Per-profile HOME for subprocesses: isolates system tool configs (git,
     # ssh, gh, npm …) so credentials don't bleed between profiles.  In Docker
     # this also ensures tool configs land inside the persistent volume.
-    # See easybci_lib.constants.get_subprocess_home() and issue #4426.
+    # See easybci_lib.constants.get_subprocess_home().
     "home",
 ]
 
@@ -251,7 +251,7 @@ def normalize_profile_name(name: str) -> str:
     Named profiles are stored lowercase under ``profiles/<id>/``. The special
     alias ``default`` is matched case-insensitively (``Default`` → ``default``).
     Dashboards and tools may pass title-cased display labels; normalize before
-    validation, assignment, and subprocess spawn (see issue #18498).
+    validation, assignment, and subprocess spawn.
     """
     if not isinstance(name, str):
         name = str(name)
@@ -270,7 +270,7 @@ def validate_profile_name(name: str) -> None:
     mixed-case or title-cased input from users (dashboard UI, CLI args) should
     call :func:`normalize_profile_name` first. This separation keeps validate
     honest about what the on-disk directory name must look like, while
-    ingress-point normalization handles UX flexibility (see #18498).
+    ingress-point normalization handles UX flexibility.
 
     Also rejects names in :data:`_RESERVED_NAMES` (``easybci``, ``test``,
     ``tmp``, ``root``, ``sudo``) that would create confusing on-disk

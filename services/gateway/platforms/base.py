@@ -1371,8 +1371,8 @@ class BasePlatformAdapter(ABC):
         support deletion return ``False`` and callers fall back to leaving
         the message in place.
 
-        Used by the stream consumer's fresh-final cleanup path (see
-        openclaw/openclaw#72038) to remove long-lived preview messages
+        Used by the stream consumer's fresh-final cleanup path
+        to remove long-lived preview messages
         after sending the completed reply as a fresh message so the
         platform's visible timestamp reflects completion time.
 
@@ -2207,8 +2207,7 @@ class BasePlatformAdapter(ABC):
         Returns True if a stale lock was healed.  Returns False if there is
         no lock, or the owner task is still alive (the normal busy case).
 
-        This is the on-entry safety net sidbin's issue #11016 analysis calls
-        for: without it, a split-brain — adapter still thinks the session is
+        This is the on-entry safety net: without it, a split-brain — adapter still thinks the session is
         active, but nothing is actually processing — traps the chat in
         infinite "Interrupting current task..." until the gateway is
         restarted.
@@ -2361,7 +2360,7 @@ class BasePlatformAdapter(ABC):
             _text, _eph_ttl = self._unwrap_ephemeral(response)
             # Send the response BEFORE cancelling the old task so the send
             # cannot be affected by task-cancellation side effects (race
-            # condition fix — issue #18912).  Previously the send happened
+            # condition fix).  Previously the send happened
             # after cancel_session_processing, which could silently drop the
             # "/new" confirmation when an agent was actively running.
             if _text:
@@ -2426,7 +2425,7 @@ class BasePlatformAdapter(ABC):
         # entry for this key but the owner task has already exited (done or
         # cancelled), the lock is stale.  Clear it and fall through to
         # normal dispatch so the user isn't trapped behind a dead guard —
-        # this is the split-brain tail described in issue #11016.
+        # this is the split-brain tail.
         if session_key in self._active_sessions:
             self._heal_stale_session_lock(session_key)
 
@@ -2441,7 +2440,6 @@ class BasePlatformAdapter(ABC):
             # Dispatch inline: call the message handler directly and send the
             # response.  Do NOT use _process_message_background — it manages
             # session lifecycle and its cleanup races with the running task
-            # (see PR #4926).
             cmd = event.get_command()
             from easybci_cli.commands import should_bypass_active_session
 
@@ -2497,7 +2495,7 @@ class BasePlatformAdapter(ABC):
             # Without this bypass: the message gets queued in
             # _pending_messages AND triggers an interrupt, killing the
             # agent run mid-clarify and discarding the user's answer.
-            # Same shape as the /approve deadlock fix (PR #4926) — both
+            # Same shape as the /approve deadlock fix — both
             # cases are "agent thread blocked on Event.wait, message must
             # reach the resolver before being treated as a new turn."
             if not cmd:
@@ -2660,7 +2658,7 @@ class BasePlatformAdapter(ABC):
             #
             # Suppress stale response when the session was interrupted by a
             # new message that hasn't been consumed yet.  The pending message
-            # is processed by the pending-message handler below (#8221/#2483).
+            # is processed by the pending-message handler below.
             if (
                 response
                 and interrupt_event.is_set()
@@ -2687,7 +2685,7 @@ class BasePlatformAdapter(ABC):
 
                 # Extract image URLs and send them as native platform attachments
                 images, text_content = self.extract_images(response)
-                # Strip any remaining internal directives from message body (fixes #1561)
+                # Strip any remaining internal directives from message body
                 text_content = text_content.replace("[[as_document]]", "").strip()
                 text_content = re.sub(r"MEDIA:\s*\S+", "", text_content).strip()
                 if images:
@@ -2848,7 +2846,7 @@ class BasePlatformAdapter(ABC):
                     _active.clear()
                 await _stop_typing_task()
                 # Spawn a fresh task for the pending message instead of
-                # recursing.  Issue #17758: `await
+                # recursing.  `await
                 # self._process_message_background(...)` here grew the
                 # call stack one frame per chained follow-up, and under
                 # sustained pending-queue activity the C stack would
@@ -2953,7 +2951,7 @@ class BasePlatformAdapter(ABC):
                     # session.  Re-queue the late-arrival event so that
                     # task picks it up — avoids spawning two concurrent
                     # _process_message_background tasks for the same key
-                    # (#17758 follow-up: prevents the create_task path
+                    # (prevents the create_task path
                     # from racing with itself across the in-band/finally
                     # boundary).
                     self._pending_messages[session_key] = late_pending

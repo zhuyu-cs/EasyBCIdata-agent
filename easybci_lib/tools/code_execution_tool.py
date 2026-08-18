@@ -965,7 +965,7 @@ def _execute_remote(
         timeout_msg = f"Script timed out after {timeout}s and was killed."
         result["error"] = timeout_msg
         # Include timeout message in output so the LLM always surfaces it
-        # to the user (see local path comment — same reasoning, #10807).
+        # to the user (see local path comment — same reasoning).
         if stdout_text:
             result["output"] = stdout_text + f"\n\n⏰ {timeout_msg}"
         else:
@@ -1361,7 +1361,7 @@ def execute_code(
                 status = "timeout"
                 break
             # Periodic activity touch so the gateway's inactivity timeout
-            # doesn't kill the agent during long code execution (#10807).
+            # doesn't kill the agent during long code execution.
             try:
                 from easybci_lib.tools.environments.base import touch_activity_if_due
                 touch_activity_if_due(_activity_state, "execute_code running")
@@ -1425,7 +1425,7 @@ def execute_code(
             # Include timeout message in output so the LLM always surfaces it
             # to the user.  When output is empty, models often treat the result
             # as "nothing happened" and produce an empty response, which the
-            # gateway stream consumer silently drops (#10807).
+            # gateway stream consumer silently drops.
             if stdout_text:
                 result["output"] = stdout_text + f"\n\n⏰ {timeout_msg}"
             else:

@@ -690,7 +690,7 @@ def setup_model_provider(config: dict, *, quick: bool = False):
     # Re-sync the wizard's config dict from what cmd_model saved to disk.
     # This is critical: cmd_model writes to disk via its own load/save cycle,
     # and the wizard's final save_config(config) must not overwrite those
-    # changes with stale values (#4172).
+    # changes with stale values.
     _refreshed = load_config()
     config["model"] = _refreshed.get("model", config.get("model"))
     if "custom_providers" in _refreshed:
@@ -1006,7 +1006,7 @@ def setup_agent_settings(config: dict):
 
     # ── Max Iterations ──
     # config.yaml is authoritative; read from there. If a legacy .env
-    # entry is still around (from pre-PR#18413 setups), prefer the
+    # entry is still around, prefer the
     # config value so we don't surface a stale number to the user.
     current_max = str(cfg_get(config, "agent", "max_turns", default=90))
     print_info("Maximum tool-calling iterations per conversation.")
@@ -1537,7 +1537,7 @@ def run_setup_wizard(args):
     config = load_config()
     easybci_home = get_easybci_home()
 
-    # Back up existing config before setup modifies it (#3522)
+    # Back up existing config before setup modifies it
     config_path = get_config_path()
     if config_path.exists():
         from datetime import datetime as _dt

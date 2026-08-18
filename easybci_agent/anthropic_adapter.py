@@ -147,7 +147,7 @@ def _get_anthropic_max_output(model: str) -> int:
 
 def _resolve_positive_anthropic_max_tokens(value) -> Optional[int]:
     """Return ``value`` floored to a positive int, or ``None`` if it is not a
-    finite positive number. Ported from openclaw/openclaw#66664.
+    finite positive number.
 
     Anthropic's Messages API rejects ``max_tokens`` values that are 0,
     negative, non-integer, or non-finite with HTTP 400. Python's ``or``
@@ -188,7 +188,7 @@ def _resolve_anthropic_messages_max_tokens(
     not, to keep the positive-value contract independent of endpoint
     specifics.
 
-    Ported from openclaw/openclaw#66664 (resolveAnthropicMessagesMaxTokens).
+    Mirrors ``resolveAnthropicMessagesMaxTokens``.
     """
     resolved = _resolve_positive_anthropic_max_tokens(requested)
     if resolved is not None:
@@ -240,7 +240,7 @@ def _supports_fast_mode(model: str) -> bool:
 
 
 # Beta headers for enhanced features that are safe on ordinary/native Anthropic
-# requests. As of Opus 4.7 (2026-04-16), these are GA on Claude 4.6+ — the
+# requests. These are GA on Claude 4.6+ — the
 # beta headers are still accepted (harmless no-op) but not required. Kept
 # here so older Claude (4.5, 4.1) + compatible endpoints that still gate on
 # the headers continue to get the enhanced features.
@@ -428,7 +428,6 @@ def _is_kimi_family_endpoint(base_url: str | None, model: str | None = None) -> 
 
     Used to decide whether to drop Anthropic's ``thinking`` kwarg and to
     preserve unsigned reasoning_content-derived thinking blocks on replay.
-    See easybci-agent#13848, #17057.
     """
     if _is_kimi_coding_endpoint(base_url):
         return True
@@ -457,7 +456,6 @@ def _is_deepseek_anthropic_endpoint(base_url: str | None) -> bool:
     policy used for Kimi's ``/coding`` endpoint.  The match is pinned to
     the ``/anthropic`` path so the OpenAI-compatible ``api.deepseek.com``
     base URL (which never reaches this adapter) is not misclassified.
-    See easybci-agent#16748.
     """
     if not base_url_host_matches(base_url or "", "api.deepseek.com"):
         return False
@@ -1210,12 +1208,12 @@ def normalize_model_name(model: str, preserve_dots: bool = False) -> str:
     if not preserve_dots:
         # Bedrock model IDs use dots as namespace separators
         # (e.g. "anthropic.claude-opus-4-7", "us.anthropic.claude-*").
-        # These must not be converted to hyphens.  See issue #12295.
+        # These must not be converted to hyphens.
         if _is_bedrock_model_id(model):
             return model
         # Only convert dots to hyphens for Anthropic/Claude models.
         # Non-Anthropic models (gpt-5.4, gemini-2.5, etc.) use dots
-        # as part of their canonical names.  See issue #17171.
+        # as part of their canonical names.
         _lower = model.lower()
         if _lower.startswith("claude-") or _lower.startswith("anthropic/"):
             model = model.replace(".", "-")
@@ -1287,7 +1285,7 @@ def convert_tools_to_anthropic(tools: List[Dict]) -> List[Dict]:
         name = fn.get("name", "")
         # Defensive dedup: Anthropic rejects requests with duplicate tool
         # names.  Upstream injection paths already dedup, but this guard
-        # converts a hard API failure into a warning.  See: #18478
+        # converts a hard API failure into a warning.
         if name and name in seen_names:
             logger.warning(
                 "convert_tools_to_anthropic: duplicate tool name '%s' "
@@ -1535,7 +1533,7 @@ def convert_messages_to_anthropic(
             # Kimi's /coding endpoint (Anthropic protocol) requires assistant
             # tool-call messages to carry reasoning_content when thinking is
             # enabled server-side.  Preserve it as a thinking block so Kimi
-            # can validate the message history.  See easybci-agent#13848.
+            # can validate the message history.
             #
             # Accept empty string "" — _copy_reasoning_content_for_api()
             # injects "" as a tier-3 fallback for Kimi tool-call messages
@@ -1750,7 +1748,7 @@ def convert_messages_to_anthropic(
     # synthesised from reasoning_content round-trip on subsequent turns when
     # thinking is enabled.  Signed Anthropic blocks still have to be stripped
     # (neither endpoint can validate Anthropic's signatures); unsigned blocks
-    # are preserved.  See easybci-agent#13848 (Kimi) and #16748 (DeepSeek).
+    # are preserved (Kimi and DeepSeek).
     _preserve_unsigned_thinking = (
         _is_kimi_family_endpoint(base_url, model)
         or _is_deepseek_anthropic_endpoint(base_url)
@@ -1919,7 +1917,7 @@ def build_anthropic_kwargs(
     # effective_max_tokens = output cap for this call (≠ total context window)
     # Use the resolver helper so non-positive values (negative ints,
     # fractional floats, NaN, non-numeric) fail locally with a clear error
-    # rather than 400-ing at the Anthropic API. See openclaw/openclaw#66664.
+    # rather than 400-ing at the Anthropic API.
     effective_max_tokens = _resolve_anthropic_messages_max_tokens(
         max_tokens, model, context_length=context_length
     )
@@ -2012,7 +2010,7 @@ def build_anthropic_kwargs(
     # tool call message at index N".  Kimi's reasoning is driven server-side
     # on the /coding route, so skip Anthropic's thinking parameter entirely
     # for that host.  (Kimi on chat_completions enables thinking via
-    # extra_body in the ChatCompletionsTransport — see #13503.)
+    # extra_body in the ChatCompletionsTransport.)
     #
     # On 4.7+ the `thinking.display` field defaults to "omitted", which
     # silently hides reasoning text that EasyBCI surfaces in its CLI. We

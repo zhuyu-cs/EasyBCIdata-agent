@@ -4,8 +4,8 @@ Context database by Volcengine (ByteDance) that organizes agent knowledge
 into a filesystem hierarchy (viking:// URIs) with tiered context loading,
 automatic memory extraction, and session management.
 
-Original PR #3369 by Mibayy, rewritten to use the full OpenViking session
-lifecycle instead of read-only search endpoints.
+Uses the full OpenViking session
+lifecycle rather than read-only search endpoints.
 
 Config via environment variables (profile-scoped via each profile's .env):
   OPENVIKING_ENDPOINT  — Server URL (default: http://127.0.0.1:1933)

@@ -7,8 +7,7 @@ tool calling.  Requests that violate it fail with HTTP 400:
     details: <...>
 
 Known rejection modes documented at
-https://forum.moonshot.ai/t/tool-calling-specification-violation-on-moonshot-api/102
-and MoonshotAI/kimi-cli#1595:
+https://forum.moonshot.ai/t/tool-calling-specification-violation-on-moonshot-api/102:
 
 1. Every property schema must carry a ``type``.  Standard JSON Schema allows
    type to be omitted (the value is then unconstrained); Moonshot refuses.

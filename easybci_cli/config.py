@@ -629,7 +629,7 @@ DEFAULT_CONFIG = {
     # payload sent to the model (keeping head + tail for terminal,
     # enforcing pagination for read_file). Tuning these trades context
     # footprint against how much raw output the model can see in one
-    # shot. Ported from anomalyco/opencode PR #23770.
+    # shot.
     #
     # - max_bytes:       terminal_tool output cap, in chars
     #                    (default 50_000 ≈ 12-15K tokens).
@@ -2007,7 +2007,7 @@ def _set_nested(config, dotted_key: str, value):
     overrides (e.g. setting ``a.b.c`` where ``a.b`` was previously a
     string).
 
-    Guards against #17876: before this fix the code unconditionally
+    Guards against a bug where the code unconditionally
     replaced any non-dict value (including lists) with ``{}``, silently
     destroying list-typed config like ``custom_providers`` whenever a
     caller used an indexed path.
@@ -2325,7 +2325,7 @@ def get_custom_provider_context_length(
 
     Before this helper existed, the lookup was duplicated in ``run_agent.py``'s
     startup path only; every other path (notably ``/model`` switch) fell back
-    to the 128K default.  See #15779.
+    to the 128K default.
     """
     if not model or not base_url:
         return None
@@ -2857,8 +2857,8 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     )
 
     # ── Version 22 → 23: seed curator defaults + create logs/curator/ ──
-    # The curator (background skill maintenance) was added in PR #16049, but
-    # existing configs from before that PR (or before the April 2026
+    # The curator (background skill maintenance) was added earlier, but
+    # existing configs from before that (or before the April 2026
     # unification under `auxiliary.curator`) never wrote the curator section
     # to disk. The runtime deep-merge in `load_config()` fills defaults at
     # read time, so the curator *functions*; but users can't see/edit the
@@ -3599,7 +3599,7 @@ def load_env() -> Dict[str, str]:
     Sanitizes lines before parsing so that corrupted files (e.g.
     concatenated KEY=VALUE pairs on a single line) are handled
     gracefully instead of producing mangled values such as duplicated
-    bot tokens.  See #8908.
+    bot tokens.
 
     The parsed dict is memoised keyed on the .env file mtime, because
     ``get_env_value()`` is called dozens-to-hundreds of times per
@@ -4251,7 +4251,7 @@ def set_config_value(key: str, value: str):
     
     # Handle nested keys (e.g., "web.backend") including numeric list
     # indices (e.g., "custom_providers.0.api_key").  Delegates to
-    # _set_nested which preserves list-typed nodes; before #17876 the
+    # _set_nested which preserves list-typed nodes; previously the
     # inline navigation here silently overwrote lists with dicts.
 
     # Convert value to appropriate type

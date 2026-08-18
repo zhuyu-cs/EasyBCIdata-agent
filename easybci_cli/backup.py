@@ -474,7 +474,7 @@ def run_import(args) -> None:
 # recursively; missing entries are silently skipped.  Pairing data lives in
 # platform-specific JSON blobs outside state.db, so it's listed here explicitly
 # — `easybci update` snapshots this set before pulling so approved-user lists
-# are recoverable if anything goes wrong (issue #15733).
+# are recoverable if anything goes wrong.
 _QUICK_STATE_FILES = (
     "state.db",
     "config.yaml",

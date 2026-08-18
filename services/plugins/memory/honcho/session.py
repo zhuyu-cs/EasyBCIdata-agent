@@ -287,8 +287,8 @@ class HonchoSessionManager:
         # platform-native ID, etc.) so multi-user
         # bots scope memory per user.  For a single-user
         # deployment the config-supplied ``peer_name`` is an unambiguous
-        # identity and we should keep it unified across platforms — see
-        # #14984.  Opt into that with ``hosts.<host>.pinPeerName: true`` in
+        # identity and we should keep it unified across platforms.
+        # Opt into that with ``hosts.<host>.pinPeerName: true`` in
         # ``honcho.json`` (or root-level ``pinPeerName: true``).
         # `is True` (not `bool(...)`) is deliberate: several multi-user tests
         # pass a ``MagicMock`` for ``config`` where ``mock.pin_peer_name``

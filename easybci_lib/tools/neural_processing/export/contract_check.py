@@ -118,7 +118,7 @@ def check_contract(work_dir, *, analysis_goal: str = "generic") -> List[Dict[str
             "path": str(figures_root),
         })
 
-    # T7 Sub-phase P-D — code standard check on the emitted pipeline.py.
+    # Code standard check on the emitted pipeline.py.
     issues.extend(_check_pipeline_code_standard(out_dir))
 
     return issues
@@ -312,10 +312,13 @@ def enumerate_pending(
             if not fig_dir.is_dir() or not any(fig_dir.glob(f"{stem}_*.png")):
                 missing.append("figures")
 
-            qc = (
+            qc_dir = (
                 wd / "preprocessed_output" / "QC_out"
-                / f"sub-{sub}" / f"ses-{ses}" / "qc_report.json"
+                / f"sub-{sub}" / f"ses-{ses}"
             )
+            qc = qc_dir / f"{stem}_qc_report.json"
+            if not qc.is_file():
+                qc = qc_dir / "qc_report.json"
             if not qc.is_file():
                 missing.append("qc_report")
 
@@ -483,7 +486,8 @@ def verify_layout_strict_multi(
             elif kind == "qc_report":
                 qc_dir = wd / "preprocessed_output" / "QC_out" / f"sub-{sub}" / f"ses-{ses}"
                 errors.append(
-                    f"missing qc_report.json for file_id={fid}: {qc_dir / 'qc_report.json'}"
+                    f"missing qc_report for file_id={fid}: "
+                    f"{qc_dir / f'{stem}_qc_report.json'}"
                 )
             elif kind == "ai_ready":
                 expect_epochs = (
@@ -571,7 +575,7 @@ def verify_layout_strict_multi(
 
 
 def _check_pipeline_code_standard(out_dir: Path) -> List[Dict[str, Any]]:
-    """T7 P-D — surface code-standard violations as contract issues so
+    """Surface code-standard violations as contract issues so
     ``validate_mini_repo`` / ``easybci finalize`` flag pipelines that fail
     the lint.  Best-effort: if the checker import fails (unexpected) we
     log and return zero issues rather than blocking finalize."""
@@ -832,8 +836,7 @@ def _build_skill_name(profile: Dict[str, Any], date_str: str) -> Optional[str]:
     # Without real modality+paradigm the name isn't meaningful enough to
     # crystallize. ``unknown`` / ``x`` / empty all signal that no real data
     # signature was captured — refusing the crystallization keeps the
-    # proven-pipeline library clean (2026-06-17 bug #5: an auto-finalized
-    # husk produced a polluting ``unknown-unknown-YYYYMMDD`` skill).
+    # proven-pipeline library clean.
     _REJECT = {"", "x", "unknown"}
     if mod in _REJECT or par in _REJECT:
         return None

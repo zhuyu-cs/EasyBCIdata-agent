@@ -744,10 +744,10 @@ def _configure_toolset(ts_key: str, config: dict):
 # Mirror of web search backends. Surfaces
 # every plugin-registered web provider so it appears in the
 # "Web Search & Extract" picker. All six providers (brave-free,
-# searxng, exa, parallel, tavily, firecrawl) live as plugins after
-# PR #25182 — this helper is the sole source of truth for the category's
+# searxng, exa, parallel, tavily, firecrawl) live as plugins;
+# this helper is the sole source of truth for the category's
 # provider rows. The hardcoded entries that used to drive the category
-# were deleted in the same PR; only the "Firecrawl Self-Hosted"
+# were deleted; only the "Firecrawl Self-Hosted"
 # non-provider UX row remains in TOOL_CATEGORIES because it describes
 # an alternative *setup flow* for the firecrawl backend rather than a
 # distinct provider.
@@ -760,7 +760,7 @@ def _plugin_web_search_providers() -> list[dict]:
     marker) so the picker behaves identically whether a provider is
     hardcoded or plugin-registered.
 
-    After PR #25182, all six web providers (brave-free, searxng,
+    All six web providers (brave-free, searxng,
     exa, parallel, tavily, firecrawl) are plugins; this helper is the sole
     source of provider rows for the Web Search & Extract category.
     """
@@ -810,7 +810,7 @@ def _visible_providers(cat: dict, config: dict) -> list[dict]:
             continue
         visible.append(provider)
 
-    # Inject plugin-registered web search backends. After PR #25182, this
+    # Inject plugin-registered web search backends. This
     # is the SOLE source of provider rows for the Web Search & Extract
     # category — the per-provider hardcoded entries were deleted. The
     # remaining hardcoded row ("Firecrawl Self-Hosted") is a non-provider

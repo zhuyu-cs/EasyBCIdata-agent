@@ -2,7 +2,7 @@
 MCP Server Management CLI — ``easybci mcp`` subcommand.
 
 Implements ``easybci mcp add/remove/list/test/configure`` for interactive
-MCP server lifecycle management (issue #690 Phase 2).
+MCP server lifecycle management.
 
 Relies on tools/mcp_tool.py for connection/discovery and keeps
 configuration in ~/.easybci/config.yaml under the ``mcp_servers`` key.

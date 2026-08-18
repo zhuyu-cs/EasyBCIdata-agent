@@ -712,8 +712,6 @@ def _global_auth_file_path() -> Optional[Path]:
     directory (classic mode, or custom EASYBCI_HOME that is not a profile).
     Used by read-only fallback paths so providers authed at the root are
     visible to profile processes that haven't configured them locally.
-
-    See issue #18594 follow-up (credential_pool shadowing).
     """
     try:
         from easybci_lib.constants import get_default_easybci_root
@@ -886,7 +884,7 @@ def _save_auth_store(auth_store: Dict[str, Any]) -> Path:
         # Create with 0o600 atomically via os.open(O_EXCL) + fdopen to close
         # the TOCTOU window where default umask (often 0o644) briefly exposed
         # OAuth tokens to other local users between open() and chmod().
-        # Mirrors agent/google_oauth.py (#19673) and tools/mcp_oauth.py (#21148).
+        # Mirrors agent/google_oauth.py and tools/mcp_oauth.py.
         fd = os.open(
             str(tmp_path),
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
@@ -979,7 +977,6 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     fully shadow global for that provider on the next read.
 
     Writes always go to the profile (``write_credential_pool`` is unchanged).
-    See issue #18594 follow-up.
     """
     auth_store = _load_auth_store()
     pool = auth_store.get("credential_pool")
@@ -1077,7 +1074,7 @@ def get_provider_auth_state(provider_id: str) -> Optional[Dict[str, Any]]:
     ``read_credential_pool``'s per-provider shadowing semantics so that
     ``_seed_from_singletons`` can reseed a profile's credential pool from
     global-scope provider state (e.g. a globally-authenticated Anthropic
-    OAuth. See issue #18594 follow-up.
+    OAuth.
     """
     auth_store = _load_auth_store()
     state = _load_provider_state(auth_store, provider_id)
@@ -1105,8 +1102,8 @@ def is_provider_explicitly_configured(provider_id: str) -> bool:
 
     This is used to gate auto-discovery of external credentials (e.g.
     Claude Code's ~/.claude/.credentials.json) so they are never used
-    without the user's explicit choice.  See PR #4210 for the same
-    pattern applied to the setup wizard gate.
+    without the user's explicit choice.  The same
+    pattern is applied to the setup wizard gate.
     """
     normalized = (provider_id or "").strip().lower()
 
@@ -1456,7 +1453,7 @@ def _save_qwen_cli_tokens(tokens: Dict[str, Any]) -> Path:
     tmp_path = auth_path.with_name(f"{auth_path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
     # Create with 0o600 atomically via os.open(O_EXCL) — closes the TOCTOU
     # window where write_text() + post-write chmod briefly exposed tokens
-    # at process umask (typically 0o644). See #19673, #21148.
+    # at process umask (typically 0o644).
     fd = os.open(
         str(tmp_path),
         os.O_WRONLY | os.O_CREAT | os.O_EXCL,

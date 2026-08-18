@@ -13,9 +13,6 @@ T9 (`01-skill-hierarchy-restructure`) defines four layers under
 Each non-L1 layer has a fixed list of *groups*. The enums live here and **only**
 here; documentation, consistency checker, and index regenerator must import
 them so the project never drifts between code and prose.
-
-See ``improved_docs/plans/post-phase-4-followups/01-skill-hierarchy-restructure/_DECISIONS.md``
-for the architectural contract.
 """
 
 from __future__ import annotations
@@ -54,6 +51,7 @@ L3_GROUPS: List[str] = [
     "source",
     "spike",
     "adaptive_cleaning",
+    "psg",
     "fnirs",
     "qc_operator",
     "misc",

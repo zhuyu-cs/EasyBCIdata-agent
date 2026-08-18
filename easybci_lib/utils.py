@@ -65,8 +65,7 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
     ``target``.  When ``target`` is a symlink, the symlink itself is
     replaced with a regular file — silently detaching managed deployments
     that symlink ``config.yaml`` / ``SOUL.md`` / ``auth.json`` etc. from
-    ``~/.easybci/`` to a git-tracked profile package or dotfiles repo
-    (GitHub #16743).
+    ``~/.easybci/`` to a git-tracked profile package or dotfiles repo.
 
     This helper resolves the symlink first so ``os.replace`` writes to
     the real file in-place while the symlink survives.  For non-symlink
@@ -123,7 +122,7 @@ def atomic_json_write(
             )
             f.flush()
             os.fsync(f.fileno())
-        # Preserve symlinks — swap in-place on the real file (GitHub #16743).
+        # Preserve symlinks — swap in-place on the real file.
         real_path = atomic_replace(tmp_path, path)
         _restore_file_mode(real_path, original_mode)
     except BaseException:
@@ -208,7 +207,7 @@ def atomic_yaml_write(
                 f.write(extra_content)
             f.flush()
             os.fsync(f.fileno())
-        # Preserve symlinks — swap in-place on the real file (GitHub #16743).
+        # Preserve symlinks — swap in-place on the real file.
         real_path = atomic_replace(tmp_path, path)
         _restore_file_mode(real_path, original_mode)
     except BaseException:

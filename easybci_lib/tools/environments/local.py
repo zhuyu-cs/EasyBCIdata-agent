@@ -22,8 +22,8 @@ def _resolve_safe_cwd(cwd: str) -> str:
     filesystem, but cheap belt-and-braces).
 
     Used by ``_run_bash`` to recover when the configured cwd is gone — most
-    commonly because a previous tool call deleted its own working directory
-    (issue #17558).  Without this guard, ``subprocess.Popen(..., cwd=...)``
+    commonly because a previous tool call deleted its own working directory.
+    Without this guard, ``subprocess.Popen(..., cwd=...)``
     raises ``FileNotFoundError`` before bash starts, wedging every subsequent
     terminal call until the gateway restarts.
     """
@@ -356,8 +356,8 @@ class LocalEnvironment(BaseEnvironment):
         run_env = _make_run_env(self.env)
 
         # Recover when the cwd has been deleted out from under us — usually by
-        # a previous tool call that ran ``rm -rf`` on its own working dir
-        # (issue #17558).  Popen would otherwise raise FileNotFoundError on
+        # a previous tool call that ran ``rm -rf`` on its own working dir.
+        # Popen would otherwise raise FileNotFoundError on
         # the cwd before bash starts, wedging every subsequent call until the
         # gateway restarts.
         safe_cwd = _resolve_safe_cwd(self.cwd)

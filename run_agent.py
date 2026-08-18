@@ -485,12 +485,10 @@ def _pool_may_recover_from_rate_limit(
 
     Additionally, Google CloudCode / Gemini CLI rate limits are ACCOUNT-level
     throttles — even a multi-entry pool shares the same quota window, so
-    rotation won't recover.  Skip straight to the fallback for those (#13636).
+    rotation won't recover.  Skip straight to the fallback for those.
 
     In those cases we must fall back to the configured ``fallback_model``
     instead.  Returns True only when rotation has somewhere to go.
-
-    See issues #11314 and #13636.
     """
     if pool is None:
         return False
@@ -642,12 +640,11 @@ class AIAgent:
 
     @session_id.setter
     def session_id(self, value: str) -> None:
-        # HARD INVARIANT (2026-08-13): a task that has NOT exited must NEVER
+        # HARD INVARIANT: a task that has NOT exited must NEVER
         # rotate to a new session id — because the JSON log filename is frozen
         # from this id at construction (session_log_file), any mid-run change
         # would mint a SECOND session_<newid>.json file and split one logical
-        # task across two transcripts. That is exactly the bug the user
-        # reported ("运行着运行着自动切成两个"). We lock the id for the duration
+        # task across two transcripts. We lock the id for the duration
         # of a run (see run_conversation) and reject any divergent write while
         # locked. Legitimate rotations (/new, /branch, /resume) happen only
         # BETWEEN runs, when the agent is idle and unlocked.
@@ -871,7 +868,7 @@ class AIAgent:
         # Responses there. ACP runtimes are excluded (they handle their own
         # routing and do not implement the Responses API surface).
         # When api_mode was explicitly provided, respect it — the user
-        # knows what their endpoint supports (#10473).
+        # knows what their endpoint supports.
         # Exception: Azure OpenAI serves gpt-5.x on /chat/completions and
         # does NOT support the Responses API — skip the upgrade for Azure
         # (openai.azure.com), even though it looks OpenAI-compatible.
@@ -995,7 +992,7 @@ class AIAgent:
         # Anthropic supports "5m" (default) and "1h" cache TTL tiers. Read from
         # config.yaml under prompt_caching.cache_ttl; unknown values keep "5m".
         # 1h tier costs 2x on write vs 1.25x for 5m, but amortizes across long
-        # sessions with >5-minute pauses between turns (#14971).
+        # sessions with >5-minute pauses between turns.
         self._cache_ttl = "5m"
         try:
             from easybci_cli.config import load_config as _load_pc_cfg
@@ -1012,7 +1009,7 @@ class AIAgent:
         # point we inject ONE message, allow one final API call, and if the
         # model doesn't produce a text response, force a user-message asking
         # it to summarise.  No intermediate pressure warnings — they caused
-        # models to "give up" prematurely on complex tasks (#7915).
+        # models to "give up" prematurely on complex tasks.
         self._budget_exhausted_injected = False
         self._budget_grace_call = False
 
@@ -1062,11 +1059,11 @@ class AIAgent:
         # single "\n\n" is prepended to the next real text delta.
         self._stream_needs_break = False
         # Stateful scrubber for <memory-context> spans split across stream
-        # deltas (#5719).  sanitize_context() alone can't survive chunk
+        # deltas.  sanitize_context() alone can't survive chunk
         # boundaries because the block regex needs both tags in one string.
         self._stream_context_scrubber = StreamingContextScrubber()
-        # Stateful scrubber for reasoning/thinking tags in streamed deltas
-        # (#17924).  Replaces the per-delta _strip_think_blocks regex that
+        # Stateful scrubber for reasoning/thinking tags in streamed deltas.
+        # Replaces the per-delta _strip_think_blocks regex that
         # destroyed downstream state (e.g. MiniMax-M2.7 streaming
         # '<think>' as delta1 and 'Let me check' as delta2 — the regex
         # erased delta1, so downstream state machines never learned a
@@ -1124,7 +1121,7 @@ class AIAgent:
             else:
                 # Only fall back to ANTHROPIC_TOKEN when the provider is actually Anthropic.
                 # Other anthropic_messages providers (MiniMax, Alibaba, etc.) must use their own API key.
-                # Falling back would send Anthropic credentials to third-party endpoints (Fixes #1739, #minimax-401).
+                # Falling back would send Anthropic credentials to third-party endpoints.
                 _is_native_anthropic = self.provider == "anthropic"
                 effective_key = (api_key or resolve_anthropic_token() or "") if _is_native_anthropic else (api_key or "")
                 self.api_key = effective_key
@@ -1135,7 +1132,7 @@ class AIAgent:
                 # (MiniMax, Kimi, GLM, LiteLLM proxies) that accept the
                 # Anthropic protocol must never trip OAuth code paths — doing
                 # so injects Claude-Code identity headers and system prompts
-                # that cause 401/403 on their endpoints.  Guards #1739 and
+                # that cause 401/403 on their endpoints.  Guards against
                 # the third-party identity-injection bug.
                 from easybci_agent.anthropic_adapter import _is_oauth_token as _is_oat
                 self._is_anthropic_oauth = _is_oat(effective_key) if _is_native_anthropic else False
@@ -1250,7 +1247,7 @@ class AIAgent:
                                 _env_hint = _pcfg.api_key_env_vars[0]
                         except Exception:
                             pass
-                        # --- Init-time fallback (#17929) ---
+                        # --- Init-time fallback ---
                         _fb_entries = []
                         if isinstance(fallback_model, list):
                             _fb_entries = [
@@ -1463,8 +1460,7 @@ class AIAgent:
         self._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
         self._compression_occurred = False  # set once a compression trims memory this run;
         # lets _save_session_log's never-shrink guard permit the JSON log to shrink to the
-        # post-compression working state (SQLite still holds full history). See
-        # improved_docs/plans/webui-history-json-shrink/plan.md.
+        # post-compression working state (SQLite still holds full history).
         self._session_db_created = False  # DB row deferred to run_conversation()
         self._session_init_model_config = {
             "max_iterations": self.max_iterations,
@@ -1621,7 +1617,7 @@ class AIAgent:
         self._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
 
         # App-level API retry count (wraps each model API call).  Default 3,
-        # overridable via agent.api_max_retries in config.yaml.  See #11616.
+        # overridable via agent.api_max_retries in config.yaml.
         try:
             _raw_api_retries = _agent_section.get("api_max_retries", 3)
             _api_retries = int(_raw_api_retries)
@@ -1888,7 +1884,7 @@ class AIAgent:
 
         # Inject context engine tool schemas (e.g. lcm_grep, lcm_describe, lcm_expand).
         # Skip names that are already present — the get_tool_definitions()
-        # quiet_mode cache returned a shared list pre-#17335, so a stray
+        # quiet_mode cache returned a shared list, so a stray
         # mutation here would poison subsequent agent inits in the same
         # Gateway process and trip provider-side 'duplicate tool name'
         # errors. Even with the cache fix, dedup is the right defense
@@ -2123,7 +2119,7 @@ class AIAgent:
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
         
-        # Turn counter (added after reset_session_state was first written — #2635)
+        # Turn counter (added after reset_session_state was first written)
         self._user_turn_count = 0
 
         # Context engine reset (works for both built-in compressor and plugins)
@@ -2277,7 +2273,7 @@ class AIAgent:
             from easybci_agent.model_metadata import get_model_context_length
             # Re-read custom_providers from live config so per-model
             # context_length overrides are honored when switching to a
-            # custom provider mid-session (closes #15779).
+            # custom provider mid-session.
             _sm_custom_providers = None
             try:
                 from easybci_cli.config import load_config, get_compatible_custom_providers
@@ -3297,8 +3293,7 @@ class AIAgent:
 
         Qwen / Alibaba-family models on OpenCode, OpenCode Go, and direct
         Alibaba (DashScope) also honour Anthropic-style ``cache_control``
-        markers on OpenAI-wire chat completions. Upstream pi-mono #3392 /
-        pi #3393 documented this for opencode-go Qwen. Without markers
+        markers on OpenAI-wire chat completions. Without markers
         these providers serve zero cache hits, re-billing the full prompt
         on every turn.
         """
@@ -3605,7 +3600,6 @@ class AIAgent:
             #   [{"type": "thinking", "thinking": "..."}, {"type": "output", ...}]
             # Without this branch the thinking text is silently dropped and the
             # next turn fails with HTTP 400 ("thinking must be passed back").
-            # Refs #21944.
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "thinking":
                     thinking_text = block.get("thinking") or block.get("text") or ""
@@ -3855,7 +3849,7 @@ class AIAgent:
         action" descriptions to surface to the user (e.g. "Memory updated").
         Tool messages already present in ``prior_snapshot`` are skipped so we
         don't re-surface stale results from the prior conversation that the
-        review agent inherited via ``conversation_history`` (issue #14944).
+        review agent inherited via ``conversation_history``.
 
         Matching is by ``tool_call_id`` when available, with a content-equality
         fallback for tool messages that lack one.
@@ -3935,7 +3929,7 @@ class AIAgent:
             # Install a non-interactive approval callback on this worker
             # thread so any dangerous-command guard the review agent trips
             # resolves to "deny" instead of falling back to input() -- which
-            # deadlocks against the parent's prompt_toolkit TUI (#15216).
+            # deadlocks against the parent's prompt_toolkit TUI.
             # Same pattern as _subagent_auto_deny in tools/delegate_tool.py.
             def _bg_review_auto_deny(command, description, **kwargs):
                 logger.warning(
@@ -3996,10 +3990,9 @@ class AIAgent:
                     # Without this, the fork rebuilds the system prompt from
                     # scratch (fresh _easybci_now() timestamp, fresh
                     # session_id, narrower toolset → different skills_prompt)
-                    # and the byte-exact prefix-cache key misses. See
-                    # issue #25322 and PR #17276 for the full analysis +
-                    # measured impact (~26% end-to-end cost reduction on
-                    # Sonnet 4.5).
+                    # and the byte-exact prefix-cache key misses. The
+                    # measured impact is ~26% end-to-end cost reduction on
+                    # Sonnet 4.5.
                     review_agent._cached_system_prompt = self._cached_system_prompt
                     # Defensive: pin session_start + session_id to the
                     # parent's so any code path that re-renders parts of
@@ -4010,6 +4003,7 @@ class AIAgent:
                     # if a future code path bypasses the cache.
                     review_agent.session_start = self.session_start
                     review_agent.session_id = self.session_id
+                    review_agent._skip_session_log = True
 
                     from easybci_lib.model_tools import get_tool_definitions
                     from easybci_cli.plugins import (
@@ -4064,7 +4058,7 @@ class AIAgent:
                 # already present in messages_snapshot must be skipped, since
                 # the review agent inherits that history and would otherwise
                 # re-surface stale "created"/"updated" messages from the prior
-                # conversation as if they just happened (issue #14944).
+                # conversation as if they just happened.
                 actions = self._summarize_background_review_actions(
                     review_messages,
                     messages_snapshot,
@@ -4167,6 +4161,8 @@ class AIAgent:
 
         Ensures conversations are never lost, even on errors or early returns.
         """
+        if getattr(self, "_skip_session_log", False):
+            return
         self._drop_trailing_empty_response_scaffolding(messages)
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
@@ -4331,7 +4327,7 @@ class AIAgent:
 
         Uses _last_flushed_db_idx to track which messages have already been
         written, so repeated calls (from multiple exit paths) only write
-        truly new messages — preventing the duplicate-write bug (#860).
+        truly new messages — preventing the duplicate-write bug.
         """
         if not self._session_db:
             return
@@ -4898,6 +4894,8 @@ class AIAgent:
         REASONING_SCRATCHPAD tags are converted to <think> blocks for consistency.
         Overwritten after each turn so it always reflects the latest state.
         """
+        if getattr(self, "_skip_session_log", False):
+            return
         messages = messages or self._session_messages
         if not messages:
             return
@@ -4920,8 +4918,7 @@ class AIAgent:
             # this run, a shorter write is LEGITIMATE (the JSON log mirrors the
             # working state; SQLite holds the full pre-compression history). Skip
             # the shrink check in that case so the log tracks the live state and
-            # can keep appending post-compression turns. See
-            # improved_docs/plans/webui-history-json-shrink/plan.md.
+            # can keep appending post-compression turns.
             if self.session_log_file.exists() and not getattr(
                 self, "_compression_occurred", False
             ):
@@ -5385,7 +5382,6 @@ class AIAgent:
         # accumulate per-session state (DAGs, summaries) leak that state from
         # the rotated-out session into whatever comes next under the same
         # compressor instance. Mirrors the call in shutdown_memory_provider().
-        # See issue #22394.
         if hasattr(self, "context_compressor") and self.context_compressor:
             try:
                 self.context_compressor.on_session_end(
@@ -5414,7 +5410,7 @@ class AIAgent:
         because the latter may carry injected skill content that bloats
         or breaks provider queries.
 
-        Interrupted turns are skipped entirely (#15218).  A partial
+        Interrupted turns are skipped entirely.  A partial
         assistant output, an aborted tool chain, or a mid-stream reset
         is not durable conversational truth — mirroring it into an
         external memory backend pollutes future recall with state the
@@ -5621,7 +5617,7 @@ class AIAgent:
         return joined
 
     # =========================================================================
-    # Pre/post-call guardrails (inspired by PR #1321 — @alireza78a)
+    # Pre/post-call guardrails
     # =========================================================================
 
     @staticmethod
@@ -5925,7 +5921,7 @@ class AIAgent:
            suffixes like ``TodoTool_tool`` reduce all the way.
         5. Fuzzy match (difflib, cutoff=0.7).
 
-        See #14784 for the original reports (TodoTool_tool, Patch_tool,
+        Handles the original failure reports (TodoTool_tool, Patch_tool,
         BrowserClick_tool were all returning "Unknown tool" before).
 
         Returns the repaired name if found in valid_tool_names, else None.
@@ -6094,7 +6090,7 @@ class AIAgent:
         from easybci_agent.auxiliary_client import _validate_base_url, _validate_proxy_env_urls
         # Treat client_kwargs as read-only. Callers pass self._client_kwargs (or shallow
         # copies of it) in; any in-place mutation leaks back into the stored dict and is
-        # reused on subsequent requests. #10933 hit this by injecting an httpx.Client
+        # reused on subsequent requests. This was hit by injecting an httpx.Client
         # transport that was torn down after the first request, so the next request
         # wrapped a closed transport and raised "Cannot send a request, as the client
         # has been closed" on every retry. The revert resolved that specific path; this
@@ -6141,13 +6137,13 @@ class AIAgent:
                 )
                 return client
         # Inject TCP keepalives so the kernel detects dead provider connections
-        # instead of letting them sit silently in CLOSE-WAIT (#10324).  Without
+        # instead of letting them sit silently in CLOSE-WAIT.  Without
         # this, a peer that drops mid-stream leaves the socket in a state where
         # epoll_wait never fires, ``httpx`` read timeout may not trigger, and
         # the agent hangs until manually killed.  Probes after 30s idle, retry
         # every 10s, give up after 3 → dead peer detected within ~60s.
         #
-        # Safety against #10933: the ``client_kwargs = dict(client_kwargs)``
+        # Safety against transport reuse: the ``client_kwargs = dict(client_kwargs)``
         # above means this injection only lands in the local per-call copy,
         # never back into ``self._client_kwargs``.  Each ``_create_openai_client``
         # invocation therefore gets its OWN fresh ``httpx.Client`` whose
@@ -6657,7 +6653,7 @@ class AIAgent:
         self._anthropic_api_key = new_token
         # Update OAuth flag — token type may have changed (API key ↔ OAuth).
         # Only treat as OAuth on native Anthropic; third-party endpoints using
-        # the Anthropic protocol must not trip OAuth paths (#1739 & third-party
+        # the Anthropic protocol must not trip OAuth paths (third-party
         # identity-injection guard).
         from easybci_agent.anthropic_adapter import _is_oauth_token
         self._is_anthropic_oauth = _is_oauth_token(new_token) if self.provider == "anthropic" else False
@@ -7008,7 +7004,7 @@ class AIAgent:
     def _reset_stream_delivery_tracking(self) -> None:
         """Reset tracking for text delivered during the current model response."""
         # Flush any benign partial-tag tail held by the think scrubber
-        # first (#17924): an innocent '<' at the end of the stream that
+        # first: an innocent '<' at the end of the stream that
         # turned out not to be a tag prefix should reach the UI.  Then
         # flush the context scrubber.  Order matters — the think
         # scrubber's output feeds into the context scrubber's state.
@@ -7099,7 +7095,7 @@ class AIAgent:
             prepended_break = False
         if isinstance(text, str):
             # Suppress reasoning/thinking blocks via the stateful
-            # scrubber (#17924).  Earlier versions ran _strip_think_blocks
+            # scrubber.  Earlier versions ran _strip_think_blocks
             # per-delta here, which destroyed downstream state machines
             # when a tag was split across deltas (e.g. MiniMax-M2.7
             # sends '<think>' and its content as separate deltas —
@@ -7113,7 +7109,7 @@ class AIAgent:
                 # Defensive: legacy callers without the scrubber attribute.
                 text = self._strip_think_blocks(text or "")
             # Then feed through the stateful context scrubber so memory-context
-            # spans split across chunks cannot leak to the UI (#5719).
+            # spans split across chunks cannot leak to the UI.
             scrubber = getattr(self, "_stream_context_scrubber", None)
             if scrubber is not None:
                 text = scrubber.feed(text)
@@ -8096,7 +8092,7 @@ class AIAgent:
         # Skip entries that resolve to the current (provider, model) — falling
         # back to the same backend that just failed loops the failure. Compare
         # base_url too so two distinct custom_providers entries pointing at the
-        # same shim/proxy URL also dedup. See issue #22548.
+        # same shim/proxy URL also dedup.
         current_provider = (getattr(self, "provider", "") or "").strip().lower()
         current_model = (getattr(self, "model", "") or "").strip()
         current_base_url = str(getattr(self, "base_url", "") or "").rstrip("/").lower()
@@ -8184,7 +8180,7 @@ class AIAgent:
 
             # Clear the per-config context_length override so the fallback
             # model's actual context window is resolved instead of inheriting
-            # the stale value from the previous model.  See #22387.
+            # the stale value from the previous model.
             self._config_context_length = None
             self.model = fb_model
             self.provider = fb_provider
@@ -8838,8 +8834,7 @@ class AIAgent:
         ``us.anthropic.claude-sonnet-4-5-20250929-v1:0``) and rejects
         the hyphenated form with
         ``HTTP 400 The provided model identifier is invalid``.
-        Regression for #11976; mirrors the opencode-go fix for #5211
-        (commit f77be22c), which extended this same allowlist."""
+        Guards against a regression that extended this same allowlist."""
         if (getattr(self, "provider", "") or "").lower() in {
             "alibaba", "minimax", "minimax-cn",
             "opencode-go", "opencode-zen",
@@ -9257,8 +9252,8 @@ class AIAgent:
         # ``reasoning_text`` above (either from structured fields or the
         # inline-block fallback), so the raw tags in content are redundant.
         # Leaving them in place caused reasoning to leak to messaging
-        # platforms (#8878, #9568), inflate context on subsequent turns
-        # (#9306 observed 16% content-size reduction on a real MiniMax
+        # platforms, inflate context on subsequent turns
+        # (observed 16% content-size reduction on a real MiniMax
         # session), and pollute generated session titles.  One strip at the
         # storage boundary cleans content for every downstream consumer:
         # API replay, session transcript, gateway delivery, CLI display,
@@ -9291,10 +9286,9 @@ class AIAgent:
             # string ("The reasoning content in the thinking mode must
             # be passed back to the API"). A space satisfies non-empty
             # checks everywhere without leaking fabricated reasoning.
-            # Refs #15250, #17400, #17341.
             msg["reasoning_content"] = reasoning_text or " "
 
-        # Additive fallback (refs #16844, #16884). Streaming-only providers
+        # Additive fallback. Streaming-only providers
         # (glm, MiniMax, gpt-5.x via aigw, Anthropic via openai-compat shims)
         # accumulate reasoning through ``delta.reasoning_content`` chunks
         # but never land it on the message object as a top-level attribute,
@@ -9311,10 +9305,10 @@ class AIAgent:
         # preserves every existing behavior:
         #   - SDK-exposed ``reasoning_content`` (OpenAI/Moonshot/DeepSeek SDK)
         #     still wins.
-        #   - DeepSeek tool-call ""-pad (#15250) still fires.
+        #   - DeepSeek tool-call ""-pad still fires.
         #   - Non-thinking turns with no reasoning leave the field absent,
         #     so ``_copy_reasoning_content_for_api``'s cross-provider leak
-        #     guard (#15748) and ``reasoning``→``reasoning_content``
+        #     guard and ``reasoning``→``reasoning_content``
         #     promotion tiers still apply at replay time.
         if "reasoning_content" not in msg and reasoning_text:
             msg["reasoning_content"] = reasoning_text
@@ -9404,8 +9398,7 @@ class AIAgent:
         """Return True when the active provider enforces reasoning_content echo-back.
 
         DeepSeek v4 thinking and Kimi / Moonshot thinking both reject replays
-        of assistant tool-call messages that omit ``reasoning_content`` (refs
-        #15250, #17400). Xiaomi MiMo thinking mode has the same requirement.
+        of assistant tool-call messages that omit ``reasoning_content``. Xiaomi MiMo thinking mode has the same requirement.
         """
         return (
             self._needs_deepseek_tool_reasoning()
@@ -9432,7 +9425,7 @@ class AIAgent:
 
         DeepSeek V4 thinking mode requires ``reasoning_content`` on every
         assistant tool-call turn; omitting it causes HTTP 400 when the
-        message is replayed in a subsequent API request (#15250).
+        message is replayed in a subsequent API request.
         """
         provider = (self.provider or "").lower()
         model = (self.model or "").lower()
@@ -9467,7 +9460,7 @@ class AIAgent:
         # (includes DeepSeek/Kimi's own space-placeholder written at creation
         # time, and any valid reasoning content from the same provider).
         #
-        # Exception: sessions persisted BEFORE #17341 have empty-string
+        # Exception: sessions persisted earlier have empty-string
         # placeholders pinned at creation time. DeepSeek V4 Pro rejects
         # those with HTTP 400. When the active provider enforces the
         # thinking-mode echo, upgrade "" → " " on replay so stale history
@@ -9482,7 +9475,7 @@ class AIAgent:
 
         needs_thinking_pad = self._needs_thinking_reasoning_pad()
 
-        # 2. Cross-provider poisoned history (#15748): on DeepSeek/Kimi,
+        # 2. Cross-provider poisoned history: on DeepSeek/Kimi,
         # if the source turn has tool_calls AND a 'reasoning' field but no
         # 'reasoning_content' key, the 'reasoning' text was written by a
         # prior provider (e.g. MiniMax) — DeepSeek's own _build_assistant_message
@@ -9492,7 +9485,7 @@ class AIAgent:
         # Inject a single space to satisfy the API without leaking another
         # provider's chain of thought to DeepSeek/Kimi. Space (not "")
         # because DeepSeek V4 Pro rejects empty-string reasoning_content
-        # in thinking mode (refs #17341).
+        # in thinking mode.
         normalized_reasoning = source_msg.get("reasoning")
         if (
             needs_thinking_pad
@@ -9506,8 +9499,7 @@ class AIAgent:
         # 3. Healthy session: promote 'reasoning' field to 'reasoning_content'
         # for providers that use the internal 'reasoning' key.
         # This must happen before the unconditional empty-string fallback so
-        # genuine reasoning content is not overwritten (#15812 regression in
-        # PR #15478).
+        # genuine reasoning content is not overwritten.
         if isinstance(normalized_reasoning, str) and normalized_reasoning:
             api_msg["reasoning_content"] = normalized_reasoning
             return
@@ -9519,7 +9511,7 @@ class AIAgent:
         # at all) and plain text turns. Space (not "") because DeepSeek V4
         # Pro tightened validation and rejects empty string with HTTP 400
         # ("The reasoning content in the thinking mode must be passed back
-        # to the API"). Refs #17341.
+        # to the API").
         if needs_thinking_pad:
             api_msg["reasoning_content"] = " "
             return
@@ -9708,7 +9700,7 @@ class AIAgent:
             except Exception:
                 pass
 
-        # A2 (2026-08-13): persist the FULL pre-compression history to SQLite
+        # Persist the FULL pre-compression history to SQLite
         # before the compressor discards the middle turns. SQLite is the WebUI
         # read source and must hold the complete conversation; compression only
         # trims what the model sees, never what we store or display.
@@ -9765,11 +9757,9 @@ class AIAgent:
             try:
                 if not self._session_db_created:
                     self._ensure_db_session()
-                # Compression is IN-PLACE (2026-08-13, A2): the logical task has
-                # NOT exited, so we keep the SAME session_id + JSON file. The old
-                # code ended the session and forked a new id/file here, which made
-                # a still-running task appear to "split into two" with the first
-                # half orphaned (parent message_count=0). The full pre-compression
+                # Compression is IN-PLACE: the logical task has
+                # NOT exited, so we keep the SAME session_id + JSON file. The full
+                # pre-compression
                 # history is already flushed to SQLite above; here we only trigger
                 # memory extraction and refresh the stored system-prompt snapshot.
                 self.commit_memory_session(messages)
@@ -9797,7 +9787,7 @@ class AIAgent:
         # per-session state (Hindsight's _document_id, accumulated turn buffers,
         # counters) refreshes. reset=False because the logical conversation
         # continues. Under A2 the id is unchanged; parent==self signals an
-        # in-place compression boundary rather than a rotation. See #6672.
+        # in-place compression boundary rather than a rotation.
         try:
             _old_sid = self.session_id
             if _old_sid and self._memory_manager:
@@ -9824,7 +9814,7 @@ class AIAgent:
         # Use estimate_request_tokens_rough() so tool schemas are included —
         # with 50+ tools enabled, schemas alone can add 20-30K tokens, and
         # omitting them delays the next compression cycle far past the
-        # configured threshold (issue #14695).
+        # configured threshold.
         _compressed_est = estimate_request_tokens_rough(
             compressed,
             system_prompt=new_system_prompt or "",
@@ -10185,7 +10175,7 @@ class AIAgent:
         # register them locally.  Without this, _get_approval_callback() in
         # terminal_tool returns None in ThreadPoolExecutor workers, causing
         # the dangerous-command prompt to fall back to input() — which
-        # deadlocks against prompt_toolkit's raw terminal mode (#13617).
+        # deadlocks against prompt_toolkit's raw terminal mode.
         _parent_approval_cb = _get_approval_callback()
         _parent_sudo_cb = _get_sudo_password_callback()
 
@@ -11398,7 +11388,6 @@ class AIAgent:
         # an effective count from prior user turns in conversation_history.
         # Idempotent: a cached agent that already accumulated counters keeps
         # them; only a freshly-built agent with empty in-memory state hydrates.
-        # See issue #22357.
         if conversation_history and self._user_turn_count == 0:
             prior_user_turns = sum(
                 1 for m in conversation_history if m.get("role") == "user"
@@ -12797,7 +12786,7 @@ class AIAgent:
                             # copy-paste) cause httpx to fail when encoding
                             # the Authorization header as ASCII.  This is the
                             # most common cause of persistent UnicodeEncodeError
-                            # that survives message/tool sanitization (#6843).
+                            # that survives message/tool sanitization.
                             _credential_sanitized = False
                             _raw_key = getattr(self, "api_key", None) or ""
                             if _raw_key:
@@ -12897,7 +12886,7 @@ class AIAgent:
                         # stripping the images. Match is narrow on
                         # purpose — keyed on the field-path apostrophe so
                         # we don't false-trip on other URL validation
-                        # errors. (issue #23570)
+                        # errors.
                         "image_url'. expected",
                         # DeepSeek's OpenAI-compatible API reports text-only
                         # request-body variants as:
@@ -12989,10 +12978,10 @@ class AIAgent:
                     # subscription"). Disable the beta for the rest of this
                     # session, rebuild the client, and retry once.  1M-capable
                     # subscriptions never hit this branch — they accept the
-                    # beta and keep full 1M context.  See PR #17680 for the
-                    # original report (we chose reactive recovery over the
+                    # beta and keep full 1M context.  We
+                    # chose reactive recovery over the
                     # proposed unconditional omit so capable subscriptions
-                    # don't silently lose the capability).
+                    # don't silently lose the capability.
                     if (
                         classified.reason == FailoverReason.oauth_long_context_beta_forbidden
                         and self.api_mode == "anthropic_messages"
@@ -13259,7 +13248,7 @@ class AIAgent:
                         # Don't eagerly fallback if credential pool rotation may
                         # still recover.  See _pool_may_recover_from_rate_limit
                         # for the single-credential-pool and CloudCode-quota
-                        # exceptions.  Fixes #11314 and #13636.
+                        # exceptions.
                         pool_may_recover = _pool_may_recover_from_rate_limit(
                             self._credential_pool,
                             provider=self.provider,
@@ -13327,8 +13316,8 @@ class AIAgent:
 
                     # Check for context-length errors BEFORE generic 4xx handler.
                     # The classifier detects context overflow from: explicit error
-                    # messages, generic 400 + large session heuristic (#1630), and
-                    # server disconnect + large session pattern (#2153).
+                    # messages, generic 400 + large session heuristic, and
+                    # server disconnect + large session pattern.
                     is_context_length_error = (
                         classified.reason == FailoverReason.context_overflow
                     )
@@ -13494,7 +13483,7 @@ class AIAgent:
                     # ValueError subclass, but it indicates a transient
                     # provider/network failure (malformed response body,
                     # truncated stream, routing layer corruption), not a
-                    # local programming bug, and should be retried (#14782).
+                    # local programming bug, and should be retried.
                     is_local_validation_error = (
                         isinstance(api_error, (ValueError, TypeError))
                         and not isinstance(
@@ -13560,7 +13549,7 @@ class AIAgent:
                         # context-overflow related (status 400 + large session).
                         # Persisting the failed user message would make the
                         # session even larger, causing the same failure on the
-                        # next attempt. (#1630)
+                        # next attempt.
                         if status_code == 400 and (approx_tokens > 50000 or len(api_messages) > 80):
                             self._vprint(
                                 f"{self.log_prefix}⚠️  Skipping session persistence "
@@ -14197,20 +14186,20 @@ class AIAgent:
                     # or provider returned no usage data), fall back to rough
                     # estimate to avoid missing compression.  Without this,
                     # a session can grow unbounded after disconnects because
-                    # should_compress(0) never fires.  (#2153)
+                    # should_compress(0) never fires.
                     _compressor = self.context_compressor
                     if _compressor.last_prompt_tokens > 0:
                         # Only use prompt_tokens — completion/reasoning
                         # tokens don't consume context window space.
                         # Thinking models (GLM-5.1, QwQ, DeepSeek R1)
                         # inflate completion_tokens with reasoning,
-                        # causing premature compression.  (#12026)
+                        # causing premature compression.
                         _real_tokens = _compressor.last_prompt_tokens
                     else:
                         # Include tool schemas — with 50+ tools enabled
                         # these add 20-30K tokens the messages-only
                         # estimate misses, which can skip compression
-                        # past the configured threshold (#14695).
+                        # past the configured threshold.
                         _real_tokens = estimate_request_tokens_rough(
                             messages, tools=self.tools or None
                         )
@@ -14306,7 +14295,7 @@ class AIAgent:
                         #      fallback above was skipped because the content
                         #      was mid-task narration, not a final answer)
                         # Instead of giving up, nudge the model to continue by
-                        # appending a user-level hint.  This is the #9400 case:
+                        # appending a user-level hint.  This handles the case where
                         # weaker models (mimo-v2-pro, GLM-5, etc.) sometimes
                         # return empty after tool results instead of continuing
                         # to the next step.  One retry with a nudge usually
@@ -14702,8 +14691,8 @@ class AIAgent:
         # If one or more ``write_file`` / ``patch`` calls failed during this
         # turn and were never superseded by a successful write to the same
         # path, append an advisory footer to the assistant response.  This
-        # catches the specific case — reported by Ben Eng (#15524-adjacent)
-        # — where a model issues a batch of parallel patches, half of them
+        # catches the specific case
+        # where a model issues a batch of parallel patches, half of them
         # fail with "Could not find old_string", and the model summarises
         # the turn claiming every file was edited.  The user then has to
         # manually run ``git status`` to catch the lie.  With this footer
@@ -14766,7 +14755,7 @@ class AIAgent:
         # Extract reasoning from the CURRENT turn only.  Walk backwards
         # but stop at the user message that started this turn — anything
         # earlier is from a prior turn and must not leak into the reasoning
-        # box (confusing stale display; #17055).  Within the current turn
+        # box (confusing stale display).  Within the current turn
         # we still want the *most recent* non-empty reasoning: many
         # providers (Claude thinking, DeepSeek v4, OpenAI Responses) emit
         # reasoning on the tool-call step and leave the final-answer step

@@ -47,7 +47,7 @@ def _sanitize_loaded_credentials() -> None:
     Emits a one-line warning to stderr when characters are stripped.
     Silent stripping would mask copy-paste corruption (Unicode lookalike
     glyphs from PDFs / rich-text editors, ZWSP from web pages) as opaque
-    provider-side "invalid API key" errors (see #6843).
+    provider-side "invalid API key" errors.
     """
     for key, value in list(os.environ.items()):
         if not any(key.endswith(suffix) for suffix in _CREDENTIAL_SUFFIXES):
@@ -99,8 +99,7 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
 
     python-dotenv does not handle corrupted lines where multiple
     KEY=VALUE pairs are concatenated on a single line (missing newline).
-    This produces mangled values — e.g. a bot token duplicated 8×
-    (see #8908).
+    This produces mangled values — e.g. a bot token duplicated 8×.
 
     We delegate to ``easybci_cli.config._sanitize_env_lines`` which
     already knows all valid EasyBCI env-var names and can split
@@ -158,7 +157,7 @@ def load_easybci_dotenv(
     user_env = home_path / ".env"
     project_env_path = Path(project_env) if project_env else None
 
-    # Fix corrupted .env files before python-dotenv parses them (#8908).
+    # Fix corrupted .env files before python-dotenv parses them.
     if user_env.exists():
         _sanitize_env_file_if_needed(user_env)
     if project_env_path and project_env_path.exists():

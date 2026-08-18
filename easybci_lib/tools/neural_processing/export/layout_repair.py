@@ -9,8 +9,8 @@ Each ``_fix_*`` function is a pure, idempotent operation:
   - Raises ``Unrepairable`` when the fix genuinely requires an outside
     subprocess and the caller passed ``allow_subprocess=False``.
 
-The public entry-point ``verify_and_repair(wd, ...)`` is added by Phase 2
-(orchestrator loop). This module intentionally exports the primitives +
+The public entry-point ``verify_and_repair(wd, ...)`` runs in the
+orchestrator loop. This module intentionally exports the primitives +
 data classes + ``detect_violations`` so it stays testable in isolation.
 """
 from __future__ import annotations
@@ -317,9 +317,8 @@ def _fix_missing_code_script(
     ``generator`` is a callable ``(script_name, target_path) -> None`` that
     writes the file. Passing ``None`` raises Unrepairable — this primitive
     is the wrapper for a codegen call, and without a generator we cannot
-    recover the file. The default production generator (added by Phase 2's
-    integration layer) dispatches to ``codegen.generator.generate_*_script``
-    based on ``script_name``.
+    recover the file. The default production generator dispatches to
+    ``codegen.generator.generate_*_script`` based on ``script_name``.
     """
     started = time.monotonic()
     target = wd / "code" / script_name
@@ -598,7 +597,7 @@ def detect_violations(
     return violations
 
 
-# --- Orchestrator (Phase 2) -------------------------------------------------
+# --- Orchestrator -------------------------------------------------
 
 @dataclass
 class RepairReport:
@@ -813,13 +812,11 @@ def verify_and_repair(
     return report
 
 
-# ---- L1 pipeline hygiene primitives (extends strict-layout-enforcement) ----
+# ---- L1 pipeline hygiene primitives ----
 #
-# These primitives close the last mechanical-hygiene gaps that SKILL.md used to
-# ask the LLM to perform by hand (see improved_docs/plans/pipeline-skill-to-code).
-# They are added here so they share the strict-layout-enforcement primitive
-# family (FixResult contract, sweep-dir convention, plan/repair_report.json
-# audit) rather than living in a new module.
+# These primitives handle mechanical-hygiene gaps in the generated pipeline.
+# They live here so they share the layout primitive family (FixResult contract,
+# sweep-dir convention, plan/repair_report.json audit) rather than in a new module.
 
 
 # Map handler stage name -> (source dirs to sweep, failed-side subdir name).

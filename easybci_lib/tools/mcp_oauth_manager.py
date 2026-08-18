@@ -23,7 +23,7 @@ go through `get_manager()`.
 Design reference:
 
 - Claude Code's ``invalidateOAuthCacheIfDiskChanged``
-  (``claude-code/src/utils/auth.ts:1320``, CC-1096 / GH#24317). Identical
+  (``claude-code/src/utils/auth.ts:1320``). Identical
   external-refresh staleness bug class.
 - Codex's ``refresh_oauth_if_needed`` / ``persist_if_needed``
   (``codex-rs/rmcp-client/src/rmcp_client.rs:805``). We lean on the MCP SDK's
@@ -104,7 +104,7 @@ def _make_easybci_provider_class() -> Optional[type]:
         visible to the running MCP session without requiring a restart.
 
         Reference: Claude Code's ``invalidateOAuthCacheIfDiskChanged``
-        (``src/utils/auth.ts:1320``, CC-1096 / GH#24317).
+        (``src/utils/auth.ts:1320``).
         """
 
         def __init__(self, *args: Any, server_name: str = "", **kwargs: Any):
@@ -310,7 +310,7 @@ def _make_easybci_provider_class() -> Optional[type]:
             #
             # The bridge below forwards each .asend() value into the inner
             # generator via inner.asend(incoming), preserving the bidirectional
-            # contract. Regression from PR #11383 caught by
+            # contract. Regression caught by
             # tests/tools/test_mcp_oauth_bidirectional.py.
             inner = super().async_auth_flow(request)
             try:

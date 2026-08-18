@@ -1,4 +1,4 @@
-"""T7 Sub-phase P-A.1 — Typed I/O contract for operator steps.
+"""Typed I/O contract for operator steps.
 
 Every EasyBCI operator function should consume / produce a dict shaped
 exactly like ``OperatorIO``.  The dataclass is the canonical reference;

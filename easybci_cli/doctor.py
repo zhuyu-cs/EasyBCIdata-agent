@@ -663,7 +663,7 @@ def run_doctor(args):
         except Exception:
             pass
 
-        # Detect stale root-level model keys (known bug source — PR #4329)
+        # Detect stale root-level model keys (known bug source)
         try:
             import yaml
             with open(config_path, encoding="utf-8") as f:
@@ -1689,7 +1689,7 @@ def run_doctor(args):
         print(color("─" * 60, Colors.GREEN))
         print(color("  All checks passed! 🎉", Colors.GREEN, Colors.BOLD))
 
-    # === Layout drift probe (Phase 5) ==========================================
+    # === Layout drift probe ==========================================
     # Peek at recent work_dirs from SessionDB and flag any that fail the layout
     # contract. Best-effort; failures are silent so an unrelated storage issue
     # doesn't break doctor.
@@ -1727,7 +1727,7 @@ def run_doctor(args):
 # Surfaces the same picture as GET /api/web-search/status on the dashboard
 # so the WebUI and CLI agree on what each provider's blocker is. Reads the
 # registry via the same diagnose_active_provider() helper that
-# research_preprocessing's strict gate uses (see Phase 3) — so "running
+# research_preprocessing's strict gate uses — so "running
 # `easybci doctor websearch`" tells the user precisely whether the next
 # plan_pipeline call will be allowed to consult the web.
 

@@ -132,7 +132,6 @@ def _apply_profile_override() -> None:
     # instead (e.g. systemd hardcodes EASYBCI_HOME=/root/.easybci), we must
     # still read active_profile — the user may have switched profiles via
     # `easybci profile use` and the gateway should honour that choice.
-    # See issue #22502.
     easybci_home_env = os.environ.get("EASYBCI_HOME", "")
     if profile_name is None and easybci_home_env:
         if Path(easybci_home_env).parent.name == "profiles":
@@ -1765,7 +1764,7 @@ def select_provider_and_model(args=None):
     # ── Post-switch cleanup: clear stale OPENAI_BASE_URL ──────────────
     # When the user switches to a named provider (anything except "custom"),
     # a leftover OPENAI_BASE_URL in ~/.easybci/.env can poison auxiliary
-    # clients that use provider:auto. Clear it proactively.  (#5161)
+    # clients that use provider:auto. Clear it proactively.
     if selected_provider not in {
         "custom",
         "cancel",
@@ -1780,7 +1779,7 @@ def _clear_stale_openai_base_url():
     After a provider switch, a leftover OPENAI_BASE_URL causes auxiliary
     clients (compression, vision, delegation) with provider:auto to route
     requests to the old custom endpoint instead of the newly selected
-    provider.  See issue #5161.
+    provider.
     """
     from easybci_cli.config import get_env_value, save_env_value, load_config
 
@@ -2907,7 +2906,7 @@ def _model_flow_custom(config):
         # Sync the caller's config dict so the setup wizard's final
         # save_config(config) preserves our model settings.  Without
         # this, the wizard overwrites model.provider/base_url with
-        # the stale values from its own config dict (#4172).
+        # the stale values from its own config dict.
         config["model"] = dict(model)
 
         print(f"Default model set to: {model_name} (via {effective_url})")
@@ -3540,7 +3539,7 @@ def _model_flow_named_custom(config, provider_info):
                 # key from ``key_env`` directly, and writing the resolved
                 # secret (or even a synthesized template) would silently
                 # downgrade credential hygiene on entries that intentionally
-                # keep plaintext out of ``config.yaml``. See issue #15803.
+                # keep plaintext out of ``config.yaml``.
                 original_api_key_ref = str(
                     provider_info.get("api_key_ref", "") or ""
                 ).strip()
@@ -5237,7 +5236,7 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
     if r2.returncode != 0:
         # Retry once after a short delay — covers boot-time races on Windows
         # (antivirus scanning Node.js binaries, npm cache not ready, transient
-        # I/O when launched via Scheduled Task at logon). See issue #23817.
+        # I/O when launched via Scheduled Task at logon).
         _time.sleep(3)
         r2 = subprocess.run(
             [npm, "run", "build"],
@@ -5256,7 +5255,7 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
 
         # If a stale dist exists, serve it as a fallback instead of failing.
         # A stale UI is far better than no UI for non-interactive callers
-        # (Windows Scheduled Tasks, CI) — issue #23817.
+        # (Windows Scheduled Tasks, CI).
         if dist_index.exists():
             _say("  ⚠ Web UI build failed — serving stale dist as fallback")
             if stderr_tail:
@@ -7085,7 +7084,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         # Snapshot critical state (state.db, config, pairing JSONs, etc.)
         # before pulling so a user can recover if something goes wrong.
-        # Issue #15733 reported missing pairing data after an update; even
+        # Missing pairing data was reported after an update; even
         # though `git pull` can't touch $EASYBCI_HOME, this is cheap
         # belt-and-suspenders insurance and gives the user something to
         # restore from via `/snapshot list` / `/snapshot restore <id>`.
@@ -7740,7 +7739,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                             # dead.  Clearing the failed state first makes
                             # the restart idempotent.  Mirrors the recovery
                             # path in `easybci gateway restart`
-                            # (`systemd_restart()`) as of PR #20949.
+                            # (`systemd_restart()`).
                             subprocess.run(
                                 scope_cmd + ["reset-failed", svc_name],
                                 capture_output=True,
@@ -7898,7 +7897,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 pass
 
             # --- Post-restart survivor sweep -----------------------------
-            # Issue #17648: some gateways ignore SIGTERM (stuck drain,
+            # Some gateways ignore SIGTERM (stuck drain,
             # blocked I/O, PID dead but zombie).  The detached profile
             # watchers wait 120s for the old PID to exit — if it never
             # does, no respawn happens and the user keeps hitting
@@ -7945,7 +7944,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # Warn if legacy EasyBCI gateway unit files are still installed.
         # When both easybci.service (from a pre-rename install) and the
         # current easybci-gateway.service are enabled, they SIGTERM-fight
-        # for the same bot token (see PR #11909). Flagging here means
+        # for the same bot token. Flagging here means
         # every `easybci update` surfaces the issue until the user migrates.
         try:
             from easybci_cli.gateway import (
@@ -8849,7 +8848,7 @@ def cmd_dashboard(args):
     elif getattr(args, "skip_build", False):
         # --skip-build trusts the caller to have pre-built the web UI.
         # Verify the dist actually exists; otherwise the server will start
-        # and serve 404s with no obvious cause (issue #23817).
+        # and serve 404s with no obvious cause.
         _dist_root = (
             Path(os.environ["EASYBCI_WEB_DIST"])
             if "EASYBCI_WEB_DIST" in os.environ
@@ -11160,7 +11159,7 @@ Examples:
         help="Profile name (default: inferred from archive)",
     )
 
-    # ---------- Distribution subcommands (issue #20456) ----------
+    # ---------- Distribution subcommands ----------
     profile_install = profile_subparsers.add_parser(
         "install",
         help="Install a profile distribution from a git URL or local directory",
@@ -11412,7 +11411,7 @@ Examples:
             sys.stderr = _saved_stderr
             # Help/version flags (exit code 0) already printed output —
             # re-raise immediately to avoid a second parse_args printing
-            # the same help text again (#10230).
+            # the same help text again.
             if exc.code == 0:
                 raise
             # Subcommand name was consumed as a flag value (e.g. -c model).
@@ -11458,7 +11457,7 @@ Examples:
             # MCP tool discovery — no event loop running in CLI/TUI startup,
             # so inline is safe.  Moved here from model_tools.py module scope
             # to avoid freezing the gateway's event loop on its first message
-            # via the same lazy import path (#16856).
+            # via the same lazy import path.
             from easybci_lib.tools.mcp_tool import discover_mcp_tools
 
             discover_mcp_tools()

@@ -4,8 +4,6 @@ Persistent memory via the ByteRover CLI (``brv``). Organizes knowledge into
 a hierarchical context tree with tiered retrieval (fuzzy text → LLM-driven
 search). Local-first with optional cloud sync.
 
-Original PR #3499 by hieuntg81, adapted to MemoryProvider ABC.
-
 Requires: ``brv`` CLI installed (npm install -g byterover-cli or
 curl -fsSL https://byterover.dev/install.sh | sh).
 
