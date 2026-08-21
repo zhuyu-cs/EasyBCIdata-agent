@@ -231,6 +231,9 @@ OPERATOR_SYNONYMS: Dict[str, Callable[[str], str]] = {
     "bad_channels": _syn_drop_bads,
     "drop_bad_channels": _syn_drop_bads,
     "reject_channels": _syn_drop_bads,
+    # Skill doc long-names → canonical short-names
+    "notch_filter": lambda p: f"notch:{p}" if p else "notch",
+    "bandpass_filter": lambda p: f"bandpass:{p}" if p else "bandpass",
 }
 
 

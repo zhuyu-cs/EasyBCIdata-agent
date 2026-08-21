@@ -1526,7 +1526,7 @@ def _override_notch_freq(steps, line_freq: float):
                 out.append(s)
             else:
                 out.append(f"notch:{int(round(line_freq))}")
-        elif isinstance(s, dict) and s.get("operator") == "notch_filter":
+        elif isinstance(s, dict) and s.get("operator") in ("notch", "notch_filter"):
             new = dict(s)
             new["params"] = dict(new.get("params") or {})
             new["params"]["freq"] = float(line_freq)
