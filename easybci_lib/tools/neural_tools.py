@@ -29,6 +29,7 @@ from easybci_lib.tools.neural_processing.progress.context import (
     end_stage_if_active,
     start_stage_if_active,
 )
+from easybci_lib.tools.neural_processing.return_budget import cap_return
 from easybci_lib.tools.registry import registry
 
 try:
@@ -84,6 +85,19 @@ _PENDING_QC_PAYLOADS: dict = {}
 # keeps the gate from failing with a confusing "auto-discovery failed" error
 # when middle_process/inspection_report.json is sitting right there on disk.
 _LAST_DEEP_INSPECT_WORK_DIR: str | None = None
+
+# Signal: set after proposal confirmation, consumed by the agent loop
+# to trigger a silent context prune of Phase 1 tool results.
+_PHASE1_COMPACT_REQUESTED: bool = False
+
+
+def consume_phase1_compact_signal() -> bool:
+    """Check and reset the Phase 1 compact signal. Called by the agent loop."""
+    global _PHASE1_COMPACT_REQUESTED
+    if _PHASE1_COMPACT_REQUESTED:
+        _PHASE1_COMPACT_REQUESTED = False
+        return True
+    return False
 
 
 def _resolve_timeout(raw) -> int | None:
@@ -692,6 +706,31 @@ DEEP_INSPECT_SCHEMA = {
             "timeout_s": {"type": "integer", "description": "Wall-clock cap in seconds; degrades if exceeded (default 300)"},
         },
         "required": ["data_path"],
+    },
+}
+
+INSPECT_DETAIL_SCHEMA = {
+    "name": "inspect_detail",
+    "description": (
+        "Retrieve detailed inspection data that was omitted from the compact "
+        "deep_inspect summary. Use when you need per-channel stats, full event "
+        "distributions, or other detail to make a decision."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "work_dir": {"type": "string", "description": "Preprocessing work directory"},
+            "aspect": {
+                "type": "string",
+                "enum": ["channel_stats", "events", "proven_matches"],
+                "description": "Which detail to retrieve",
+            },
+            "filter": {
+                "type": "string",
+                "description": "Optional filter (e.g. channel name pattern)",
+            },
+        },
+        "required": ["work_dir", "aspect"],
     },
 }
 
@@ -1691,7 +1730,7 @@ def _handle_inspect_data(args, **kw):
     except Exception as exc:
         logger.debug("Memory estimation failed: %s", exc)
 
-    return json.dumps(result, default=str)
+    return cap_return(result)
 
 
 def _guard_output_dir_collision(work_dir: str) -> dict | None:
@@ -2079,11 +2118,7 @@ def _handle_deep_inspect(args, **kw):
     if isinstance(result, dict) and result.get("success") and "next_action" not in result:
         result["next_action"] = {
             "next_tool": "plan_pipeline",
-            "hint": (
-                "Inspection is complete. Decide the analysis_goal and paradigm "
-                "from this report, then call plan_pipeline — do NOT re-inspect "
-                "the same data."
-            ),
+            "hint": "Inspection complete. Decide analysis_goal+paradigm, then call plan_pipeline.",
         }
         # C-2 speculative prewarm: kick off background research for the generic
         # goal now that modality is known, so a later plan_pipeline(goal=generic)
@@ -2107,8 +2142,54 @@ def _handle_deep_inspect(args, **kw):
                     _start_background_research(_prewarm_args)
         except Exception as _exc:  # noqa: BLE001 — prewarm must never break inspect
             logger.debug("deep_inspect research prewarm skipped: %s", _exc)
-    return json.dumps(result, ensure_ascii=False)
+    return cap_return(result)
 
+
+def _handle_inspect_detail(args, **kw):
+    """On-demand detail retrieval for data omitted from compact tool returns."""
+    work_dir = args.get("work_dir")
+    aspect = args.get("aspect")
+    name_filter = args.get("filter") or ""
+
+    if not work_dir or not aspect:
+        return json.dumps({"success": False, "error": "work_dir and aspect are required"})
+
+    work_path = Path(work_dir)
+    if not work_path.is_dir():
+        return json.dumps({"success": False, "error": f"work_dir not found: {work_dir}"})
+
+    if aspect == "channel_stats":
+        report_path = work_path / "middle_process" / "inspection_report.json"
+        if not report_path.is_file():
+            return json.dumps({"success": False, "error": "inspection_report.json not found"})
+        from easybci_lib.tools.neural_processing.io.inspection_report import load_inspection_report
+        from dataclasses import asdict as _asdict
+        report = load_inspection_report(report_path)
+        stats = [_asdict(c) for c in report.channel_stats]
+        if name_filter:
+            import re
+            pat = re.compile(name_filter, re.IGNORECASE)
+            stats = [s for s in stats if pat.search(s["name"])]
+        return json.dumps({"success": True, "aspect": "channel_stats",
+                           "count": len(stats), "channel_stats": stats})
+
+    elif aspect == "events":
+        report_path = work_path / "middle_process" / "inspection_report.json"
+        if not report_path.is_file():
+            return json.dumps({"success": False, "error": "inspection_report.json not found"})
+        from easybci_lib.tools.neural_processing.io.inspection_report import load_inspection_report
+        report = load_inspection_report(report_path)
+        if report.events_summary:
+            from dataclasses import asdict as _asdict
+            return json.dumps({"success": True, "aspect": "events",
+                               "events_summary": _asdict(report.events_summary)})
+        return json.dumps({"success": True, "aspect": "events", "events_summary": None})
+
+    elif aspect == "proven_matches":
+        return json.dumps({"success": False,
+                           "error": "proven_matches detail is available in suggest_pipeline return"})
+
+    return json.dumps({"success": False, "error": f"unknown aspect: {aspect}"})
 
 def _staged_proposal_steps(envelope: dict) -> list:
     """Extract the ``steps`` list from a staged proposal envelope.
@@ -2317,6 +2398,8 @@ def _handle_mark_proposal_confirmed(args, **kw):
         )
         if autofix_state.exists():
             autofix_state.unlink()
+        global _PHASE1_COMPACT_REQUESTED
+        _PHASE1_COMPACT_REQUESTED = True
         return json.dumps({
             "success": True,
             "marker_written": True,
@@ -3767,8 +3850,12 @@ def _handle_suggest_pipeline(args, **kw):
 
     # Include proven pipeline matches
     if proven_matches:
-        result["proven_matches"] = [m.to_dict() for m in proven_matches]
         best = proven_matches[0]
+        result["proven_matches"] = [best.to_dict()] + [
+            {"name": m.entry.name, "similarity": round(m.similarity, 3),
+             "modality": m.entry.modality, "steps": m.entry.steps}
+            for m in proven_matches[1:3]
+        ]
         # Strict analysis_goal gate for Reuse Mode: emit proven_recommendation
         # (which the SKILL.md Step 4 contract treats as a hard signal to Reuse)
         # only when the matched entry's analysis_goal exactly equals the query
@@ -3796,9 +3883,7 @@ def _handle_suggest_pipeline(args, **kw):
                         "name": best.entry.name,
                         "similarity": round(best.similarity, 2),
                         "reasons": _adapted.out_of_range_reasons,
-                        "note": ("Reference skill matched on similarity but this "
-                                 "recording is out of adaptation range — fall back "
-                                 "to New-Plan Mode or ask the user to confirm."),
+                        "note": "Out of adaptation range — fall back to New-Plan Mode.",
                     }
                 else:
                     result["proven_recommendation"] = {
@@ -3811,19 +3896,18 @@ def _handle_suggest_pipeline(args, **kw):
                         "reference_origin": getattr(best.entry, "reference_origin", ""),
                         "adaptation_report": _adapted.self_report,
                         "qc_baselines": getattr(best.entry, "qc_baselines", {}),
-                        "reuse_note": (
-                            "ADAPTIVE REFERENCE REUSE. Step KINDS + ORDER are anchored "
-                            "to this proven skill; numeric params (bad channels, notch "
-                            "freqs, resample target, reject segments) were recomputed "
-                            "from THIS recording's deep_inspect — see adaptation_report. "
-                            "Pass adaptation_report through to proposal.json/reasoning.md "
-                            "verbatim (原值→实测→采用) for auditability. Do NOT copy the "
-                            "gold standard's raw numeric values."
-                        ),
-                        "note": (
-                            f"Adaptive reference '{best.entry.name}' (similarity "
-                            f"{best.similarity:.0%}): skeleton locked, values adapted. "
-                            f"Steps: {' → '.join(_adapted.steps)}"
+                        "reuse_note": "Adaptive reference: skeleton locked, values adapted from this recording.",
+                    }
+                    result["next_action"] = {
+                        "next_tool": "batch_process_adaptive",
+                        "must_present": True,
+                        "workflow": "reference_adaptive",
+                        "hint": (
+                            "A proven reference skill exists. Load the "
+                            "reference_adaptive workflow: "
+                            "skill_view('pipeline/workflows/reference_adaptive') "
+                            "and follow it. Use batch_process_adaptive — do NOT "
+                            "write custom scripts (work_dir is sealed)."
                         ),
                     }
             else:
@@ -3833,18 +3917,17 @@ def _handle_suggest_pipeline(args, **kw):
                     "similarity": round(best.similarity, 2),
                     "analysis_goal": best.entry.analysis_goal,
                     "reuse_contract": "full_flow_required",
-                    "reuse_note": (
-                        "PROVEN PIPELINE MATCHED. Open pipeline/SKILL.md "
-                        "Step 2.0 'PROVEN-PIPELINE REUSE CONTRACT' for the hard rules. "
-                        "Lock steps + params + analysis_goal + web_evidence from this skill, "
-                        "but Steps 0, 1, 1.5(verify), 5, 6, 6b, 7, 8, 9(patch reuse history), 10 "
-                        "MUST run in full. Per-Step Rationale must be passed verbatim to "
-                        "export_repo's `reasoning` arg — do NOT regenerate it."
-                    ),
-                    "note": (
-                        f"Proven pipeline '{best.entry.name}' (similarity "
-                        f"{best.similarity:.0%}) available as locked reference. "
-                        f"Steps: {' → '.join(best.entry.steps)}"
+                    "reuse_note": "Proven pipeline matched. Lock steps+params; run full flow per SKILL.md Step 2.0.",
+                }
+                result["next_action"] = {
+                    "next_tool": "batch_process_adaptive",
+                    "must_present": True,
+                    "workflow": "reference_adaptive",
+                    "hint": (
+                        "A proven skill matched. Load the reference_adaptive "
+                        "workflow: skill_view('pipeline/workflows/reference_adaptive') "
+                        "and follow it. Use batch_process_adaptive — do NOT "
+                        "write custom scripts (work_dir is sealed)."
                     ),
                 }
         elif best.similarity > 0.6 and best.entry.steps:
@@ -3874,13 +3957,9 @@ def _handle_suggest_pipeline(args, **kw):
 
     if web_evidence and web_evidence.get("confidence", 0) > 0.3:
         result["web_evidence"] = _compact_web_evidence_for_context(web_evidence)
-        result["note"] = (
-            f"Standard recommendations provided. Web research (confidence: "
-            f"{web_evidence['confidence']:.0%}) suggests additional considerations. "
-            f"Review evidence before finalizing pipeline."
-        )
+        result["note"] = f"Web research confidence: {web_evidence['confidence']:.0%}."
     else:
-        result["note"] = "Standard recommendations. Adjust based on data quality checks."
+        result["note"] = "Standard recommendations."
 
     # Surface the web_evidence prepared by _handle_plan_pipeline
     # (mandatory call when research_preprocessing is available). Falls back to
@@ -3916,13 +3995,10 @@ def _handle_suggest_pipeline(args, **kw):
     if result.get("success") and "next_action" not in result:
         result["next_action"] = {
             "next_tool": "propose_pipeline",
-            "hint": (
-                "Recommendations ready. Call propose_pipeline to stage a "
-                "concrete proposal for the user — no need to re-run suggest."
-            ),
+            "hint": "Call propose_pipeline to stage a concrete proposal.",
         }
 
-    return json.dumps(result)
+    return cap_return(result)
 
 
 def _research_for_suggestion(modality, paradigm, user_intent, level):
@@ -4407,20 +4483,6 @@ def _handle_propose_pipeline_evidence(args, **kw):
     # returns a `viz` field and the SKILL.md CONFIRM step tells the LLM to
     # render it; the evidence branch historically returned only prose
     # (reasoning_preview), which let weaker models collapse the confirmation to
-    # a bare "confirm?" without showing the pipeline. Emit the same structured
-    # viz here (operator + params + rationale per step) so the numbered
-    # pipeline is always presentable without the model having to parse prose.
-    _viz_steps = []
-    for _i, _s in enumerate(raw_steps):
-        _step_viz = {
-            "name": _s.get("operator", "") or "",
-            "method": str(_s.get("method", "") or ""),
-            "params": _s.get("params", {}) or {},
-        }
-        if _i < len(rationale) and rationale[_i]:
-            _step_viz["rationale"] = rationale[_i]
-        _viz_steps.append(_step_viz)
-
     _evidence_propose_result = {
         "success": True,
         "work_dir": output_path,
@@ -4432,8 +4494,11 @@ def _handle_propose_pipeline_evidence(args, **kw):
         "paradigm": paradigm,
         "analysis_goal": analysis_goal,
         "web_evidence": _compact_web_evidence_for_context(_evidence_payload),
-        "proposal": {k: v for k, v in proposal.items() if k != "web_evidence"},
-        "reasoning_preview": reasoning_md_text,
+        "proposal": {
+            k: ([{sk: sv for sk, sv in s.items() if sk != "param_evidence"}
+                 for s in v] if k == "steps" and isinstance(v, list) else v)
+            for k, v in proposal.items() if k != "web_evidence"
+        },
         "presentation_block": reasoning_md_text,
         "presented_steps_expected": [
             s.get("operator") for s in (proposal.get("steps") or [])
@@ -4441,32 +4506,9 @@ def _handle_propose_pipeline_evidence(args, **kw):
         ],
         "next_action": {
             "next_tool": "mark_proposal_confirmed",
-            "hint": (
-                "Present the FULL pipeline (presentation_block, every step + "
-                "rationale) to the user and wait for their decision. THEN call "
-                "mark_proposal_confirmed(user_decision=..., presented_steps=<the "
-                "operators you showed, = presented_steps_expected>). Confirmation "
-                "is REJECTED if presented_steps doesn't match — do NOT re-propose "
-                "unless the user asks for changes."
-            ),
+            "hint": "Show full pipeline to user, then call mark_proposal_confirmed(user_decision=..., presented_steps=presented_steps_expected).",
         },
-        "viz": {
-            "type": "pipeline_flow",
-            "steps": _viz_steps,
-        },
-        "note": (
-            "Proposal STAGED at middle_process/proposal.staged.json. "
-            "plan/ will materialize only after mark_proposal_confirmed("
-            "user_decision='confirm'). BEFORE calling mark_proposal_confirmed "
-            "you MUST present the FULL pipeline to the user in chat: paste the "
-            "`presentation_block` (or enumerate every step from `viz.steps` / "
-            "`proposal.steps`) as a numbered list — each with its operator, "
-            "params, and rationale — then ask them to confirm / modify / abort. "
-            "Never ask for confirmation without showing the steps; the expert "
-            "cannot judge a pipeline they cannot see. When you confirm, you MUST "
-            "pass presented_steps (= presented_steps_expected) as PROOF you "
-            "showed the full pipeline, or confirmation is rejected."
-        ),
+        "note": "Present presentation_block to user, then call mark_proposal_confirmed.",
     }
     try:
         from easybci_lib.tools.neural_processing.preprocess.scenario import get_scenario
@@ -4475,7 +4517,7 @@ def _handle_propose_pipeline_evidence(args, **kw):
             _evidence_propose_result["scenario_bias"] = _sc.param_bias_notes
     except Exception:
         pass
-    return json.dumps(_evidence_propose_result, default=str)
+    return cap_return(_evidence_propose_result)
 
 
 def _handle_propose_pipeline(args, **kw):
@@ -4769,18 +4811,11 @@ def _handle_propose_pipeline(args, **kw):
         "output_cleanup_applied": bool(_output_cleanup_applied),
         "web_evidence": _compact_web_evidence_for_context(_evidence_payload),
         "awaiting_confirmation": True,
-        "note": (
-            "Proposal STAGED at middle_process/proposal.staged.json. "
-            "plan/ + pipeline.yaml materialize only after mark_proposal_confirmed("
-            "user_decision='confirm'). Present this proposal to the user "
-            "in chat (use the `viz` field below), then call "
-            "mark_proposal_confirmed with their decision."
-        ),
+        "note": "Present proposal to user via viz.steps, then call mark_proposal_confirmed.",
         "negatives_hint": args.get("_negatives_block") or "",
         "viz": {
             "type": "pipeline_flow",
             "steps": viz_steps,
-            "yaml": yaml_str,
         },
     }
     try:
@@ -4790,7 +4825,7 @@ def _handle_propose_pipeline(args, **kw):
             _propose_result["scenario_bias"] = _sc.param_bias_notes
     except Exception:
         pass
-    return json.dumps(_propose_result)
+    return cap_return(_propose_result)
 
 
 def _assemble_reuse_provenance(proposal: dict, *, reuse_source: str,
@@ -6168,7 +6203,7 @@ def _handle_batch_process(args, **kw):
     except Exception as exc:
         logger.debug("Batch summary generation failed: %s", exc)
 
-    return json.dumps(result, default=str)
+    return cap_return(result)
 
 
 def _aggregate_batch_label_diagnostics(work_dir: Path) -> dict:
@@ -6412,7 +6447,7 @@ def _handle_batch_process_adaptive(args, **kw):
             "(raw → preprocessed size + reduction). Do NOT summarize it away; the "
             "user wants the before/after size at a glance."),
     }
-    return json.dumps(result, default=str)
+    return cap_return(result)
 
 
 def _render_batch_completion_block(result):
@@ -6522,6 +6557,16 @@ registry.register(
     handler=_handle_deep_inspect,
     check_fn=_check_neural_requirements,
     emoji="\U0001f50d",
+)
+
+# 1c. inspect_detail — on-demand detail retrieval for compact deep_inspect returns
+registry.register(
+    name="inspect_detail",
+    toolset="neural",
+    schema=INSPECT_DETAIL_SCHEMA,
+    handler=_handle_inspect_detail,
+    check_fn=_check_neural_requirements,
+    emoji="\U0001f50e",
 )
 
 # 1d. import_reference — ingest a gold-standard reference project into a skill

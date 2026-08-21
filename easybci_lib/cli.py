@@ -348,6 +348,7 @@ def load_cli_config() -> Dict[str, Any]:
         },
         "clarify": {
             "timeout": 0,  # 0 = no timeout, wait indefinitely for user response
+            "mode": "conversation",  # "conversation" = plain text input; "selection" = ↑/↓ box UI
         },
         "code_execution": {
             "timeout": 300,    # Max seconds a sandbox script can run before being killed (5 min)
@@ -8776,8 +8777,10 @@ class EasybciCLI:
         import time as _time
 
         timeout = CLI_CONFIG.get("clarify", {}).get("timeout", 0)
+        clarify_mode = CLI_CONFIG.get("clarify", {}).get("mode", "conversation")
         response_queue = queue.Queue()
-        is_open_ended = not choices
+        # In conversation mode, always use freetext (no selection box)
+        is_open_ended = not choices or clarify_mode == "conversation"
 
         self._clarify_state = {
             "question": question,
@@ -8786,7 +8789,6 @@ class EasybciCLI:
             "response_queue": response_queue,
         }
         self._clarify_deadline = (_time.monotonic() + timeout) if timeout > 0 else 0
-        # Open-ended questions skip straight to freetext input
         self._clarify_freetext = is_open_ended
 
         # Trigger prompt_toolkit repaint from this (non-main) thread

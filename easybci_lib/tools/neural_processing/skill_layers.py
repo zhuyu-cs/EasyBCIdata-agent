@@ -46,14 +46,18 @@ L3_GROUPS: List[str] = [
     "reference",
     "spatial",
     "spectral",
-    "feature_time",
-    "connectivity",
-    "source",
-    "spike",
+    "epoch",
+    "event",
     "adaptive_cleaning",
+    "meg",
+    "dataset",
+    "connectivity",
+    "qc_operator",
+    "spike",
     "psg",
     "fnirs",
-    "qc_operator",
+    "source",
+    "feature_time",
     "misc",
 ]
 
@@ -74,6 +78,7 @@ ANALYSIS_GOALS: List[str] = [
     "connectivity",
     "phase_amplitude_coupling",
     "online_inference",
+    "sleep_staging",
 ]
 
 

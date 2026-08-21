@@ -76,19 +76,61 @@ def _format_timestamp(ts: Union[int, float, str, None]) -> str:
     return str(ts)
 
 
+def _summarize_tool_output(content: str, max_chars: int = 2000) -> str:
+    """Intelligently truncate tool output, preserving structural information.
+
+    For JSON tool outputs, extracts top-level keys and scalar values rather
+    than blindly slicing head+tail. This retains the "what happened" signal
+    (success/error, paths, counts, key names) that a summarizer needs.
+    """
+    if len(content) <= max_chars:
+        return content
+
+    # Try JSON-aware summarization
+    stripped = content.strip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+            if isinstance(data, dict):
+                summary_parts = []
+                for key, val in data.items():
+                    if isinstance(val, (str, int, float, bool, type(None))):
+                        s = f"{key}: {val}"
+                        if len(s) > 200:
+                            s = s[:200] + "..."
+                        summary_parts.append(s)
+                    elif isinstance(val, list):
+                        summary_parts.append(f"{key}: [{len(val)} items]")
+                    elif isinstance(val, dict):
+                        sub_keys = list(val.keys())[:8]
+                        summary_parts.append(f"{key}: {{{', '.join(sub_keys)}{'...' if len(val) > 8 else ''}}}")
+                result = "{\n  " + "\n  ".join(summary_parts) + "\n}"
+                if len(result) <= max_chars:
+                    return result
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+
+    # Fallback: head + tail with more generous budget
+    head = max_chars * 2 // 3
+    tail = max_chars - head - 20
+    return content[:head] + "\n...[truncated]...\n" + content[-tail:]
+
+
 def _format_conversation(messages: List[Dict[str, Any]]) -> str:
     """Format session messages into a readable transcript for summarization."""
     parts = []
     for msg in messages:
         role = msg.get("role", "unknown").upper()
         content = msg.get("content") or ""
-        tool_name = msg.get("tool_name")
+        tool_name = msg.get("tool_name") or msg.get("name")
 
-        if role == "TOOL" and tool_name:
-            # Truncate long tool outputs
-            if len(content) > 500:
-                content = content[:250] + "\n...[truncated]...\n" + content[-250:]
-            parts.append(f"[TOOL:{tool_name}]: {content}")
+        if role == "TOOL":
+            if tool_name:
+                content = _summarize_tool_output(content, max_chars=2000)
+                parts.append(f"[TOOL:{tool_name}]: {content}")
+            else:
+                content = _summarize_tool_output(content, max_chars=2000)
+                parts.append(f"[TOOL]: {content}")
         elif role == "ASSISTANT":
             # Include tool call names if present
             tool_calls = msg.get("tool_calls")
@@ -233,6 +275,7 @@ async def _summarize_session(
                 ],
                 temperature=0.1,
                 max_tokens=MAX_SUMMARY_TOKENS,
+                timeout=90.0,
             )
             content = extract_content_or_reasoning(response)
             if content:

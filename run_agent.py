@@ -10471,6 +10471,30 @@ class AIAgent:
         if num_tools > 0:
             self._apply_pending_steer_to_tool_results(messages, num_tools)
 
+        # ── Silent Phase 1 context compact ────────────────────────────────
+        # After proposal confirmation, Phase 1 context (inspect/suggest/propose
+        # exchanges) is historical. Compress with LLM focus on retaining the
+        # confirmed pipeline steps, parameters, and Phase 2 execution plan so
+        # codegen/execute/QC have accurate context without the full negotiation.
+        from easybci_lib.tools.neural_tools import consume_phase1_compact_signal
+        if consume_phase1_compact_signal() and self.compression_enabled:
+            _compressor = self._get_context_engine()
+            if hasattr(_compressor, 'compress') and _compressor.has_content_to_compress(messages):
+                _focus = (
+                    "confirmed pipeline: step names, operators, parameters, "
+                    "analysis_goal, modality, work_dir path, and any user "
+                    "instructions about the processing. Phase 2 execution "
+                    "plan (generate_code → execute → QC → export)."
+                )
+                try:
+                    messages[:] = _compressor.compress(
+                        messages, focus_topic=_focus,
+                    )
+                except TypeError:
+                    messages[:] = _compressor.compress(messages)
+                self._cached_system_prompt = None
+                logger.info("Phase 1→2 transition: context compressed with pipeline focus")
+
     def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
         for i, tool_call in enumerate(assistant_message.tool_calls, 1):

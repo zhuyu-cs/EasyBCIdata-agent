@@ -17,10 +17,10 @@ from typing import Tuple
 
 @lru_cache(maxsize=1)
 def known_operators() -> frozenset[str]:
-    """Lazy-load AVAILABLE_STEPS to avoid eager-importing MNE-heavy pipeline."""
+    """Lazy-load CANONICAL_OPERATORS to avoid eager-importing MNE-heavy pipeline."""
     try:
-        from easybci_lib.tools.neural_processing.preprocess.pipeline import AVAILABLE_STEPS
-        return frozenset(AVAILABLE_STEPS)
+        from easybci_lib.tools.neural_processing.preprocess.operator_vocab import CANONICAL_OPERATORS
+        return CANONICAL_OPERATORS
     except Exception:
         # Fallback to the historical short list from proven_match — keeps
         # canonical_step usable even when MNE is unavailable.

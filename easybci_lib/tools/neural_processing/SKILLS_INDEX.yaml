@@ -143,8 +143,8 @@ layers:
   L1:
     (orchestration):
     - name: pipeline
-      description: 'Two-phase BCI data preprocessing pipeline: deep-inspect → plan
-        → propose → user confirm → automated code/execute/QC/export'
+      description: BCI data preprocessing workflow router — routes to new_pipeline
+        or reference_adaptive based on proven skill availability
       path: pipeline/SKILL.md
       modalities:
       - eeg
@@ -232,10 +232,8 @@ layers:
       - seeg
       - ecog
     - name: sleep_staging
-      description: 'Polysomnography (PSG) sleep staging: keep EEG/EOG/EMG + respiratory/SpO2/effort/position; 30s AASM epochs; hypnogram labels.'
+      description: ''
       path: paradigms/clinical/sleep_staging/SKILL.md
-      modalities:
-      - eeg
     - name: utah_array_motor
       description: Utah array (96 ch, motor cortex) — threshold MUA decoding for human
         motor BCI (BrainGate-class)
@@ -333,6 +331,24 @@ layers:
       - seeg
       - ecog
       - fnirs
+    - name: detrend
+      description: Polynomial detrending
+      path: operators/filter/detrend/SKILL.md
+      step_string: detrend
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: filter_bank
+      description: Multi-band filter bank
+      path: operators/filter/filter_bank/SKILL.md
+      step_string: filter_bank
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
     - name: high_pass_dc_removal
       description: FIR-only DC-removal high-pass (< 0.1 Hz) — preserves ERP slow components,
         no IIR ringing
@@ -362,6 +378,15 @@ layers:
       - seeg
       - ecog
       - meg
+    - name: smooth
+      description: Temporal smoothing
+      path: operators/filter/smooth/SKILL.md
+      step_string: smooth
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
     - name: zapline
       description: Zapline (de Cheveigné 2020) — non-stationary line-noise removal
         via spectral PCA
@@ -377,6 +402,24 @@ layers:
       description: Clamp signal amplitude to a maximum absolute value
       path: operators/channel/clip/SKILL.md
       step_string: clip
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: derive_bipolar_channel
+      description: Derived bipolar monitor channel
+      path: operators/channel/derive_bipolar_channel/SKILL.md
+      step_string: derive_bipolar_channel
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: detect_bads
+      description: Automatic bad-channel detection
+      path: operators/channel/detect_bads/SKILL.md
+      step_string: detect_bads
       modalities:
       - eeg
       - seeg
@@ -420,6 +463,24 @@ layers:
       modalities:
       - eeg
       - ecog
+    - name: mark_bads
+      description: Bad-channel marking (non-destructive)
+      path: operators/channel/mark_bads/SKILL.md
+      step_string: mark_bads
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: minmax_scale
+      description: Min-max feature normalisation
+      path: operators/channel/minmax_scale/SKILL.md
+      step_string: minmax_scale
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
     - name: pick_channels
       description: Select channels by name list or type (EEG, MEG, etc.)
       path: operators/channel/pick_channels/SKILL.md
@@ -440,6 +501,24 @@ layers:
       - ecog
       - meg
       - fnirs
+    - name: set_channel_types
+      description: Channel-type assignment
+      path: operators/channel/set_channel_types/SKILL.md
+      step_string: set_channel_types
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: set_montage
+      description: Montage / electrode-position assignment
+      path: operators/channel/set_montage/SKILL.md
+      step_string: set_montage
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
     reference:
     - name: bipolar_ref
       description: Bipolar referencing for sEEG/depth electrodes — subtract adjacent
@@ -471,6 +550,14 @@ layers:
       step_string: mastoid_reference
       modalities:
       - eeg
+    - name: reref_channels
+      description: Reference to named channels
+      path: operators/reference/reref_channels/SKILL.md
+      step_string: reref_channels
+      modalities:
+      - eeg
+      - seeg
+      - ecog
     - name: rest_reference
       description: REST (Reference Electrode Standardization Technique, Yao 2001)
         — infinity-reference EEG
@@ -488,6 +575,13 @@ layers:
       - eeg
       - meg
       - ecog
+    - name: dss
+      description: Denoising source separation
+      path: operators/spatial/dss/SKILL.md
+      step_string: dss
+      modalities:
+      - eeg
+      - meg
     - name: riemannian_covariance
       description: Riemannian-geometry covariance features (MDM-Riemannian) — robust
         EEG decoder family (Barachant 2012)
@@ -521,6 +615,24 @@ layers:
       - eeg
       - meg
     spectral:
+    - name: aggregate_bands
+      description: Cross-band aggregation
+      path: operators/spectral/aggregate_bands/SKILL.md
+      step_string: aggregate_bands
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: amplitude_modulation
+      description: Amplitude-modulation features
+      path: operators/spectral/amplitude_modulation/SKILL.md
+      step_string: amplitude_modulation
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
     - name: cwt_morlet
       description: Continuous Wavelet Transform (Morlet wavelet) — time-frequency
         with logarithmic frequency spacing
@@ -585,6 +697,264 @@ layers:
       - seeg
       - ecog
       - lfp
+    epoch:
+    - name: baseline_correct
+      description: Baseline correction
+      path: operators/epoch/baseline_correct/SKILL.md
+      step_string: baseline_correct
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: epoch
+      description: Event-locked epoching
+      path: operators/epoch/epoch/SKILL.md
+      step_string: epoch
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: reject_epochs
+      description: Criterion-based epoch rejection
+      path: operators/epoch/reject_epochs/SKILL.md
+      step_string: reject_epochs
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: segment
+      description: Fixed / sliding window segmentation
+      path: operators/epoch/segment/SKILL.md
+      step_string: segment
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    event:
+    - name: attach_metadata
+      description: Trial-level metadata attachment
+      path: operators/event/attach_metadata/SKILL.md
+      step_string: attach_metadata
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: define_events
+      description: Event definition from hardware channels
+      path: operators/event/define_events/SKILL.md
+      step_string: define_events
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: import_events
+      description: External event / annotation import
+      path: operators/event/import_events/SKILL.md
+      step_string: import_events
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: repair_events
+      description: Event table repair
+      path: operators/event/repair_events/SKILL.md
+      step_string: repair_events
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: select_events
+      description: Event / trial selection
+      path: operators/event/select_events/SKILL.md
+      step_string: select_events
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    adaptive_cleaning:
+    - name: asr
+      description: Artifact Subspace Reconstruction (Kothe-Makeig 2013) — online BCI
+        gold standard, ICA alternative
+      path: operators/adaptive_cleaning/asr/SKILL.md
+      step_string: asr
+      modalities:
+      - eeg
+      - meg
+    - name: autoreject
+      description: Autoreject (Jas et al. 2017) — automatic threshold + channel interpolation
+        for ERP epochs
+      path: operators/adaptive_cleaning/autoreject/SKILL.md
+      step_string: autoreject
+      modalities:
+      - eeg
+      - meg
+    - name: detect_artifact_spans
+      description: Artefact-span annotation
+      path: operators/adaptive_cleaning/detect_artifact_spans/SKILL.md
+      step_string: detect_artifact_spans
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: ic_classify
+      description: Automatic IC classification
+      path: operators/adaptive_cleaning/ic_classify/SKILL.md
+      step_string: ic_classify
+      modalities:
+      - eeg
+      - meg
+    - name: ica
+      description: ICA artifact removal — automatic detection and exclusion of EOG/ECG
+        components
+      path: operators/adaptive_cleaning/ica/SKILL.md
+      step_string: ica
+      modalities:
+      - eeg
+      - meg
+    - name: interpolate_artifact
+      description: Artefact-span interpolation
+      path: operators/adaptive_cleaning/interpolate_artifact/SKILL.md
+      step_string: interpolate_artifact
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: manual_ic_selection
+      description: Manual IC selection
+      path: operators/adaptive_cleaning/manual_ic_selection/SKILL.md
+      step_string: manual_ic_selection
+      modalities:
+      - eeg
+      - meg
+    - name: overlap_regression
+      description: Overlapping-response regression (rERP / deconvolution)
+      path: operators/adaptive_cleaning/overlap_regression/SKILL.md
+      step_string: overlap_regression
+      modalities:
+      - eeg
+      - meg
+    - name: peakdetect_qrs
+      description: Pan-Tompkins QRS detector — extract heart-beat events from EOG/ECG
+        channels
+      path: operators/adaptive_cleaning/peakdetect_qrs/SKILL.md
+      step_string: peakdetect_qrs
+      modalities:
+      - eeg
+      - meg
+    - name: regression_eog
+      description: Regression-based EOG removal — fast online ocular artifact suppression
+      path: operators/adaptive_cleaning/regression_eog/SKILL.md
+      step_string: regression_eog
+      modalities:
+      - eeg
+      - meg
+    - name: reject_bad_segments
+      description: Bad continuous-segment rejection
+      path: operators/adaptive_cleaning/reject_bad_segments/SKILL.md
+      step_string: reject_bad_segments
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: wavelet_ica
+      description: Wavelet-ICA residual cleaning
+      path: operators/adaptive_cleaning/wavelet_ica/SKILL.md
+      step_string: wavelet_ica
+      modalities:
+      - eeg
+      - meg
+    meg:
+    - name: align_head_position
+      description: Cross-run head-position alignment
+      path: operators/meg/align_head_position/SKILL.md
+      step_string: align_head_position
+      modalities:
+      - meg
+    - name: ctf_grad_comp
+      description: CTF gradient compensation
+      path: operators/meg/ctf_grad_comp/SKILL.md
+      step_string: ctf_grad_comp
+      modalities:
+      - meg
+    - name: estimate_head_position
+      description: Continuous head-position estimation
+      path: operators/meg/estimate_head_position/SKILL.md
+      step_string: estimate_head_position
+      modalities:
+      - meg
+    - name: maxwell_filter
+      description: Maxwell filtering (SSS / tSSS)
+      path: operators/meg/maxwell_filter/SKILL.md
+      step_string: maxwell_filter
+      modalities:
+      - meg
+    dataset:
+    - name: concatenate
+      description: Run / split concatenation
+      path: operators/dataset/concatenate/SKILL.md
+      step_string: concatenate
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: crop
+      description: Time-range cropping
+      path: operators/dataset/crop/SKILL.md
+      step_string: crop
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: equalize_channels
+      description: Channel-set equalisation
+      path: operators/dataset/equalize_channels/SKILL.md
+      step_string: equalize_channels
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: exclude_subjects
+      description: Recording / subject exclusion
+      path: operators/dataset/exclude_subjects/SKILL.md
+      step_string: exclude_subjects
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: sort_epochs
+      description: Epoch reordering
+      path: operators/dataset/sort_epochs/SKILL.md
+      step_string: sort_epochs
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
+    - name: split_runs
+      description: Recording split into runs
+      path: operators/dataset/split_runs/SKILL.md
+      step_string: split_runs
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
     connectivity:
     - name: coherence
       description: Magnitude-squared / imaginary coherence — spectral-domain connectivity
@@ -618,6 +988,15 @@ layers:
       - seeg
       - ecog
       - lfp
+    - name: graph_metrics
+      description: Graph-theoretic node metrics
+      path: operators/connectivity/graph_metrics/SKILL.md
+      step_string: graph_metrics
+      modalities:
+      - eeg
+      - seeg
+      - ecog
+      - meg
     - name: pli_wpli
       description: Phase Lag Index / weighted PLI — volume-conduction-robust phase
         connectivity (Stam 2007 / Vinck 2011)
@@ -639,30 +1018,51 @@ layers:
       - seeg
       - ecog
       - lfp
-    source:
-    - name: dipole_fit
-      description: Equivalent current dipole fitting — focal source modelling
-      path: operators/source/dipole_fit/SKILL.md
-      step_string: dipole_fit
+    qc_operator:
+    - name: electrode_coord_validate
+      description: Validate electrode coordinate system / montage consistency (BIDS
+        coordsystem.json + sEEG bipolar)
+      path: operators/qc_operator/electrode_coord_validate/SKILL.md
+      step_string: electrode_coord_validate
       modalities:
       - eeg
       - meg
-    - name: lcmv_beamformer
-      description: Linearly Constrained Minimum Variance beamformer — adaptive distributed
-        source
-      path: operators/source/lcmv_beamformer/SKILL.md
-      step_string: lcmv
+      - seeg
+      - ecog
+    - name: hfo_detector
+      description: High-Frequency Oscillation (80-500 Hz) detector — sEEG epilepsy
+        biomarker
+      path: operators/qc_operator/hfo_detector/SKILL.md
+      step_string: hfo_detector
+      modalities:
+      - seeg
+      - ecog
+    - name: ied_detector
+      description: Interictal Epileptiform Discharge (IED) detector — sharp-wave /
+        spike template matching
+      path: operators/qc_operator/ied_detector/SKILL.md
+      step_string: ied_detector
+      modalities:
+      - seeg
+      - ecog
+      - eeg
+    - name: marker_integrity_check
+      description: Validate event/marker cross-stream alignment (NWB / BIDS / XDF)
+      path: operators/qc_operator/marker_integrity_check/SKILL.md
+      step_string: marker_integrity_check
       modalities:
       - eeg
       - meg
-    - name: sloreta
-      description: standardized Low-Resolution Brain Electromagnetic Tomography —
-        distributed source
-      path: operators/source/sloreta/SKILL.md
-      step_string: sloreta
+      - seeg
+      - ecog
+      - spike
+      - fnirs
+    - name: sleep_stager
+      description: Sleep-stage scoring
+      path: operators/qc_operator/sleep_stager/SKILL.md
+      step_string: sleep_stager
       modalities:
       - eeg
-      - meg
     spike:
     - name: autocorrelogram
       description: Spike autocorrelogram — per-unit ISI / refractory / bursting structure
@@ -719,46 +1119,28 @@ layers:
       step_string: waveform_snippet
       modalities:
       - spike
-    adaptive_cleaning:
-    - name: asr
-      description: Artifact Subspace Reconstruction (Kothe-Makeig 2013) — online BCI
-        gold standard, ICA alternative
-      path: operators/adaptive_cleaning/asr/SKILL.md
-      step_string: asr
+    psg:
+    - name: epoch_qc_sleep
+      description: 30-second epoch-level multi-channel quality scoring with hypnogram-aware
+        thresholds
+      path: operators/psg/epoch_qc_sleep/SKILL.md
+      step_string: epoch_qc_sleep
       modalities:
       - eeg
-      - meg
-    - name: autoreject
-      description: Autoreject (Jas et al. 2017) — automatic threshold + channel interpolation
-        for ERP epochs
-      path: operators/adaptive_cleaning/autoreject/SKILL.md
-      step_string: autoreject
+    - name: plm_detect
+      description: Periodic Limb Movement (PLM) detector — leg EMG event scoring per
+        WASM/AASM criteria
+      path: operators/psg/plm_detect/SKILL.md
+      step_string: plm_detect
       modalities:
       - eeg
-      - meg
-    - name: ica
-      description: ICA artifact removal — automatic detection and exclusion of EOG/ECG
-        components
-      path: operators/adaptive_cleaning/ica/SKILL.md
-      step_string: ica
-      modalities:
-      - eeg
-      - meg
-    - name: peakdetect_qrs
-      description: Pan-Tompkins QRS detector — extract heart-beat events from EOG/ECG
+    - name: respiratory_events
+      description: Detect apnea, hypopnea, and SpO2 desaturation events from PSG respiratory
         channels
-      path: operators/adaptive_cleaning/peakdetect_qrs/SKILL.md
-      step_string: peakdetect_qrs
+      path: operators/psg/respiratory_events/SKILL.md
+      step_string: respiratory_events
       modalities:
       - eeg
-      - meg
-    - name: regression_eog
-      description: Regression-based EOG removal — fast online ocular artifact suppression
-      path: operators/adaptive_cleaning/regression_eog/SKILL.md
-      step_string: regression_eog
-      modalities:
-      - eeg
-      - meg
     fnirs:
     - name: modified_beer_lambert
       description: Modified Beer–Lambert law — OD → HbO / HbR concentration
@@ -779,65 +1161,42 @@ layers:
       step_string: short_sep_regression
       modalities:
       - fnirs
-    qc_operator:
-    - name: electrode_coord_validate
-      description: Validate electrode coordinate system / montage consistency (BIDS
-        coordsystem.json + sEEG bipolar)
-      path: operators/qc_operator/electrode_coord_validate/SKILL.md
-      step_string: electrode_coord_validate
+    source:
+    - name: dipole_fit
+      description: Equivalent current dipole fitting — focal source modelling
+      path: operators/source/dipole_fit/SKILL.md
+      step_string: dipole_fit
       modalities:
       - eeg
       - meg
-      - seeg
-      - ecog
-    - name: hfo_detector
-      description: High-Frequency Oscillation (80-500 Hz) detector — sEEG epilepsy
-        biomarker
-      path: operators/qc_operator/hfo_detector/SKILL.md
-      step_string: hfo_detector
-      modalities:
-      - seeg
-      - ecog
-    - name: ied_detector
-      description: Interictal Epileptiform Discharge (IED) detector — sharp-wave /
-        spike template matching
-      path: operators/qc_operator/ied_detector/SKILL.md
-      step_string: ied_detector
-      modalities:
-      - seeg
-      - ecog
-      - eeg
-    - name: marker_integrity_check
-      description: Validate event/marker cross-stream alignment (NWB / BIDS / XDF)
-      path: operators/qc_operator/marker_integrity_check/SKILL.md
-      step_string: marker_integrity_check
+    - name: lcmv_beamformer
+      description: Linearly Constrained Minimum Variance beamformer — adaptive distributed
+        source
+      path: operators/source/lcmv_beamformer/SKILL.md
+      step_string: lcmv
       modalities:
       - eeg
       - meg
+    - name: sloreta
+      description: standardized Low-Resolution Brain Electromagnetic Tomography —
+        distributed source
+      path: operators/source/sloreta/SKILL.md
+      step_string: sloreta
+      modalities:
+      - eeg
+      - meg
+    misc:
+    - name: no_op
+      description: Declared omission — records a deliberate non-action
+      path: operators/misc/no_op/SKILL.md
+      step_string: no_op
+      modalities:
+      - eeg
       - seeg
       - ecog
+      - meg
       - spike
       - fnirs
-    psg:
-    - name: respiratory_events
-      description: Detect apnea, hypopnea, and SpO2 desaturation events from PSG respiratory channels (AASM criteria)
-      path: operators/psg/respiratory_events/SKILL.md
-      step_string: respiratory_events
-      modalities:
-      - eeg
-    - name: plm_detect
-      description: Periodic Limb Movement (PLM) detection from leg EMG per WASM/AASM criteria
-      path: operators/psg/plm_detect/SKILL.md
-      step_string: plm_detect
-      modalities:
-      - eeg
-    - name: epoch_qc_sleep
-      description: 30-second epoch-level multi-channel quality scoring with hypnogram-aware thresholds
-      path: operators/psg/epoch_qc_sleep/SKILL.md
-      step_string: epoch_qc_sleep
-      modalities:
-      - eeg
-    misc:
     - name: operators-index
       description: Index of all L3 atomic operators, grouped by algorithm family
       path: operators/SKILL.md

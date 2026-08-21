@@ -37,6 +37,7 @@ from typing import List, Dict, Any, Set, Optional
 _NEURAL_ORCHESTRATION_TOOLS = [
     "inspect_neural",
     "deep_inspect",
+    "inspect_detail",
     # suggest_pipeline / propose_pipeline are hidden aliases of plan_pipeline —
     # they share the same handler and schema. Only plan_pipeline is exposed to
     # the model to avoid ~3.4K tok of duplicate schema overhead. The aliases

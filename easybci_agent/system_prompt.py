@@ -20,6 +20,7 @@ from easybci_agent.prompt_builder import (
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
     WORK_DIRECTORY_CONSTRAINT,
+    WORKFLOW_COMPLIANCE_CONSTRAINT,
     REPRODUCIBILITY_SEED_CONSTRAINT,
     OUTPUT_FORMAT_CONSTRAINT,
     SKILL_IMMUTABILITY_CONSTRAINT,
@@ -82,6 +83,10 @@ class SystemPromptBuilder:
 
         # Code style for generated Python — unconditional, always injected
         stable_parts.append(CODE_STYLE_CONSTRAINT)
+
+        # Workflow compliance — work_dir sealed, must use tool chain
+        if "batch_process_adaptive" in agent.valid_tool_names or "preprocess_neural" in agent.valid_tool_names:
+            stable_parts.append(WORKFLOW_COMPLIANCE_CONSTRAINT)
 
         # Evidence-driven parameter resolution — only when neural tools present
         if "research_parameter" in agent.valid_tool_names or "propose_pipeline" in agent.valid_tool_names:

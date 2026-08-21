@@ -236,6 +236,54 @@ def _truncate_tool_call_args_json(args: str, head_chars: int = 200) -> str:
     return json.dumps(shrunken, ensure_ascii=False)
 
 
+_NEURAL_KEEP_KEYS = {
+    "success", "degraded", "work_dir", "analysis_goal", "modality",
+    "paradigm", "next_action", "awaiting_confirmation",
+    "channel_quality_summary", "fingerprint", "qc_grade",
+    "presented_steps_expected", "proven_recommendation",
+}
+
+
+def _summarize_neural_tool_result(tool_name: str, args: dict, content: str) -> str:
+    """Semantic-aware summary for neural tool results.
+
+    Preserves decision-critical fields (goal, modality, bad channels,
+    next_action) and discards data dumps (channel_stats, presentation_block,
+    stdout_tail, full proposal steps, reasoning text).
+    """
+    try:
+        data = json.loads(content) if isinstance(content, str) else content
+    except (json.JSONDecodeError, TypeError):
+        return f"[{tool_name}] ({len(content):,} chars result)"
+
+    if not isinstance(data, dict):
+        return f"[{tool_name}] ({len(content):,} chars result)"
+
+    compact: Dict[str, Any] = {}
+    for key in _NEURAL_KEEP_KEYS:
+        if key in data:
+            val = data[key]
+            if isinstance(val, str) and len(val) > 200:
+                val = val[:200] + "..."
+            elif isinstance(val, dict) and len(json.dumps(val, default=str)) > 300:
+                val = {k: v for k, v in list(val.items())[:5]}
+            compact[key] = val
+
+    if "report" in data and isinstance(data["report"], dict):
+        fp = data["report"].get("fingerprint")
+        if fp:
+            compact["fingerprint"] = fp
+        cqs = data["report"].get("channel_quality_summary")
+        if cqs:
+            compact["channel_quality_summary"] = cqs
+
+    if not compact:
+        return f"[{tool_name}] ({len(content):,} chars result)"
+
+    summary_json = json.dumps(compact, ensure_ascii=False, default=str)
+    return f"[{tool_name}] {summary_json}"
+
+
 def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
     """Create an informative 1-line summary of a tool call + result.
 
@@ -342,6 +390,17 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
         action = args.get("action", "?")
         sid = args.get("session_id", "?")
         return f"[process] {action} session={sid}"
+
+    # Neural tools: preserve decision-critical fields in a compact summary
+    _NEURAL_TOOLS = {
+        "inspect_data", "inspect_neural", "deep_inspect", "inspect_detail",
+        "plan_pipeline", "propose_pipeline", "suggest_pipeline",
+        "mark_proposal_confirmed", "generate_code", "quality_check",
+        "preprocess_neural", "batch_process", "batch_process_adaptive",
+        "export_repo", "research_preprocessing",
+    }
+    if tool_name in _NEURAL_TOOLS:
+        return _summarize_neural_tool_result(tool_name, args, content)
 
     # Generic fallback
     first_arg = ""

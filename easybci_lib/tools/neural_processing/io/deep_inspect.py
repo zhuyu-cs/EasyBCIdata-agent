@@ -199,7 +199,7 @@ def deep_inspect(
     envelope: dict[str, Any] = {
         "success": True,
         "report_path": str(out_path),
-        "report": report.to_dict(),
+        "report": report.to_compact_dict(),
         "degraded": report.degraded,
         "elapsed_s": round(time.monotonic() - started, 2),
     }

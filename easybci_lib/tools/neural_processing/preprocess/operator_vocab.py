@@ -29,7 +29,7 @@ from __future__ import annotations
 import difflib
 from typing import Callable, Dict, List, Tuple
 
-# The canonical operator vocabulary — union of engine + codegen executors.
+# The canonical operator vocabulary — union of engine + codegen + skill executors.
 CANONICAL_OPERATORS: frozenset[str] = frozenset({
     # channel ops
     "pick_channels", "drop_bads", "drop_nondata_channels", "interpolate_bads",
@@ -47,6 +47,26 @@ CANONICAL_OPERATORS: frozenset[str] = frozenset({
     "threshold_spike", "mua_binning",
     # feature extraction (epoched)
     "extract_psd_bands", "extract_csp", "extract_tfr", "extract_connectivity",
+    # ── Extended (skill-documented) ──
+    "epoch", "segment", "baseline_correct", "reject_epochs",
+    "define_events", "import_events", "repair_events", "select_events",
+    "attach_metadata",
+    "detect_bads", "mark_bads", "set_channel_types", "set_montage",
+    "derive_bipolar_channel", "minmax_scale",
+    "ic_classify", "manual_ic_selection", "detect_artifact_spans",
+    "interpolate_artifact", "reject_bad_segments", "wavelet_ica",
+    "overlap_regression",
+    "maxwell_filter", "ctf_grad_comp", "estimate_head_position",
+    "align_head_position",
+    "detrend", "filter_bank", "smooth",
+    "reref_channels",
+    "dss",
+    "aggregate_bands", "amplitude_modulation",
+    "graph_metrics",
+    "concatenate", "crop", "split_runs", "equalize_channels",
+    "exclude_subjects", "sort_epochs",
+    "no_op",
+    "sleep_stager",
 })
 
 
@@ -59,6 +79,7 @@ CANONICAL_OPERATORS: frozenset[str] = frozenset({
 # silent-skip bug). Insertion order is preserved to keep a stable display order.
 ENGINE = "engine"
 CODEGEN = "codegen"
+SKILL = "skill"
 
 OPERATOR_EXECUTORS: Dict[str, frozenset[str]] = {
     # channel ops
@@ -90,6 +111,62 @@ OPERATOR_EXECUTORS: Dict[str, frozenset[str]] = {
     "extract_csp":           frozenset({ENGINE}),
     "extract_tfr":           frozenset({ENGINE}),
     "extract_connectivity":  frozenset({ENGINE}),
+    # ── Extended operators (skill-documented, codegen emits inline code) ──
+    # epoch / segmentation
+    "epoch":                 frozenset({SKILL}),
+    "segment":               frozenset({SKILL}),
+    "baseline_correct":      frozenset({SKILL}),
+    "reject_epochs":         frozenset({SKILL}),
+    # event / trial management
+    "define_events":         frozenset({SKILL}),
+    "import_events":         frozenset({SKILL}),
+    "repair_events":         frozenset({SKILL}),
+    "select_events":         frozenset({SKILL}),
+    "attach_metadata":       frozenset({SKILL}),
+    # channel (extended)
+    "detect_bads":           frozenset({SKILL}),
+    "mark_bads":             frozenset({SKILL}),
+    "set_channel_types":     frozenset({SKILL}),
+    "set_montage":           frozenset({SKILL}),
+    "derive_bipolar_channel": frozenset({SKILL}),
+    "minmax_scale":          frozenset({SKILL}),
+    # adaptive cleaning (extended)
+    "ic_classify":           frozenset({SKILL}),
+    "manual_ic_selection":   frozenset({SKILL}),
+    "detect_artifact_spans": frozenset({SKILL}),
+    "interpolate_artifact":  frozenset({SKILL}),
+    "reject_bad_segments":   frozenset({SKILL}),
+    "wavelet_ica":           frozenset({SKILL}),
+    "overlap_regression":    frozenset({SKILL}),
+    # MEG hardware
+    "maxwell_filter":        frozenset({SKILL}),
+    "ctf_grad_comp":         frozenset({SKILL}),
+    "estimate_head_position": frozenset({SKILL}),
+    "align_head_position":   frozenset({SKILL}),
+    # filter (extended)
+    "detrend":               frozenset({SKILL}),
+    "filter_bank":           frozenset({SKILL}),
+    "smooth":                frozenset({SKILL}),
+    # reference (extended)
+    "reref_channels":        frozenset({SKILL}),
+    # spatial (extended)
+    "dss":                   frozenset({SKILL}),
+    # spectral (extended)
+    "aggregate_bands":       frozenset({SKILL}),
+    "amplitude_modulation":  frozenset({SKILL}),
+    # connectivity (extended)
+    "graph_metrics":         frozenset({SKILL}),
+    # dataset-level
+    "concatenate":           frozenset({SKILL}),
+    "crop":                  frozenset({SKILL}),
+    "split_runs":            frozenset({SKILL}),
+    "equalize_channels":     frozenset({SKILL}),
+    "exclude_subjects":      frozenset({SKILL}),
+    "sort_epochs":           frozenset({SKILL}),
+    # misc
+    "no_op":                 frozenset({SKILL}),
+    # qc
+    "sleep_stager":          frozenset({SKILL}),
 }
 
 # Invariant: the capability table and CANONICAL_OPERATORS describe the same set,

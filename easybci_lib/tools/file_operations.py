@@ -1481,6 +1481,10 @@ class ShellFileOperations(FileOperations):
         # Validate that the path exists before searching
         check = self._exec(f"test -e {self._escape_shell_arg(path)} && echo exists || echo not_found")
         if "not_found" in check.stdout:
+            # For file-glob searches, a non-existent directory simply has zero
+            # matching files — return empty results, not an error.
+            if target == "files":
+                return SearchResult(files=[], total_count=0)
             # Try to suggest nearby paths
             parent = os.path.dirname(path) or "."
             basename_query = os.path.basename(path)

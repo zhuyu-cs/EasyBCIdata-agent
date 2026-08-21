@@ -56,7 +56,9 @@ def io_loaders_dir() -> Path:
     Never hardcode ``~/.easybci`` — go through get_easybci_home() so profiles
     and the isolated-home test fixture both work.
     """
-    return get_easybci_home() / "io_loaders"
+    d = get_easybci_home() / "io_loaders"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 @dataclass

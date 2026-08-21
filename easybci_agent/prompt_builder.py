@@ -269,6 +269,25 @@ CODE_STYLE_CONSTRAINT = (
     "reformat the user's pre-existing files."
 )
 
+WORKFLOW_COMPLIANCE_CONSTRAINT = (
+    "## ABSOLUTE CONSTRAINT — Tool-Chain Compliance\n"
+    "The preprocessing work directory (*_preprocess_work_dir / *_preprocess_work_dirs) "
+    "is a SEALED container. You MUST NOT write ANY files there (scripts, configs, data) "
+    "via write_file / terminal / execute_code — only EasyBCI's standard tools "
+    "(deep_inspect, generate_code, preprocess_neural, batch_process_adaptive, "
+    "export_repo, quality_check) produce content inside it.\n"
+    "- middle_process/ is scratch — you may write there freely.\n"
+    "- After proposal.confirmed, you may PATCH (not create) existing code/*.py "
+    "to fix bugs.\n"
+    "- To process data: load the pipeline skill (skill_view('pipeline')) and follow "
+    "its workflow router. If a proven skill exists → batch_process_adaptive. "
+    "Otherwise → the new_pipeline workflow (inspect → plan → propose → confirm → "
+    "generate → execute → QC → export).\n"
+    "- Writing custom processing scripts is architecturally blocked by the harness. "
+    "Do NOT attempt it — the tool call WILL be rejected.\n"
+    "This is unconditional."
+)
+
 NEURAL_TOOL_ROUTING = (
     "## Neural Tool Decision Flow\n"
     "1. User provides file path → inspect_data (detect format/channels/sampling rate)\n"
@@ -280,7 +299,20 @@ NEURAL_TOOL_ROUTING = (
     "- NEVER proactively scan directories or inspect data files unless the user "
     "explicitly provides a path\n"
     "- Do NOT call list_data or inspect_data without a user-specified path\n"
-    "- Always wait for user confirmation before executing the pipeline"
+    "- Always wait for user confirmation before executing the pipeline\n\n"
+    "## Compact Tool Returns\n"
+    "Neural tool results are returned in compact form to preserve context window. "
+    "Only decision-critical fields are inline; full data lives on disk.\n"
+    "- deep_inspect returns channel_quality_summary (good/must_drop/suspect) "
+    "instead of per-channel stats. For full per-channel data, call "
+    "inspect_detail(work_dir, aspect='channel_stats').\n"
+    "- propose_pipeline returns presentation_block (show it to user VERBATIM) "
+    "and proposal steps without param_evidence. Full reasoning is at "
+    "plan/reasoning.md.\n"
+    "- If a return contains '_compacted: true', essential fields were kept but "
+    "secondary data was shed. Use inspect_detail or read the file at report_path "
+    "for details.\n"
+    "- presentation_block is NEVER truncated — always paste it to the user in full."
 )
 
 EASYBCI_AGENT_HELP_GUIDANCE = (

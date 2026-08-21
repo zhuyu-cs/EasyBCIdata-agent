@@ -55,11 +55,19 @@ def _resolve_max_sources() -> int:
     return max(1, val)
 
 
-def _resolve_llm_timeout(default: float = 25.0) -> float:
-    """SHORT per-call timeout for research synthesis/extraction LLM calls,
-    overriding the 360s ``auxiliary.web_extract.timeout`` these would inherit."""
+def _resolve_llm_timeout(default: float = 90.0) -> float:
+    """Timeout for the aggregate synthesis LLM call.
+
+    This is NOT a per-hop extraction (those live in citation_extractor with a
+    25s budget). The synthesis call processes up to 10 citation snippets and
+    generates structured JSON — reasoning models routinely need 60-90s.
+    Reads ``web.research.synthesis_timeout_seconds`` first, falls back to the
+    legacy ``llm_timeout_seconds`` key, then the built-in default.
+    """
+    cfg = _load_research_cfg()
     try:
-        return max(0.0, float(_load_research_cfg().get("llm_timeout_seconds", default)))
+        raw = cfg.get("synthesis_timeout_seconds", cfg.get("llm_timeout_seconds", default))
+        return max(0.0, float(raw))
     except (TypeError, ValueError):
         return default
 

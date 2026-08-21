@@ -139,6 +139,54 @@ class InspectionReport:
             "events_summary": asdict(self.events_summary) if self.events_summary else None,
         }
 
+    def to_compact_dict(self) -> dict[str, Any]:
+        """LLM-facing compact representation — no per-channel stats array."""
+        d = self.to_dict()
+        d.pop("channel_stats", None)
+        d["channel_quality_summary"] = self._build_channel_quality_summary()
+        return d
+
+    def _build_channel_quality_summary(self) -> dict[str, Any]:
+        total = len(self.channel_stats)
+        must_drop = list(self.channel_summary.must_drop)
+        suspect = list(self.channel_summary.suggest_drop)
+
+        must_drop_reasons: dict[str, str] = {}
+        suspect_reasons: dict[str, str] = {}
+
+        stats_by_name = {s.name: s for s in self.channel_stats}
+        for name in must_drop:
+            must_drop_reasons[name] = self._reason_tag(stats_by_name.get(name))
+        for name in suspect:
+            suspect_reasons[name] = self._reason_tag(stats_by_name.get(name))
+
+        good = total - len(must_drop) - len(suspect)
+        return {
+            "total": total,
+            "good": max(good, 0),
+            "must_drop": must_drop,
+            "must_drop_reasons": must_drop_reasons,
+            "suspect": suspect,
+            "suspect_reasons": suspect_reasons,
+        }
+
+    @staticmethod
+    def _reason_tag(stat: Optional[ChannelStat]) -> str:
+        if stat is None:
+            return "unknown"
+        parts = []
+        if stat.flat_pct > 50.0:
+            parts.append(f"flat_{stat.flat_pct:.0f}%")
+        if stat.nan_pct > 0:
+            parts.append(f"nan_{stat.nan_pct:.1f}%")
+        if stat.inf_pct > 0:
+            parts.append(f"inf_{stat.inf_pct:.1f}%")
+        if stat.spike_count > 50:
+            parts.append(f"spikes_{stat.spike_count}")
+        if stat.variance > 0 and not parts:
+            parts.append(f"high_var_{stat.variance:.1f}")
+        return "+".join(parts) if parts else "flagged"
+
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> InspectionReport:
         version = d.get("schema_version")
