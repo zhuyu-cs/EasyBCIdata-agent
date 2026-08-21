@@ -11,45 +11,43 @@ metadata:
 
 # BCI Data Preprocessing — Workflow Router
 
-## Invariants (both workflows share these)
+Triggers on ANY data preprocessing request. Routes to one of two workflows.
 
-- **work_dir is sealed** — only tool-chain writes allowed (harness-enforced, unconditional)
-- **Source data is read-only** — never write/modify input files
-- **Output format:** `preprocessed/` = `.nwb` only; `AI_ready/` = `.pkl` only
-- **Deterministic seed 42** — all random operations pinned
-- **Layout contract** is highest priority (equal to correctness)
-- `middle_process/` is scratch — always writable; wiped on clean export
+## Route Decision (execute IN THIS SKILL before loading any workflow)
 
-## Route Decision
+You MUST complete steps 1–3 below BEFORE calling `skill_view` on any workflow. Do NOT load a workflow speculatively.
 
-**Single question: does a matching proven-pipeline skill exist?**
+**Step 1 — LIGHT INSPECT:** `inspect_data(data_path=<path>)` — confirm the file is readable, get modality/channels/fs.
 
-1. If user points to a reference project → `import_reference` first (creates proven skill), then route to **reference_adaptive**
-2. Call `plan_pipeline` (or `suggest_pipeline`) with `inspection_report_path`
-3. Check the return:
+**Step 2 — DEEP INSPECT + WORK DIR:** `mkdir -p "<work_dir>"` then `deep_inspect(data_path=<path>, work_dir=<work_dir>)` — writes inspection_report + routing entry.
 
-| Condition | Workflow | Action |
-|-----------|----------|--------|
-| Return contains `proven_recommendation` | **reference_adaptive** | `skill_view('pipeline/workflows/reference_adaptive')` |
-| User provides reference project path | **reference_adaptive** | `import_reference` first, then load workflow |
-| No proven match (or `proven_reuse_rejected`) | **new_pipeline** | `skill_view('pipeline/workflows/new_pipeline')` |
+**Step 3 — ROUTE:**
 
-4. Load the workflow via `skill_view` and follow it step-by-step. Do NOT mix steps across workflows.
+| Condition | Workflow |
+|-----------|----------|
+| User provides reference project path | **reference_adaptive** → `skill_view('pipeline/workflows/reference_adaptive')` |
+| `plan_pipeline(inspection_report_path=...)` returns `proven_recommendation` (similarity ≥ 0.6) | **reference_adaptive** → `skill_view('pipeline/workflows/reference_adaptive')` |
+| No proven match / `proven_reuse_rejected` / similarity < 0.6 | **new_pipeline** → `skill_view('pipeline/workflows/new_pipeline')` |
 
-## Proven Skill Sources (all route to reference_adaptive)
+**Step 4 — LOAD WORKFLOW:** Only NOW call `skill_view` for the chosen workflow. Follow it step-by-step from its own Step 1 onward (skip steps you already did here — inspect/deep_inspect/work_dir are done). Do NOT mix steps across workflows.
 
-- `import_reference` — ingests a gold-standard reference project
-- Previous session's crystallize (Step 13 of new_pipeline)
-- Third-party registration (`register_analysis_goal` / `install_skill`)
-- Manual placement in `~/.easybci/skills/proven-pipelines/`
+## ABSOLUTE PROHIBITIONS (both workflows)
 
-## When a Proven Skill Exists but Doesn't Match
-
-- `proven_reuse_out_of_range` → data too different from reference → **new_pipeline**
-- `proven_reuse_rejected` (goal mismatch) → **new_pipeline**
-- Similarity < 0.6 → **new_pipeline**
+1. **Source data is READ-ONLY** — never write/modify/move/rename input files. `source_data_guard.py` enforces 4 layers.
+2. **work_dir is sealed** — only tool-chain writes allowed inside `*_preprocess_work_dir/`. `skill_compliance_guard.py` default-deny.
+3. **`middle_process/` lives at `<work_dir>/middle_process/`, NEVER under `<work_dir>/code/`** — Step 14 cleanup depends on this.
+4. **Identity from routing table, NEVER from `Path(raw).stem`** — `identity_resolver` runs once in `deep_inspect`; downstream MUST read `inputs_routing.json`.
+5. **One canonical script per stage** — `pipeline.py`/`qc.py`/`vis.py`/`build_ai_ready.py`/`run.py` each written ONCE, loop internally. No per-session variants unless user EXPLICITLY asks.
+6. **Output format: `preprocessed/` = NWB-only; `AI_ready/` = pkl-only** — other extensions auto-swept.
+7. **Skill library is READ-ONLY** except `proven-pipelines/` category — no patching/writing to `bci/pipeline/`, `bci/operators/`, `bci/paradigms/`, etc.
+8. **Deterministic seed 42** — all random operations pinned.
+9. **Layout contract is highest-priority (equal to correctness)** — use `repair_layout`, never manual `mv`/`rm`/`mkdir`.
+10. **Path safety** — always wrap `work_dir` and data paths in double quotes in terminal commands.
+11. **`ai_ready` is intent-driven, NOT auto-inferred** — add to deliverables ONLY when user explicitly asks. Presence of events alone is NOT a request.
+12. **Phase 2 NEVER re-does Phase 1** — no calling `inspect_data`/`deep_inspect`/`suggest_pipeline`/`plan_pipeline`/`propose_pipeline`/`mark_proposal_confirmed` after confirmation.
+13. **`pipeline.py` is standalone** — does NOT import easybci_lib (CODE_STANDARD.md Rule 15).
 
 ## Workflow Files
 
-- `pipeline/workflows/new_pipeline.md` — build pipeline from scratch (14-step: inspect → plan → propose → confirm → generate → execute → QC → export → crystallize)
-- `pipeline/workflows/reference_adaptive.md` — execute with proven skill (import_reference if needed → batch_process_adaptive)
+- `pipeline/workflows/new_pipeline.md` — 12-step from-scratch flow (goal → plan → propose → confirm → generate → execute → QC → export → crystallize)
+- `pipeline/workflows/reference_adaptive.md` — proven skill execution (import_reference if needed → batch_process_adaptive)
