@@ -323,11 +323,46 @@ def _input_is_nihon_kohden(
         from easybci_lib.tools.neural_processing.io.routing_table import load_routing_table
         table = load_routing_table(work_dir)
         if table:
-            for entry in table.entries:
+            for entry in table.inputs:
                 dp = Path(entry.data_path)
                 if dp.suffix.lower() == ".21e":
                     return True
                 if dp.suffix.lower() in _NK_EXTENSIONS and dp.with_suffix(".21E").exists():
+                    return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _input_is_compumedics(
+    input_path: str,
+    data_info: Dict[str, Any],
+    work_dir: Path,
+) -> bool:
+    """Return True when the recording uses the Compumedics .SLP bundle backend.
+
+    Checks (any True → bundle the Compumedics plugin):
+    1. input_path is a directory containing STUDYCFG.XML.
+    2. data_info meta reports format "compumedics_slp".
+    3. Multi-input: routing table contains at least one Compumedics directory.
+    """
+    if input_path:
+        p = Path(input_path)
+        if p.is_dir() and (p / "STUDYCFG.XML").exists():
+            return True
+
+    fmt = (data_info.get("meta") or {}).get("format", "")
+    if fmt and "compumedics" in fmt.lower():
+        return True
+
+    try:
+        from easybci_lib.tools.neural_processing.io.routing_table import load_routing_table
+        table = load_routing_table(work_dir)
+        if table:
+            for entry in table.inputs:
+                dp = Path(entry.data_path)
+                if dp.is_dir() and (dp / "STUDYCFG.XML").exists():
                     return True
     except Exception:
         pass
@@ -839,6 +874,18 @@ def build_mini_repo(
         except Exception as _nk_err:  # noqa: BLE001
             logger.warning("NK io_loader provisioning failed: %s", _nk_err)
 
+    if _input_is_compumedics(input_path, data_info, out):
+        try:
+            from easybci_lib.tools.neural_processing.io.compumedics_loader_plugin import (
+                ensure_global_plugin as _cm_ensure_global,
+                ensure_repo_plugin as _cm_ensure_repo,
+            )
+            _cm_ensure_repo(code_dir)
+            created_files.append("code/io_loaders/compumedics_slp.py")
+            _cm_ensure_global()
+        except Exception as _cm_err:  # noqa: BLE001
+            logger.warning("Compumedics io_loader provisioning failed: %s", _cm_err)
+
     # Best-effort lint pass on the generated pipeline (auto-fix import order
     # and explicit text-mode encoding). Never blocks export — see
     # tools/neural_processing/export/_lint.py for the rationale and the
@@ -886,13 +933,16 @@ def build_mini_repo(
 
     # For single-file mode with explicit pkl_path
     if pkl_path and Path(pkl_path).exists():
-        sub_id = subject_id or _input_stem
-        sub_out = _preprocessed_path(out, sub_id, _session_id)
-        sub_out.mkdir(parents=True, exist_ok=True)
-        _copy_output(sub_out, pkl_path, output_stem=f"{_input_stem}_preprocessed")
-        src_suffix = Path(pkl_path).suffix or ".pkl"
-        rel = sub_out.relative_to(out) / f"{_input_stem}_preprocessed{src_suffix}"
-        created_files.append(str(rel))
+        _pkl_resolved = Path(pkl_path).resolve()
+        _ai_ready_dir = (out / "preprocessed_output" / "AI_ready").resolve()
+        if not str(_pkl_resolved).startswith(str(_ai_ready_dir)):
+            sub_id = subject_id or _input_stem
+            sub_out = _preprocessed_path(out, sub_id, _session_id)
+            sub_out.mkdir(parents=True, exist_ok=True)
+            _copy_output(sub_out, pkl_path, output_stem=f"{_input_stem}_preprocessed")
+            src_suffix = Path(pkl_path).suffix or ".pkl"
+            rel = sub_out.relative_to(out) / f"{_input_stem}_preprocessed{src_suffix}"
+            created_files.append(str(rel))
 
     # Clean up duplicate processed/continuous files
     _cleanup_duplicate_outputs(out)

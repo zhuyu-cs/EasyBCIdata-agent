@@ -26,6 +26,7 @@ from easybci_agent.prompt_builder import (
     SKILL_IMMUTABILITY_CONSTRAINT,
     EVIDENCE_DRIVEN_PARAMS_CONSTRAINT,
     CODE_STYLE_CONSTRAINT,
+    TOOL_USAGE_CONSTRAINT,
     _build_layout_contract_block,
     build_context_files_prompt,
     build_environment_hints,
@@ -87,6 +88,7 @@ class SystemPromptBuilder:
         # Workflow compliance — work_dir sealed, must use tool chain
         if "batch_process_adaptive" in agent.valid_tool_names or "preprocess_neural" in agent.valid_tool_names:
             stable_parts.append(WORKFLOW_COMPLIANCE_CONSTRAINT)
+            stable_parts.append(TOOL_USAGE_CONSTRAINT)
 
         # Evidence-driven parameter resolution — only when neural tools present
         if "research_parameter" in agent.valid_tool_names or "propose_pipeline" in agent.valid_tool_names:

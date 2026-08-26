@@ -1088,6 +1088,46 @@ def _extract_python_write_targets(source: str) -> List[str]:
 # Main entry point
 # ---------------------------------------------------------------------------
 
+_SELF_SOURCE_MARKERS = ("easybci_lib/", "easybci_agent/", "easybci_cli/")
+
+
+def _detect_source_read(code: str) -> List[str]:
+    """Detect when a sandbox script reads EasyBCI's own source files.
+
+    Returns a list of matched package markers (e.g. ["easybci_lib"]) when
+    the code contains both a source-path string and a read call pattern.
+    Empty list when nothing suspicious is found.
+    """
+    if not code:
+        return []
+    found = []
+    for marker in _SELF_SOURCE_MARKERS:
+        if marker in code and ("open(" in code or ".read()" in code or ".readlines()" in code):
+            found.append(marker.rstrip("/"))
+    return found
+
+
+def _inject_source_read_hint(result_json: str, detected: List[str]) -> str:
+    """Inject a fix_hint into an execute_code result JSON when source reads
+    were detected. Returns the original JSON unchanged when *detected* is empty.
+    """
+    if not detected:
+        return result_json
+    try:
+        data = json.loads(result_json)
+        data["fix_hint"] = (
+            "This script reads EasyBCI internal source files ("
+            + ", ".join(detected)
+            + ") instead of calling tools directly. "
+            "Do NOT read source code to understand tool behavior — "
+            "call the tool and follow the next_action in its response. "
+            "Use read_file/search_files only for user data files."
+        )
+        return json.dumps(data, ensure_ascii=False)
+    except (json.JSONDecodeError, TypeError):
+        return result_json
+
+
 def execute_code(
     code: str,
     task_id: Optional[str] = None,
@@ -1141,11 +1181,17 @@ def execute_code(
             "skill_compliance_guard skipped for execute_code", exc_info=True,
         )
 
+    # Source-read advisory: detect when the script reads EasyBCI's own source
+    # files instead of calling tools directly. Not a block — the code still
+    # runs — but the result carries a fix_hint so the LLM self-corrects.
+    _source_read_detected = _detect_source_read(code)
+
     # Dispatch: remote backends use file-based RPC, local uses UDS
     from easybci_lib.tools.terminal_tool import _get_env_config
     env_type = _get_env_config()["env_type"]
     if env_type != "local":
-        return _execute_remote(code, task_id, enabled_tools)
+        _remote_result = _execute_remote(code, task_id, enabled_tools)
+        return _inject_source_read_hint(_remote_result, _source_read_detected)
 
     # --- Local execution path (UDS) --- below this line is unchanged ---
 
@@ -1442,6 +1488,16 @@ def execute_code(
             # Include stderr in output so the LLM sees the traceback
             if stderr_text:
                 result["output"] = stdout_text + "\n--- stderr ---\n" + stderr_text
+
+        if _source_read_detected:
+            result["fix_hint"] = (
+                "This script reads EasyBCI internal source files ("
+                + ", ".join(_source_read_detected)
+                + ") instead of calling tools directly. "
+                "Do NOT read source code to understand tool behavior — "
+                "call the tool and follow the next_action in its response. "
+                "Use read_file/search_files only for user data files."
+            )
 
         return json.dumps(result, ensure_ascii=False)
 

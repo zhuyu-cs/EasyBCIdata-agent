@@ -23,7 +23,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from easybci_agent.auxiliary_client import call_llm, _is_connection_error
+from easybci_agent.auxiliary_client import call_llm, _is_connection_error, _get_task_timeout
 from easybci_agent.context_engine import ContextEngine
 from easybci_agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
@@ -241,6 +241,8 @@ _NEURAL_KEEP_KEYS = {
     "paradigm", "next_action", "awaiting_confirmation",
     "channel_quality_summary", "fingerprint", "qc_grade",
     "presented_steps_expected", "proven_recommendation",
+    "deliverables", "code_dir", "plan_dir", "marker_written",
+    "key_config", "written",
 }
 
 
@@ -439,6 +441,7 @@ class ContextCompressor(ContextEngine):
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
         self._summary_failure_cooldown_until = 0.0  # transient errors must not block a fresh session
+        self._timeout_retry_attempted = False
 
     def update_model(
         self,
@@ -539,6 +542,7 @@ class ContextCompressor(ContextEngine):
         self._last_compression_savings_pct: float = 100.0
         self._ineffective_compression_count: int = 0
         self._summary_failure_cooldown_until: float = 0.0
+        self._timeout_retry_attempted: bool = False
         self._last_summary_error: Optional[str] = None
         # When summary generation fails and a static fallback is inserted,
         # record how many turns were unrecoverably dropped so callers
@@ -971,7 +975,7 @@ class ContextCompressor(ContextEngine):
         into the warning log.
         """
         self._summary_model_fallen_back = True
-        logging.warning(
+        logger.warning(
             "Summary model '%s' %s (%s). "
             "Falling back to main model '%s' for compression.",
             self.summary_model, reason, e, self.model,
@@ -1168,7 +1172,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # No provider configured — long cooldown, unlikely to self-resolve
             self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
             self._last_summary_error = "no auxiliary LLM provider configured"
-            logging.warning("Context compression: no provider available for "
+            logger.warning("Context compression: no provider available for "
                             "summary. Middle turns will be dropped without summary "
                             "for %d seconds.",
                             _SUMMARY_FAILURE_COOLDOWN_SECONDS)
@@ -1254,6 +1258,47 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 self._fallback_to_main_for_compression(e, "failed")
                 return self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
 
+            # Timeout retry: before entering cooldown, retry once with a
+            # longer timeout on the same provider/model.  Transient network
+            # slowness and provider cold-starts often resolve within seconds,
+            # and losing N turns of context is far more expensive than one
+            # extra attempt.
+            if (
+                _is_timeout
+                and not getattr(self, "_timeout_retry_attempted", False)
+            ):
+                self._timeout_retry_attempted = True
+                base_timeout = _get_task_timeout("compression")
+                retry_timeout = base_timeout * 1.5
+                logger.info(
+                    "Context compression timed out (%.0fs); retrying once "
+                    "with extended timeout (%.0fs)",
+                    base_timeout, retry_timeout,
+                )
+                try:
+                    call_kwargs["timeout"] = retry_timeout
+                    response = call_llm(**call_kwargs)
+                    content = response.choices[0].message.content
+                    if not isinstance(content, str):
+                        content = str(content) if content else ""
+                    summary = redact_sensitive_text(content.strip())
+                    summary = self._apply_pinned_findings(
+                        summary, turns_to_summarize, previous_summary=self._previous_summary
+                    )
+                    self._previous_summary = summary
+                    self._summary_failure_cooldown_until = 0.0
+                    self._summary_model_fallen_back = False
+                    self._last_summary_error = None
+                    self._timeout_retry_attempted = False
+                    return self._with_summary_prefix(summary)
+                except Exception as retry_err:
+                    logger.warning(
+                        "Context compression retry also failed: %s", retry_err,
+                    )
+                    e = retry_err
+
+            self._timeout_retry_attempted = False
+
             # Transient errors (timeout, rate limit, network, JSON decode,
             # streaming premature-close) — shorter cooldown for JSON decode and
             # streaming-closed since those conditions can self-resolve quickly.
@@ -1263,7 +1308,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             if len(err_text) > 220:
                 err_text = err_text[:217].rstrip() + "..."
             self._last_summary_error = err_text
-            logging.warning(
+            logger.warning(
                 "Failed to generate context summary: %s. "
                 "Further summary attempts paused for %d seconds.",
                 e,

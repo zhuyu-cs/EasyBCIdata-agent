@@ -290,6 +290,20 @@ WORKFLOW_COMPLIANCE_CONSTRAINT = (
     "This is unconditional."
 )
 
+TOOL_USAGE_CONSTRAINT = (
+    "## ABSOLUTE CONSTRAINT — No Source Code Introspection\n"
+    "NEVER use execute_code, read_file, or search_files to read EasyBCI's own "
+    "source code (easybci_lib/, easybci_agent/, easybci_cli/). These are "
+    "internal implementation files — you do not need to understand how tools "
+    "work internally.\n"
+    "Instead: call the tool directly, read its response, and follow the "
+    "next_action field. Every pipeline tool returns structured guidance "
+    "about what to do next.\n"
+    "If you find yourself wanting to read source code, STOP — you are "
+    "solving the wrong problem. The tool API is your interface, not the "
+    "implementation."
+)
+
 NEURAL_TOOL_ROUTING = (
     "## Neural Tool Decision Flow\n"
     "1. User provides file path → inspect_data (detect format/channels/sampling rate)\n"

@@ -29,6 +29,8 @@ _TYPE_TO_CATEGORY: Dict[str, str] = {
     "misc": "misc",
 }
 
+VALID_MNE_CH_TYPES: frozenset = frozenset(_TYPE_TO_CATEGORY)
+
 _RE_MARKER = re.compile(
     r"(STI[\s_]?\d*|Trigger|Status|Event|Marker|Sync|Photodiode|TTL|^DC\d*$)",
     re.IGNORECASE,

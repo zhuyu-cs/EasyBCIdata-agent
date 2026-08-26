@@ -61,15 +61,34 @@ def _resolve_llm_timeout(default: float = 90.0) -> float:
     This is NOT a per-hop extraction (those live in citation_extractor with a
     25s budget). The synthesis call processes up to 10 citation snippets and
     generates structured JSON — reasoning models routinely need 60-90s.
-    Reads ``web.research.synthesis_timeout_seconds`` first, falls back to the
-    legacy ``llm_timeout_seconds`` key, then the built-in default.
+
+    Resolution order:
+    1. ``web.research.synthesis_timeout_seconds`` (preferred explicit key)
+    2. ``web.research.llm_timeout_seconds`` (legacy key)
+    3. ``auxiliary.web_extract.timeout`` (honours the user's per-task timeout
+       for the same endpoint — prevents the mismatch where a user sets 360s
+       on the task but synthesis still hard-cuts at 90s)
+    4. Built-in *default* (90s)
     """
     cfg = _load_research_cfg()
     try:
-        raw = cfg.get("synthesis_timeout_seconds", cfg.get("llm_timeout_seconds", default))
-        return max(0.0, float(raw))
+        raw = cfg.get("synthesis_timeout_seconds")
+        if raw is not None:
+            return max(0.0, float(raw))
+        raw = cfg.get("llm_timeout_seconds")
+        if raw is not None:
+            return max(0.0, float(raw))
     except (TypeError, ValueError):
-        return default
+        pass
+    try:
+        from easybci_cli.config import load_config
+        aux = ((load_config() or {}).get("auxiliary") or {}).get("web_extract") or {}
+        raw = aux.get("timeout")
+        if raw is not None:
+            return max(0.0, float(raw))
+    except Exception:  # noqa: BLE001
+        pass
+    return default
 
 
 def _resolve_synthesis_max_tokens(default: int = 16384) -> int:

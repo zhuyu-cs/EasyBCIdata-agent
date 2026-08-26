@@ -384,8 +384,15 @@ def check_source_data_command(command: str) -> tuple:
     if (not targets
             and (write_verb_anywhere.search(normalized)
                  or _has_write_redirect_to_real_target(normalized))):
+        # Check if ALL paths in the command that match a protected dir are
+        # actually inside a work_dir — if so, they're tool-chain output, not
+        # source data. Only block when a genuine source dir is referenced.
+        _work_sfx = ("_preprocess_work_dir", "_preprocess_work_dirs")
+        _cmd_has_work_dir = any(sfx in normalized for sfx in _work_sfx)
         for d in protected_dirs:
             if _re.search(_re.escape(d) + _path_boundary, normalized):
+                if _cmd_has_work_dir:
+                    continue
                 return (True, f"shell command references protected source dir: {d}")
         for f in protected_files:
             if _re.search(_re.escape(f) + _path_boundary, normalized):

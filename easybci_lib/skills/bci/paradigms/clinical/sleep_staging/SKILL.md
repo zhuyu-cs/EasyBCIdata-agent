@@ -77,11 +77,11 @@ pipeline:
   - notch:auto                  # 50/60 Hz on EEG + EMG routes only
   - drop_bads:auto              # Remove flat/saturated channels
 
-  # Phase 2: Per-route filtering (codegen generates per-route bandpass calls)
-  - bandpass:0.3,35             # EEG route
-  - bandpass:0.3,10             # EOG route
-  - bandpass:10,100             # EMG route
-  - bandpass:0.05,3             # Respiratory route
+  # Phase 2: Per-route filtering (channel route label = 3rd comma-separated arg)
+  - bandpass:0.3,35,eeg         # EEG route: 0.3–35 Hz
+  - bandpass:0.3,10,eog         # EOG route: 0.3–10 Hz
+  - bandpass:10,100,emg         # EMG route: 10–100 Hz
+  - bandpass:0.05,3,NPress      # Respiratory route: 0.05–3 Hz (match channel name)
 
   # Phase 3: PSG-specific clinical detection (at native rate)
   - respiratory_events          # Apnea/hypopnea/desat (AASM criteria)

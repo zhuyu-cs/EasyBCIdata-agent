@@ -508,7 +508,13 @@ def _to_mne_raw(d):
     import mne
     info = d.get("_mne_info")
     if info is None:
-        info = mne.create_info(ch_names=list(d["channels"]), sfreq=float(d["frequency"]), ch_types="eeg")
+        ch_names = list(d["channels"])
+        _meta_types = (d.get("meta") or {{}}).get("ch_types")
+        if isinstance(_meta_types, list) and len(_meta_types) == len(ch_names):
+            ch_types = _meta_types
+        else:
+            ch_types = "eeg"
+        info = mne.create_info(ch_names=ch_names, sfreq=float(d["frequency"]), ch_types=ch_types)
     raw = mne.io.RawArray(np.asarray(d["data"], dtype=np.float64), info, verbose="ERROR")
     return raw
 
@@ -581,18 +587,58 @@ def op_notch(d, param):
     return _from_mne_raw(raw, d.get("meta", {{}}))
 
 
+def _resolve_route_picks(d, route_label):
+    """Return list of channel names matching *route_label*.
+
+    Matching order (first non-empty wins):
+    1. MNE channel type — ``meta["ch_types"]`` values like "eeg", "eog",
+       "emg", "misc". Case-insensitive exact match.
+    2. Channel-name substring — any channel whose name contains
+       *route_label* (case-insensitive).
+    Returns empty list when *route_label* is empty/None (= global).
+    """
+    if not route_label:
+        return []
+    channels = list(d.get("channels", []))
+    rl = route_label.strip().lower()
+    # 1) match by MNE ch_type
+    ct = (d.get("meta") or {{}}).get("ch_types")
+    if isinstance(ct, list) and len(ct) == len(channels):
+        by_type = [ch for ch, t in zip(channels, ct) if t.lower() == rl]
+        if by_type:
+            return by_type
+    # 2) match by channel-name substring
+    by_name = [ch for ch in channels if rl in ch.lower()]
+    if not by_name:
+        import warnings
+        warnings.warn(
+            f"Route label '{{route_label}}' matched no channels — filter applied globally"
+        )
+    return by_name
+
+
 def op_bandpass(d, param):
     # Single-sided aware, matching the runtime engine: an empty side means
     # "no bound on that side" (None), NOT a hard-coded default. This is what
     # lets ``highpass:X`` / ``lowpass:X`` normalize safely to ``bandpass:X,`` /
     # ``bandpass:,X`` without silently turning into a 1-40 Hz band-pass.
+    #
+    # Channel routing: ``bandpass:lo,hi,ROUTE`` applies the filter only to
+    # channels matching ROUTE (MNE ch_type or channel-name substring). When
+    # ROUTE is absent the filter is global (backward compatible).
     parts = (param or "").split(",")
     lo = float(parts[0]) if len(parts) >= 1 and parts[0] else None
     hi = float(parts[1]) if len(parts) >= 2 and parts[1] else None
+    route_label = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else None
+    # Nyquist guard: h_freq must be strictly < sfreq/2 for MNE.
+    sfreq = d["frequency"]
+    if hi is not None and hi >= sfreq / 2:
+        hi = None
     if lo is None and hi is None:
         return d
     raw = _to_mne_raw(d)
-    raw.filter(l_freq=lo, h_freq=hi, verbose="ERROR")
+    picks = _resolve_route_picks(d, route_label) or None
+    raw.filter(l_freq=lo, h_freq=hi, picks=picks, verbose="ERROR")
     return _from_mne_raw(raw, d.get("meta", {{}}))
 
 
@@ -605,6 +651,9 @@ def op_highpass(d, param):
 
 def op_lowpass(d, param):
     hi = float(param) if param else 40.0
+    sfreq = d["frequency"]
+    if hi >= sfreq / 2:
+        return d
     raw = _to_mne_raw(d)
     raw.filter(l_freq=None, h_freq=hi, verbose="ERROR")
     return _from_mne_raw(raw, d.get("meta", {{}}))
@@ -683,9 +732,13 @@ def op_ica(d, param):
 def op_drop_bads(d, param):
     """Auto-detect bad channels by amplitude variance and drop them.
 
-    Heuristic: any channel whose std falls outside [median * 0.1, median * 10]
-    or contains >50% NaN is flagged. Matches the spirit of easybci's
-    drop_bads:auto without depending on its implementation.
+    Per-channel-type grouping: when ``meta["ch_types"]`` is available, channels
+    are grouped by MNE type (eeg, eog, emg, misc, …) and the median+threshold
+    is computed within each group. This prevents PSG physiological channels
+    (respiratory, SpO2, EMG) from being dropped just because their variance
+    differs from EEG channels.
+
+    Unconditional drops (any group): >50% NaN, non-finite std, zero std (flat).
     """
     data = np.asarray(d["data"], dtype=np.float64)
     channels = list(d["channels"])
@@ -693,24 +746,41 @@ def op_drop_bads(d, param):
         return dict(d)
     std = np.nanstd(data, axis=1)
     nan_frac = np.isnan(data).mean(axis=1)
-    finite_std = std[np.isfinite(std) & (std > 0)]
-    median_std = float(np.median(finite_std)) if finite_std.size else 0.0
+
+    ch_types = (d.get("meta") or {{}}).get("ch_types")
+    if not isinstance(ch_types, list) or len(ch_types) != len(channels):
+        ch_types = None
+
+    # Build per-group median std for variance-outlier thresholds.
+    if ch_types is not None:
+        groups = {{}}
+        for i, ct in enumerate(ch_types):
+            groups.setdefault(ct, []).append(i)
+        group_median = {{}}
+        for ct, indices in groups.items():
+            finite = [std[i] for i in indices if np.isfinite(std[i]) and std[i] > 0]
+            group_median[ct] = float(np.median(finite)) if finite else 0.0
+    else:
+        group_median = None
+
     keep = []
     dropped = []
     for i, ch in enumerate(channels):
         if nan_frac[i] > 0.5 or not np.isfinite(std[i]) or std[i] == 0:
             dropped.append(ch); continue
-        if median_std > 0 and (std[i] < median_std * 0.1 or std[i] > median_std * 10):
+        if group_median is not None:
+            ct = ch_types[i]
+            med = group_median.get(ct, 0.0)
+        else:
+            finite_std = std[np.isfinite(std) & (std > 0)]
+            med = float(np.median(finite_std)) if finite_std.size else 0.0
+        if med > 0 and (std[i] < med * 0.1 or std[i] > med * 10):
             dropped.append(ch); continue
         keep.append(i)
     if not keep:
         return dict(d)
     kept_data = data[keep, :].astype(np.float32)
     kept_channels = [channels[i] for i in keep]
-    # Surviving channels may still carry NaN (<=50% NaN passed the drop
-    # threshold). Interpolate those in place so NaN never propagates into
-    # later MNE-based ops. The 50% DROP threshold above is unchanged; this only
-    # cleans channels we chose to keep.
     nan_cleaned = []
     for r in range(kept_data.shape[0]):
         row = kept_data[r]
@@ -1331,9 +1401,10 @@ def _process_one(work_dir, inp, steps):
             "output_file": str(out_file), "success": True, "skipped": True,
         }}
 
-    # Load-time decimation hint: a concrete resample:<N> step lets the loader
-    # decimate on the fly (huge sEEG never materializes at native rate). Any
-    # subsequent resample:<N> step is then a no-op (src == target).
+    # Resample target extracted for memory-gate peak estimate only.
+    # NOT passed to _load_input — loading at native rate ensures filters
+    # preceding the resample step see full-bandwidth data (load-time decimation
+    # was wrong when resample is not the first operation, which is always).
     _load_target = _resample_target_from_steps(steps)
 
     # Read the deep_inspect fingerprint ONCE up front — used both for the
@@ -1365,9 +1436,9 @@ def _process_one(work_dir, inp, steps):
                              target_hz=_load_target)
     _gate_token = _gate_acquire(_peak_mb, file_id=file_id)
     try:
-        print("Loading: {{}}  (sub={{}} ses={{}} file_id={{}}, target_hz={{}})".format(
-            data_path, sub_id, ses, file_id, _load_target))
-        data_dict = _load_input(data_path, target_hz=_load_target)
+        print("Loading: {{}}  (sub={{}} ses={{}} file_id={{}})".format(
+            data_path, sub_id, ses, file_id))
+        data_dict = _load_input(data_path)
         n_ch_in = len(data_dict.get("channels", []))
         fs_in = float(data_dict.get("frequency", 0.0))
         print("  Channels in: {{}}, fs: {{}} Hz".format(n_ch_in, fs_in))
@@ -2991,9 +3062,52 @@ _MNE_EXTS = {{
 }}
 
 
+def _vis_easybci_home():
+    import os
+    h = os.environ.get("EASYBCI_HOME")
+    return Path(h) if h else (Path.home() / ".easybci")
+
+
+def _vis_discover_io_plugin(path):
+    """First registered io_loader plugin whose matches(path) is True."""
+    import importlib.util as _ilu
+    _dirs = []
+    _self = globals().get("__file__")
+    if _self:
+        _dirs.append(Path(_self).resolve().parent / "io_loaders")
+    _dirs.append(_vis_easybci_home() / "io_loaders")
+    for d in _dirs:
+        if not d.is_dir():
+            continue
+        for py in sorted(d.glob("*.py")):
+            if py.name.startswith("_"):
+                continue
+            _mod_name = "_ebci_visio_" + py.stem
+            try:
+                spec = _ilu.spec_from_file_location(_mod_name, str(py))
+                mod = _ilu.module_from_spec(spec)
+                sys.modules[_mod_name] = mod
+                try:
+                    spec.loader.exec_module(mod)
+                    matches = getattr(mod, "matches", None)
+                    load = getattr(mod, "load", None)
+                    if callable(matches) and callable(load) and bool(matches(str(path))):
+                        return load, py.stem
+                finally:
+                    sys.modules.pop(_mod_name, None)
+            except Exception:
+                continue
+    return None, None
+
+
 def _load_raw(path):
     p = Path(path)
     ext = p.suffix.lower()
+    _pl, _pn = _vis_discover_io_plugin(p)
+    if _pl is not None:
+        _res = _pl(str(p))
+        if isinstance(_res, dict) and "data" in _res:
+            return _res
     if ext in _MNE_EXTS or (p.is_dir() and p.suffix == ".ds"):
         import mne
         raw = mne.io.read_raw(str(p), preload=True, verbose="ERROR")

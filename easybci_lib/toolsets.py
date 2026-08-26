@@ -43,6 +43,7 @@ _NEURAL_ORCHESTRATION_TOOLS = [
     # the model to avoid ~3.4K tok of duplicate schema overhead. The aliases
     # remain registered (hidden=True) so dispatch still resolves them.
     "mark_proposal_confirmed",
+    "revise_proposal",
     "generate_code",
     "compare_pipelines",
     "confirm_output_format",

@@ -874,6 +874,39 @@ def _append_hygiene_event(work_dir: Path, event: dict) -> None:
         logger.debug("could not append hygiene event to %s: %s", report, exc)
 
 
+def _load_completed_ai_ready_paths(work_dir: Path) -> set:
+    """Read per-input status files to find successfully-built AI_ready paths.
+
+    Returns a set of relative path prefixes (e.g. "subject_001/ses-001") that
+    should be protected from sweep because their outputs completed successfully.
+    """
+    mp = work_dir / "middle_process"
+    status_file = mp / "build_ai_ready_status.json"
+    if not status_file.exists():
+        status_file = mp / "ai_ready_status.json"
+    if not status_file.exists():
+        return set()
+    try:
+        data = json.loads(status_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    completed = set()
+    for inp in data.get("inputs", []):
+        if not isinstance(inp, dict):
+            continue
+        if "error" in inp:
+            continue
+        subj = inp.get("subject_id", "")
+        sess = inp.get("session_id", "")
+        if subj and sess:
+            completed.add(f"{subj}/{sess}")
+        elif subj:
+            completed.add(subj)
+    return completed
+
+
 def sweep_failed_partials(
     work_dir: Path,
     stage: str,
@@ -887,6 +920,9 @@ def sweep_failed_partials(
     _handle_quality_check at entry, ONLY when the stage's autofix_state shows
     attempts > 0 (retry #2/#3, not the first attempt). Explicit-call primitive
     — not part of the verify_and_repair dispatch (it maps to no Violation.kind).
+
+    For save_processed: protects files under subject/session directories that
+    already completed successfully (per build_ai_ready_status.json).
 
     Returns a dict (primitive/stage/moved_files/target_dir/success/dry_run) the
     handler can log.
@@ -906,7 +942,12 @@ def sweep_failed_partials(
     ts = time.strftime("%Y%m%d_%H%M%S")
     target_root = work_dir / "middle_process" / failed_subdir / ts
 
+    completed_prefixes: set = set()
+    if stage == "save_processed":
+        completed_prefixes = _load_completed_ai_ready_paths(work_dir)
+
     moved: list[dict[str, str]] = []
+    skipped: list[str] = []
     for src_rel in source_rels:
         src_root = work_dir / src_rel
         if not src_root.exists():
@@ -914,11 +955,15 @@ def sweep_failed_partials(
         for f in src_root.rglob("*"):
             if not f.is_file():
                 continue
+            if completed_prefixes:
+                rel_in_src = str(f.relative_to(src_root))
+                if any(rel_in_src.startswith(prefix) for prefix in completed_prefixes):
+                    skipped.append(rel_in_src)
+                    continue
             rel_from_wd = f.relative_to(work_dir)
             dst = target_root / rel_from_wd
             if not dry_run:
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                # If the destination already exists (previous sweep collision), suffix.
                 final_dst = _uniquify_if_exists(dst)
                 shutil.move(str(f), str(final_dst))
                 moved.append({"src": str(rel_from_wd), "dst": str(final_dst.relative_to(work_dir))})
@@ -933,6 +978,8 @@ def sweep_failed_partials(
         "success": True,
         "dry_run": dry_run,
     }
+    if skipped:
+        result["skipped_completed"] = len(skipped)
     if not dry_run and moved:
         _append_hygiene_event(work_dir, result)
     return result

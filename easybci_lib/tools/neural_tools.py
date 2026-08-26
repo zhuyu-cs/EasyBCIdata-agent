@@ -230,6 +230,14 @@ def _resolve_work_dir_from_args(args: dict) -> Path | None:
     return None
 
 
+def _pipeline_has_produced_output(work_dir: Path) -> bool:
+    """True if the pipeline stage already produced NWB output files."""
+    out = work_dir / "preprocessed_output" / "preprocessed"
+    if not out.is_dir():
+        return False
+    return any(out.rglob("*.nwb"))
+
+
 def _maybe_archive_prior_run(args: dict, kw: dict, *, phase: str) -> None:
     """Best-effort: if work_dir resolved from args already contains a finalized
     (``plan/pipeline_record.json status=="ok"``) run, rename it to ``_runN`` so
@@ -245,6 +253,12 @@ def _maybe_archive_prior_run(args: dict, kw: dict, *, phase: str) -> None:
         )
         wd = _resolve_work_dir_from_args(args)
         if wd is None:
+            return
+        # Don't archive if autofix is mid-flight on any stage — the run is
+        # being actively debugged; archiving would destroy working artifacts.
+        afs = _read_autofix_state(str(wd))
+        if any(isinstance(r, dict) and int(r.get("attempts", 0)) > 0
+               for r in afs.values()):
             return
         sid = (kw.get("session_id") or args.get("_session_id") or "").strip() or None
         archived = maybe_archive_completed_work_dir(wd, sid)
@@ -660,9 +674,11 @@ def _goal_enum_schema_override(schema: dict):
 INSPECT_DATA_SCHEMA = {
     "name": "inspect_data",
     "description": (
-        "Load a neural data file and return a non-destructive summary: "
-        "channels, sampling frequency, duration, modality, and basic stats. "
-        "Only call when the user provides a specific file path. "
+        "Start here for any neural data exploration. "
+        "Load a neural data file or directory bundle and return a "
+        "non-destructive summary: channels, sampling frequency, duration, "
+        "modality, and basic stats. Handles single files AND directory-packaged "
+        "formats (Compumedics .SLP, Nihon Kohden, BIDS, etc.). "
         "Use this FIRST before proposing a pipeline."
     ),
     "parameters": {
@@ -779,6 +795,42 @@ MARK_PROPOSAL_CONFIRMED_SCHEMA = {
             },
         },
         "required": ["work_dir", "user_decision"],
+    },
+}
+
+REVISE_PROPOSAL_SCHEMA = {
+    "name": "revise_proposal",
+    "description": (
+        "Revise the confirmed pipeline steps in place. Call this AFTER "
+        "mark_proposal_confirmed('confirm') when the user wants to change "
+        "operators, parameters, or ordering. Updates plan/proposal.json, "
+        "deletes code/ to force regeneration, and appends an audit entry to "
+        "middle_process/revision_history.jsonl. The B4 guard in generate_code "
+        "will read the updated proposal.json, so no bypass flag is needed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "work_dir": {"type": "string", "description": "Preprocessing work directory"},
+            "steps": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "The COMPLETE revised step list in canonical form, e.g. "
+                    "['notch:50', 'bandpass:1,40', 'resample:256']. This "
+                    "replaces the existing steps entirely — omit a step to "
+                    "remove it, add a step to insert it, reorder as needed."
+                ),
+            },
+            "revision_reason": {
+                "type": "string",
+                "description": (
+                    "Why the user wants to revise (e.g. 'user asked to remove "
+                    "drop_bads because it deletes respiratory channels')"
+                ),
+            },
+        },
+        "required": ["work_dir", "steps", "revision_reason"],
     },
 }
 
@@ -961,9 +1013,11 @@ SAVE_PROCESSED_SCHEMA = {
     "description": (
         "Run code/build_ai_ready.py in a subprocess to write "
         "AI_ready/{id}/{ses}/*_epochs.pkl. When code/build_ai_ready.py is "
-        "absent and no events / label_config are available, the tool reports "
-        "skipped=true (AI_ready is conditional on labels). Set confirm=true "
-        "to delegate to the legacy output-format selector."
+        "absent (ai_ready not in deliverables), the tool reports "
+        "skipped=true. When events/labels exist, epochs are event-locked; "
+        "otherwise fixed-length sliding windows are used (self-supervised "
+        "compatible). Set confirm=true to delegate to the legacy "
+        "output-format selector."
     ),
     "parameters": {
         "type": "object",
@@ -1170,7 +1224,11 @@ PLAN_PIPELINE_SCHEMA = {
 
 LIST_DATA_SCHEMA = {
     "name": "list_data",
-    "description": "List available neural data files in a directory. Scans for known neural data extensions.",
+    "description": (
+        "List available neural data files in a directory. Scans for known "
+        "neural data extensions. If this returns 0 files, the directory may "
+        "itself be a recording bundle — use inspect_data on it directly."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -1450,7 +1508,7 @@ def _is_single_recording_bundle(directory: str) -> bool:
 
 
 def _scan_directory_for_signals(directory: str) -> list:
-    """Scan a directory for neural signal files, returning sorted paths."""
+    """Scan a directory for neural signal files and recording bundles."""
     dir_path = Path(directory)
     if not dir_path.is_dir():
         return []
@@ -1458,6 +1516,8 @@ def _scan_directory_for_signals(directory: str) -> list:
     try:
         for entry in sorted(dir_path.iterdir()):
             if entry.is_file() and entry.suffix.lower() in _SIGNAL_EXTENSIONS:
+                signal_files.append(str(entry))
+            elif entry.is_dir() and _is_single_recording_bundle(str(entry)):
                 signal_files.append(str(entry))
     except (PermissionError, OSError):
         pass
@@ -1729,6 +1789,15 @@ def _handle_inspect_data(args, **kw):
             result["memory_warning"] = mem_est
     except Exception as exc:
         logger.debug("Memory estimation failed: %s", exc)
+
+    result["next_action"] = {
+        "next_tool": "deep_inspect",
+        "hint": (
+            "Data loaded successfully. Call deep_inspect(data_path=...) "
+            "for full profiling (per-channel stats, artifact detection, "
+            "bad-channel candidates) before planning the pipeline."
+        ),
+    }
 
     return cap_return(result)
 
@@ -2016,9 +2085,10 @@ def _handle_register_analysis_goal(args, **kw):
             _yaml.safe_dump(payload, allow_unicode=True), encoding="utf-8"
         )
         # Validation gate: reload through the loader and require it to merge.
-        reg = dict(_GOAL_REGISTRY)
-        conflicts = _merge_tp(reg)
-        if name not in reg:
+        # Merge into the LIVE registry so _enforce_clean_output sees the new goal
+        # in the same process (previously validated against a discarded copy).
+        conflicts = _merge_tp(_GOAL_REGISTRY)
+        if name not in _GOAL_REGISTRY:
             target.unlink(missing_ok=True)  # do not leave a half-registered goal
             bad = next((c for c in conflicts if c.name == name), None)
             return json.dumps({
@@ -2390,8 +2460,11 @@ def _handle_mark_proposal_confirmed(args, **kw):
                 "proposal_summary": args.get("proposal_summary", ""),
                 "confirmed_at": _dt.utcnow().isoformat(timespec="seconds"),
                 "envelope_kind": envelope.get("kind", "unknown"),
+                "analysis_goal": envelope.get("analysis_goal") or "generic",
                 "scenario": envelope.get("scenario") or "research",
                 "deliverables": envelope.get("deliverables") or ["preprocessed"],
+                "segment_duration": envelope.get("segment_duration"),
+                "stride": envelope.get("stride"),
                 "materialized": materialized,
             }, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -2405,6 +2478,15 @@ def _handle_mark_proposal_confirmed(args, **kw):
             "marker_written": True,
             "materialized": materialized,
             "plan_dir": str(plan_dir),
+            "next_action": {
+                "next_tool": "generate_code",
+                "hint": (
+                    "Call generate_code(work_dir='" + str(work_dir) + "') to "
+                    "generate the preprocessing scripts. All parameters are "
+                    "already saved in proposal.confirmed — do NOT read source "
+                    "code or inspect internal implementation."
+                ),
+            },
         })
 
     if user_decision == "abort":
@@ -2434,6 +2516,155 @@ def _handle_mark_proposal_confirmed(args, **kw):
             "pipeline for confirmation. Do not re-run inspection or re-plan."
         ),
     }, ensure_ascii=False)
+
+
+def _handle_revise_proposal(args, **kw):
+    """Revise confirmed pipeline steps in place — user-driven modification.
+
+    Updates plan/proposal.json, purges code/ to force regeneration, writes
+    an audit trail to middle_process/revision_history.jsonl.
+    """
+    from datetime import datetime as _dt
+    from easybci_lib.tools.neural_processing.preprocess.operator_vocab import (
+        normalize_steps as _normalize_steps,
+    )
+
+    work_dir = args.get("work_dir") or ""
+    if not work_dir:
+        return json.dumps({
+            "success": False,
+            "error": "revise_proposal requires work_dir.",
+        })
+    work_dir = Path(work_dir)
+    if not work_dir.is_dir():
+        return json.dumps({
+            "success": False,
+            "error": f"work_dir does not exist: {work_dir}",
+        })
+
+    marker = work_dir / "middle_process" / "proposal.confirmed"
+    if not marker.is_file():
+        return json.dumps({
+            "success": False,
+            "error": (
+                "No proposal.confirmed marker — the proposal has not been "
+                "confirmed yet. Use propose_pipeline → mark_proposal_confirmed "
+                "first, then call revise_proposal to modify."
+            ),
+        })
+
+    proposal_path = work_dir / "plan" / "proposal.json"
+    if not proposal_path.is_file():
+        return json.dumps({
+            "success": False,
+            "error": f"plan/proposal.json missing at {proposal_path}.",
+        })
+
+    new_steps = args.get("steps")
+    if not isinstance(new_steps, list) or not new_steps:
+        return json.dumps({
+            "success": False,
+            "error": "steps must be a non-empty list of strings.",
+        })
+    revision_reason = args.get("revision_reason") or ""
+
+    try:
+        normalized, warnings = _normalize_steps(
+            [str(s) for s in new_steps],
+        )
+    except Exception as exc:
+        return json.dumps({
+            "success": False,
+            "error": f"Step validation failed: {exc}",
+            "fix_hint": (
+                "Ensure every step uses a canonical operator name "
+                "(e.g. 'notch:50', 'bandpass:1,40', 'resample:256'). "
+                "Run normalize_steps on the list to see which step failed."
+            ),
+        })
+
+    try:
+        proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return json.dumps({
+            "success": False,
+            "error": f"Failed to read proposal.json: {exc!r}",
+        })
+
+    old_steps = proposal.get("steps", [])
+
+    proposal["steps"] = [
+        {
+            "operator": s.split(":")[0] if ":" in s else s,
+            "method": "",
+            "params": {"raw": s.split(":", 1)[1]} if ":" in s else {},
+            "param_evidence": {},
+        }
+        for s in normalized
+    ]
+
+    proposal_path.write_text(
+        json.dumps(proposal, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    try:
+        marker_data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        marker_data = {}
+    marker_data["revised_at"] = _dt.utcnow().isoformat(timespec="seconds")
+    marker_data["revision_reason"] = revision_reason
+    marker.write_text(
+        json.dumps(marker_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    code_dir = work_dir / "code"
+    deleted_files: list = []
+    if code_dir.is_dir():
+        archive_dir = work_dir / "middle_process" / "code"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        for f in code_dir.iterdir():
+            if f.is_file() and f.suffix == ".py":
+                f.rename(archive_dir / f"{f.stem}_pre_revision_{ts}{f.suffix}")
+                deleted_files.append(f.name)
+
+    # Clear stale pipeline output so generate_code / preprocess_neural guards
+    # (which check for NWB existence) allow the fresh run after revision.
+    import shutil as _shutil
+    pre_out = work_dir / "preprocessed_output" / "preprocessed"
+    if pre_out.is_dir() and any(pre_out.rglob("*.nwb")):
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        _shutil.move(str(pre_out), str(archive_dir / f"preprocessed_pre_revision_{ts}"))
+
+    # Clear autofix state — the revision resets all counters.
+    _autofix_state_path(str(work_dir)).unlink(missing_ok=True)
+
+    audit_entry = {
+        "revised_at": _dt.utcnow().isoformat(timespec="seconds"),
+        "reason": revision_reason,
+        "old_steps": old_steps,
+        "new_steps": normalized,
+        "archived_code": deleted_files,
+    }
+    history_path = work_dir / "middle_process" / "revision_history.jsonl"
+    with open(history_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(audit_entry, ensure_ascii=False) + "\n")
+
+    payload = {
+        "success": True,
+        "revised_steps": normalized,
+        "archived_code": deleted_files,
+        "next_action": (
+            "Call generate_code to regenerate the code bundle with the "
+            "revised steps. The B4 guard will read the updated "
+            "plan/proposal.json — no bypass needed."
+        ),
+    }
+    if warnings:
+        payload["step_warnings"] = warnings
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _handle_inspect_directory(directory: str, args: dict, kw: dict) -> str:
@@ -2507,6 +2738,13 @@ def _handle_inspect_directory(directory: str, args: dict, kw: dict) -> str:
             "sidecar_files": sidecar_result.get("sidecar_files", []),
             "data_type": sidecar_result.get("data_type", "signal-only"),
             "file_classification": file_classification,
+            "next_action": {
+                "next_tool": "deep_inspect",
+                "hint": (
+                    f"Directory contains {n_files} signal file(s). "
+                    "Call deep_inspect on each file to get full profiling."
+                ),
+            },
         }, default=str)
 
     # Large directory: sampling mode — inspect one representative
@@ -2590,6 +2828,13 @@ def _handle_inspect_directory(directory: str, args: dict, kw: dict) -> str:
             f"({dataset_fingerprint['format']}, {n_channels}ch, {freq}Hz). "
             f"Confirm this fingerprint applies to all files before proceeding with batch processing."
         ),
+        "next_action": {
+            "next_tool": "deep_inspect",
+            "hint": (
+                f"Sampled 1 of {n_files} files — dataset appears homogeneous. "
+                "Call deep_inspect on a representative file, then plan_pipeline."
+            ),
+        },
     }, default=str)
 
 
@@ -2956,6 +3201,30 @@ def _do_handle_preprocess_neural(args, **kw):
     work_dir.mkdir(parents=True, exist_ok=True)
     script_path = work_dir / "code" / "pipeline.py"
 
+    # Guard: if pipeline already produced NWB output and the incoming steps
+    # differ from the existing script, block — regenerating would archive
+    # the entire successful run and force a restart from scratch.
+    if (script_path.exists()
+            and _pipeline_has_produced_output(work_dir)
+            and _script_has_version_marker(script_path)
+            and not _script_header_matches(
+                script_path, steps=steps, analysis_goal=analysis_goal
+            )):
+        return json.dumps({
+            "success": False,
+            "error": (
+                "Pipeline already produced NWB output. Re-invoking with changed "
+                "steps/goal would archive the run and restart from scratch. "
+                "Fix the specific failing downstream script directly."
+            ),
+            "fix_hint": (
+                "Edit code/build_ai_ready.py, code/qc.py, or code/vis.py via "
+                "write_file, then call the appropriate stage tool (save_processed / "
+                "quality_check). If pipeline steps are genuinely wrong, use "
+                "revise_proposal to update them safely."
+            ),
+        })
+
     # 1. Ensure the script exists with a matching header (only regenerate
     #    when missing OR when the existing script is EasyBCI-versioned but
     #    stale; user-supplied scripts without a marker are preserved as-is).
@@ -3041,6 +3310,14 @@ def _do_handle_preprocess_neural(args, **kw):
             "output_file": status.get("output_file"),
             "stdout_tail": result["stdout_tail"],
             "analysis_goal": analysis_goal,
+            "next_action": {
+                "next_tool": "quality_check",
+                "hint": (
+                    "Pipeline executed successfully. Call "
+                    "quality_check(work_dir=...) to run QC metrics "
+                    "and generate visualization figures."
+                ),
+            },
         })
 
     # Failure path: bump counter and check cap.
@@ -3352,6 +3629,13 @@ def _do_handle_quality_check(args, **kw):
                 "figures": status.get("figures", []),
                 "stdout_tail": result["stdout_tail"],
                 "vis": {"skipped": True, "reason": "vis.py not generated for this goal"},
+                "next_action": {
+                    "hint": (
+                        "QC complete (figures skipped for this goal). Present "
+                        "the grade to the user, then finalize with export_repo."
+                    ),
+                    "must_present": True,
+                },
             })
 
         vis_result = run_script(
@@ -3386,6 +3670,14 @@ def _do_handle_quality_check(args, **kw):
                     "ok": True,
                     "stdout_tail": vis_result["stdout_tail"],
                     "status": vis_status,
+                },
+                "next_action": {
+                    "hint": (
+                        "QC complete. Present the grade and figures to "
+                        "the user, then finalize with export_repo or "
+                        "save_processed."
+                    ),
+                    "must_present": True,
                 },
             })
 
@@ -3506,8 +3798,9 @@ def _handle_save_processed(args, **kw):
 
     ``data_path`` may point to either the raw input (the script then
     auto-discovers the corresponding preprocessed nwb under work_dir) or
-    directly to a ``*_preprocessed.nwb`` file. When neither events nor a
-    label_config are available, AI_ready generation is intentionally skipped.
+    directly to a ``*_preprocessed.nwb`` file. When no events or labels are
+    available, the script falls back to fixed-length sliding-window epoching
+    (suitable for self-supervised / unsupervised models).
     """
     # Legacy interactive flow (output-format selector) — keep behavior intact.
     if args.get("confirm"):
@@ -3588,15 +3881,6 @@ def _handle_save_processed(args, **kw):
                 ),
             })
 
-        if not events and not label_config:
-            return json.dumps({
-                "success": False,
-                "skipped": True,
-                "reason": (
-                    "No events and no label_config — AI_ready generation skipped per "
-                    "the design contract (events_present or label_config required)."
-                ),
-            })
         # Generate the bundle (writes build_ai_ready.py among others).
         # Internal regen path: Phase 2 already past the human gate, so synth
         # proposal_confirmed=True + inspection_report_path to satisfy the gate.
@@ -3620,7 +3904,7 @@ def _handle_save_processed(args, **kw):
         return json.dumps({
             "success": False,
             "skipped": True,
-            "reason": "build_ai_ready.py was not generated (no events and no label_config).",
+            "reason": "build_ai_ready.py not found in code/ — was ai_ready included in deliverables?",
         })
 
     result = run_script(
@@ -3995,7 +4279,13 @@ def _handle_suggest_pipeline(args, **kw):
     if result.get("success") and "next_action" not in result:
         result["next_action"] = {
             "next_tool": "propose_pipeline",
-            "hint": "Call propose_pipeline to stage a concrete proposal.",
+            "hint": (
+                "Call propose_pipeline with the recommended_steps above. "
+                "Map each step to the evidence-driven form with param_evidence "
+                "(source: inspection_report / paradigm_skill / web_evidence / "
+                "empirical_default). Do NOT call skill_view on individual "
+                "operators — the suggest return already contains all parameters."
+            ),
         }
 
     return cap_return(result)
@@ -4339,6 +4629,8 @@ def _handle_propose_pipeline_evidence(args, **kw):
         "scenario": args.get("scenario") or "research",
         "deliverables": args.get("deliverables") or ["preprocessed"],
         "registry_version": registry_version,
+        "segment_duration": args.get("segment_duration"),
+        "stride": args.get("stride"),
         "steps": [
             {
                 "operator": s.get("operator", ""),
@@ -4456,6 +4748,8 @@ def _handle_propose_pipeline_evidence(args, **kw):
         "analysis_goal": analysis_goal,
         "scenario": args.get("scenario") or "research",
         "deliverables": args.get("deliverables") or ["preprocessed"],
+        "segment_duration": args.get("segment_duration"),
+        "stride": args.get("stride"),
         "web_evidence": _evidence_payload,
         "root_files": {},
         "plan_files": {
@@ -4724,6 +5018,8 @@ def _handle_propose_pipeline(args, **kw):
         "scenario": args.get("scenario") or "research",
         "deliverables": args.get("deliverables") or ["preprocessed"],
         "subject_id": subject_id,
+        "segment_duration": segment_duration,
+        "stride": stride,
         "steps": _proposal_steps,
         "rationale": rationale,
         "output_cleanup_applied": bool(_output_cleanup_applied),
@@ -4755,6 +5051,8 @@ def _handle_propose_pipeline(args, **kw):
         "analysis_goal": analysis_goal,
         "scenario": args.get("scenario") or "research",
         "deliverables": args.get("deliverables") or ["preprocessed"],
+        "segment_duration": segment_duration,
+        "stride": stride,
         "web_evidence": _evidence_payload,
         "root_files": {
             "pipeline.yaml": yaml_str,
@@ -4816,6 +5114,15 @@ def _handle_propose_pipeline(args, **kw):
         "viz": {
             "type": "pipeline_flow",
             "steps": viz_steps,
+        },
+        "next_action": {
+            "next_tool": "mark_proposal_confirmed",
+            "hint": (
+                "Present the full pipeline proposal to the user (steps, "
+                "rationale, parameters). Then call mark_proposal_confirmed"
+                "(work_dir=..., user_decision='confirm') once they accept."
+            ),
+            "must_present": True,
         },
     }
     try:
@@ -5311,13 +5618,13 @@ def _call_research_preprocessing(call_args: dict) -> dict:
 
     from easybci_lib.tools.interrupt import set_interrupt
 
-    # Reliability over latency (user directive): with the citation-extraction
-    # cap raised to 10 (8 concurrent → up to 2 extraction waves) plus the
-    # aggregate synthesis call, the worst-case chain can approach the old 60s
-    # ceiling — and this budget is a HARD cutoff that discards ALL evidence on
-    # exhaustion. Raised to 120s so a richer batch has room to finish instead of
-    # being truncated to "unavailable". Override via web.research.total_budget_seconds.
-    budget = _research_config_seconds("total_budget_seconds", 120.0)
+    # The budget wraps the entire chain: query planning + web search +
+    # per-citation extraction (up to 10 hops × 25s) + aggregate synthesis
+    # (90-360s depending on provider). With reasoning models behind slow
+    # proxies the synthesis call alone can take >120s, so the budget must
+    # leave headroom ABOVE the synthesis timeout.  Default raised to 240s;
+    # override via web.research.total_budget_seconds.
+    budget = _research_config_seconds("total_budget_seconds", 240.0)
 
     worker_tid: dict = {}
 
@@ -5441,24 +5748,58 @@ def _handle_list_data(args, **kw):
     if not dir_path.is_dir():
         return json.dumps({"error": f"Directory not found: {directory}"})
 
+    # The target directory itself may be a single-recording bundle
+    # (e.g. Compumedics .SLP with STUDYCFG.XML + CHANNELn.DAT).
+    if _is_single_recording_bundle(str(dir_path)):
+        return json.dumps({
+            "total_files": 1,
+            "neural_files": [str(dir_path)],
+            "directory": str(dir_path),
+            "truncated": False,
+            "is_bundle": True,
+            "next_action": (
+                "This directory is a single-recording bundle. "
+                "Pass it directly to inspect_data(data_path=...) as-is."
+            ),
+        })
+
     files = []
     for f in sorted(dir_path.rglob(pattern)):
         if f.is_file() and f.suffix.lower() in NEURAL_EXTENSIONS:
             files.append(str(f))
             if len(files) >= 100:
                 break
+        elif f.is_dir() and _is_single_recording_bundle(str(f)):
+            files.append(str(f))
+            if len(files) >= 100:
+                break
 
-    return json.dumps({
+    result = {
         "total_files": len(files),
         "neural_files": files[:50],
         "directory": str(dir_path),
         "truncated": len(files) >= 100,
-    })
+    }
+
+    if not files:
+        result["next_action"] = (
+            "No files with recognized neural extensions found. "
+            "Try inspect_data(data_path=...) on the directory — "
+            "it handles bundle formats (Compumedics .SLP, Nihon Kohden, etc.) "
+            "and custom IO loaders that list_data cannot enumerate."
+        )
+    else:
+        result["next_action"] = (
+            "Use inspect_data(data_path=...) on a file to get "
+            "channel/frequency/duration details."
+        )
+
+    return json.dumps(result)
 
 
 def _handle_generate_code(args, **kw):
     """Write the full code bundle: pipeline.py + qc.py + run.py + requirements.txt
-    (+ build_ai_ready.py iff events present OR label_config provided).
+    (+ build_ai_ready.py iff 'ai_ready' in deliverables).
 
     Pre-existing files are archived to ``<work_dir>/middle_process/code/`` only
     when their content would change — byte-identical regenerations are no-ops.
@@ -5515,6 +5856,25 @@ def _do_handle_generate_code(args, **kw):
             ),
         })
 
+    # Guard: reject re-entry when the pipeline already produced NWB output.
+    # Regenerating code at this point would (on next preprocess_neural call)
+    # trigger _maybe_archive_prior_run → archive everything → restart loop.
+    if _pipeline_has_produced_output(work_dir_check):
+        return json.dumps({
+            "success": False,
+            "error": (
+                "Pipeline output already exists in preprocessed_output/. "
+                "Regenerating code would trigger archive + full restart. "
+                "Fix the specific failing script directly."
+            ),
+            "fix_hint": (
+                "Edit the relevant script (code/build_ai_ready.py, code/qc.py, "
+                "code/vis.py) and re-run that stage. If pipeline steps need "
+                "changing, use revise_proposal first — it clears stale output "
+                "so generate_code can proceed safely."
+            ),
+        })
+
     insp_err = _require_inspection_report(args)
     if insp_err is not None:
         return json.dumps(insp_err)
@@ -5529,14 +5889,114 @@ def _do_handle_generate_code(args, **kw):
         generate_vis_script,
     )
 
-    steps = args["steps"]
+    steps = args.get("steps")
+    if not steps and work_dir_check:
+        try:
+            _p = work_dir_check / "plan" / "proposal.json"
+            if _p.is_file():
+                _obj = json.loads(_p.read_text(encoding="utf-8"))
+                _cs = _obj.get("steps")
+                if isinstance(_cs, list) and _cs:
+                    def _auto_step_to_str(s):
+                        if isinstance(s, dict):
+                            op = s.get("operator", "")
+                            params = s.get("params", {})
+                            if params and isinstance(params, dict):
+                                pvals = ",".join(str(v) for v in params.values())
+                                return f"{op}:{pvals}" if pvals else op
+                            return op
+                        return str(s)
+                    steps = [_auto_step_to_str(s) for s in _cs]
+        except Exception:
+            pass
+    if not steps:
+        return json.dumps({
+            "success": False,
+            "error": "generate_code requires 'steps' — a list of pipeline step strings (e.g. ['notch:50', 'bandpass:0.3,35']).",
+            "fix_hint": (
+                "Read the confirmed proposal at <work_dir>/plan/proposal.json "
+                "for the step list, then pass it as steps=[...]. Each step is "
+                "a string like 'operator:param1,param2', not a dict."
+            ),
+        })
     data_info = args.get("data_info") or {}
     modality = args.get("modality", "eeg")
-    analysis_goal = args.get("analysis_goal") or "generic"
+    analysis_goal = args.get("analysis_goal") or None
     label_config = args.get("label_config")
-    segment_duration = float(args.get("segment_duration", 2.0))
-    stride = float(args.get("stride", 1.0))
+    segment_duration = args.get("segment_duration")
+    stride = args.get("stride")
     work_dir = args.get("work_dir") or args.get("output_dir")
+
+    # Parameter propagation from confirmed proposal on disk.
+    # The confirmed proposal (plan/proposal.json, plan/goal.json, marker,
+    # and middle_process/proposal.staged.json) is the Phase-2 ground truth.
+    # LLM args serve as optional override; when absent we read from disk
+    # rather than falling back to generic defaults.
+    if work_dir:
+        # analysis_goal: marker → proposal.json → goal.json → arg → default
+        if analysis_goal is None:
+            try:
+                _mk = Path(work_dir) / "middle_process" / "proposal.confirmed"
+                if _mk.is_file():
+                    _mk_obj = json.loads(_mk.read_text(encoding="utf-8"))
+                    analysis_goal = _mk_obj.get("analysis_goal") or None
+            except Exception:
+                pass
+        if analysis_goal is None:
+            try:
+                _pp = Path(work_dir) / "plan" / "proposal.json"
+                if _pp.is_file():
+                    _pp_obj = json.loads(_pp.read_text(encoding="utf-8"))
+                    analysis_goal = _pp_obj.get("analysis_goal") or None
+            except Exception:
+                pass
+        if analysis_goal is None:
+            try:
+                _gj = Path(work_dir) / "plan" / "goal.json"
+                if _gj.is_file():
+                    _gj_obj = json.loads(_gj.read_text(encoding="utf-8"))
+                    analysis_goal = _gj_obj.get("analysis_goal") or None
+            except Exception:
+                pass
+
+        # segment_duration / stride: marker → staged envelope → arg → default
+        if segment_duration is None or stride is None:
+            try:
+                _mk = Path(work_dir) / "middle_process" / "proposal.confirmed"
+                if _mk.is_file():
+                    _mk_obj = json.loads(_mk.read_text(encoding="utf-8"))
+                    if segment_duration is None and _mk_obj.get("segment_duration") is not None:
+                        segment_duration = _mk_obj["segment_duration"]
+                    if stride is None and _mk_obj.get("stride") is not None:
+                        stride = _mk_obj["stride"]
+            except Exception:
+                pass
+        if segment_duration is None or stride is None:
+            try:
+                _staged = Path(work_dir) / "middle_process" / "proposal.staged.json"
+                if _staged.is_file():
+                    _staged_obj = json.loads(_staged.read_text(encoding="utf-8"))
+                    if segment_duration is None and _staged_obj.get("segment_duration") is not None:
+                        segment_duration = _staged_obj["segment_duration"]
+                    if stride is None and _staged_obj.get("stride") is not None:
+                        stride = _staged_obj["stride"]
+            except Exception:
+                pass
+        if segment_duration is None or stride is None:
+            try:
+                _pp = Path(work_dir) / "plan" / "proposal.json"
+                if _pp.is_file():
+                    _pp_obj = json.loads(_pp.read_text(encoding="utf-8"))
+                    if segment_duration is None and _pp_obj.get("segment_duration") is not None:
+                        segment_duration = _pp_obj["segment_duration"]
+                    if stride is None and _pp_obj.get("stride") is not None:
+                        stride = _pp_obj["stride"]
+            except Exception:
+                pass
+
+    analysis_goal = analysis_goal or "generic"
+    segment_duration = float(segment_duration if segment_duration is not None else 2.0)
+    stride = float(stride if stride is not None else 1.0)
 
     # output_format propagation: prefer explicit arg, otherwise read from
     # the staged proposal (written by _handle_propose_pipeline) under
@@ -5648,21 +6108,8 @@ def _do_handle_generate_code(args, **kw):
         deliverables = ["preprocessed"]
 
     wants_ai_ready = "ai_ready" in deliverables
-    needs_ai_ready = wants_ai_ready and (has_events or has_labels)
+    needs_ai_ready = wants_ai_ready
     ai_ready_skipped_reason = None
-    if wants_ai_ready and not (has_events or has_labels):
-        return json.dumps({
-            "success": False,
-            "error": (
-                "deliverables requested 'ai_ready' but the data has no events "
-                "and no label_config — AI-ready epochs need labels to segment on."
-            ),
-            "fix_hint": (
-                "Either supply label_config / an events file for this input, or "
-                "re-confirm with deliverables=['preprocessed'] (NWB only) if the "
-                "user does not actually need AI-ready training data."
-            ),
-        })
     if not wants_ai_ready and (has_events or has_labels):
         # events exist but the user did not ask for AI-ready — this is the new
         # default. Record why, so reasoning/README can explain the skip.
@@ -5729,6 +6176,66 @@ def _do_handle_generate_code(args, **kw):
         target.write_text(body, encoding="utf-8")
         written.append(name)
 
+    # Provision io_loader plugins at codegen time: sync all globally-registered
+    # loaders (~/.easybci/io_loaders/*.py) into code/io_loaders/ so the
+    # generated pipeline can discover custom formats at runtime without relying
+    # on the global directory (which may differ on another machine).
+    try:
+        from easybci_lib.tools.neural_processing.io.loader_registry import (
+            io_loaders_dir as _io_loaders_dir,
+            LOADER_MARKER as _LOADER_MARKER,
+        )
+        _global_loaders = _io_loaders_dir()
+        if _global_loaders.is_dir():
+            _repo_loaders = code_dir / "io_loaders"
+            for _lf in _global_loaders.glob("*.py"):
+                _src = _lf.read_text(encoding="utf-8")
+                if _LOADER_MARKER not in _src:
+                    continue
+                _dest = _repo_loaders / _lf.name
+                if _dest.is_file() and _dest.read_text(encoding="utf-8") == _src:
+                    continue
+                _repo_loaders.mkdir(parents=True, exist_ok=True)
+                _dest.write_text(_src, encoding="utf-8")
+                _rel = f"io_loaders/{_lf.name}"
+                if _rel not in written:
+                    written.append(_rel)
+    except Exception as _loader_prov_err:  # noqa: BLE001
+        logger.debug("io_loader provisioning at codegen time skipped: %s", _loader_prov_err)
+
+    # Also ensure built-in loaders are provisioned globally when the input
+    # needs them (Compumedics SLP, Nihon Kohden). This covers the case where
+    # the loader was never registered but the format is auto-detectable.
+    try:
+        from easybci_lib.tools.neural_processing.export.repo_builder import (
+            _input_is_compumedics,
+            _input_is_nihon_kohden,
+        )
+        _input_path = (data_info.get("meta") or {}).get("input_path", "")
+        _wd_path = Path(work_dir)
+        if _input_is_compumedics(_input_path, data_info, _wd_path):
+            from easybci_lib.tools.neural_processing.io.compumedics_loader_plugin import (
+                ensure_repo_plugin as _cm_ensure_repo,
+                ensure_global_plugin as _cm_ensure_global,
+            )
+            _cm_ensure_repo(code_dir)
+            _cm_ensure_global()
+            _rel = "io_loaders/compumedics_slp.py"
+            if _rel not in written:
+                written.append(_rel)
+        if _input_is_nihon_kohden(_input_path, data_info, _wd_path):
+            from easybci_lib.tools.neural_processing.io.nk_loader_plugin import (
+                ensure_repo_plugin as _nk_ensure_repo,
+                ensure_global_plugin as _nk_ensure_global,
+            )
+            _nk_ensure_repo(code_dir)
+            _nk_ensure_global()
+            _rel = "io_loaders/nk_loader.py"
+            if _rel not in written:
+                written.append(_rel)
+    except Exception as _builtin_prov_err:  # noqa: BLE001
+        logger.debug("built-in loader provisioning at codegen skipped: %s", _builtin_prov_err)
+
     # Static routing-safety check on the freshly-written code/. Multi-input
     # mode is mandatory for safety: any stage script that still derives
     # (sub, ses) from the raw stem is a regression of the multi-session fix.
@@ -5794,6 +6301,7 @@ def _do_handle_generate_code(args, **kw):
     # without reading back the generated scripts (token-saving measure).
     key_config: dict = {
         "n_steps": len(steps) if isinstance(steps, list) else 0,
+        "analysis_goal": analysis_goal,
         "output_format": "nwb",
     }
     if needs_ai_ready:
@@ -5825,6 +6333,15 @@ def _do_handle_generate_code(args, **kw):
         "analysis_goal": analysis_goal,
         "work_dir": str(work_dir),
         "key_config": key_config,
+        "next_action": {
+            "next_tool": "preprocess_neural",
+            "hint": (
+                "Call preprocess_neural(work_dir='" + str(work_dir) + "') to "
+                "execute the generated scripts. Do NOT read or modify the "
+                "generated code — the executor handles script running, error "
+                "recovery, and QC."
+            ),
+        },
         **_lint_generated_pipeline(code_dir / "pipeline.py"),
     }
     if ai_ready_skipped_reason is not None:
@@ -6607,6 +7124,16 @@ registry.register(
     handler=_handle_mark_proposal_confirmed,
     check_fn=_check_neural_requirements,
     emoji="✅",
+)
+
+# 1c-bis. revise_proposal — post-confirm step modification
+registry.register(
+    name="revise_proposal",
+    toolset="neural",
+    schema=REVISE_PROPOSAL_SCHEMA,
+    handler=_handle_revise_proposal,
+    check_fn=_check_neural_requirements,
+    emoji="✏️",
 )
 
 # 2. preprocess_neural

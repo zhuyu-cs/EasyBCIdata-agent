@@ -34,6 +34,22 @@ _DENY_REGISTER_AS_DIR: frozenset[str] = frozenset({
     "/Users",
 })
 
+_WORK_DIR_SUFFIXES = ("_preprocess_work_dir", "_preprocess_work_dirs")
+
+
+def _is_work_dir_path(resolved: str) -> bool:
+    """True if *resolved* is inside a pipeline work directory.
+
+    Work directories (``*_preprocess_work_dir/``) are tool-chain OUTPUT, not
+    source data — they must be exempt from the source-data read/write barrier
+    even when their parent directory is registered as a protected source dir.
+    """
+    parts = Path(resolved).parts
+    for part in parts:
+        if any(part.endswith(sfx) for sfx in _WORK_DIR_SUFFIXES):
+            return True
+    return False
+
 
 def _is_overly_broad_dir(resolved: str) -> bool:
     """True if resolved path is too broad to register as a protected dir."""
@@ -134,6 +150,8 @@ def is_inside_protected_dir(path: str) -> bool:
     """True if path resolves into any registered protected directory.
 
     Does NOT require the path to exist — works for pre-check of would-be writes.
+    Exempts ``*_preprocess_work_dir`` paths — those are tool-chain output, not
+    source data.
     """
     if not path:
         return False
@@ -141,6 +159,9 @@ def is_inside_protected_dir(path: str) -> bool:
         resolved = os.path.realpath(os.path.expanduser(path))
     except (OSError, ValueError):
         resolved = path
+
+    if _is_work_dir_path(resolved):
+        return False
 
     with _lock:
         for protected in _protected_dirs:
@@ -235,13 +256,14 @@ def check_output_path(output_path: str) -> Optional[str]:
                 "source data. Choose a different output path — source data "
                 "is immutable and must never be overwritten."
             )
-        for protected_dir in _protected_dirs:
-            if resolved == protected_dir or resolved.startswith(protected_dir + os.sep):
-                return (
-                    f"BLOCKED: Output path '{output_path}' is inside protected "
-                    f"source directory '{protected_dir}'. Choose an output "
-                    "path outside the source data tree."
-                )
+        if not _is_work_dir_path(resolved):
+            for protected_dir in _protected_dirs:
+                if resolved == protected_dir or resolved.startswith(protected_dir + os.sep):
+                    return (
+                        f"BLOCKED: Output path '{output_path}' is inside protected "
+                        f"source directory '{protected_dir}'. Choose an output "
+                        "path outside the source data tree."
+                    )
     return None
 
 

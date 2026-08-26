@@ -433,7 +433,10 @@ _easybci_home = get_easybci_home()
 
 # Load environment variables from ~/.easybci/.env first.
 # User-managed env files should override stale shell exports on restart.
-from dotenv import load_dotenv  # backward-compat for tests that monkeypatch this symbol
+try:
+    from dotenv import load_dotenv  # backward-compat for tests that monkeypatch this symbol
+except ImportError:
+    load_dotenv = None  # type: ignore[assignment]
 from easybci_cli.env_loader import load_easybci_dotenv
 _env_path = _easybci_home / '.env'
 load_easybci_dotenv(easybci_home=_easybci_home, project_env=Path(__file__).resolve().parents[1] / '.env')

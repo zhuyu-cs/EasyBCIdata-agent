@@ -709,39 +709,70 @@ def _step_drop_bads(d: Dict, param: str = "") -> Dict:
         if data.size > 0 and data.ndim == 2:
             stds = data.std(axis=1)
             nz = stds[stds > 0.0]
-            median_std = float(np.median(nz)) if nz.size else 0.0
             global_p99 = float(np.percentile(np.abs(data), 99)) if data.size else 0.0
 
             data_unit = str(meta.get("data_unit", "")).strip().lower()
-            # Unit-aware absolute "dead-electrode" floor — used only as a
-            # *lower bound* on the relative flat threshold so we never flag
-            # channels whose tiny but legitimate signal happens to look
-            # smaller than 1e-4 × median. None ⇒ no absolute floor.
             _abs_flat_atol = {
-                "v":  1e-9,    # 1 nV  (deep below realistic EEG noise floor)
-                "uv": 1e-3,    # 1e-3 µV
-                "t":  1e-15,   # 1 fT
-                "ft": 1e-3,    # 1e-3 fT
+                "v":  1e-9,
+                "uv": 1e-3,
+                "t":  1e-15,
+                "ft": 1e-3,
             }.get(data_unit)
-            # Relative flat threshold; fall back to a permissive
-            # median_std * 1e-6 sentinel when unit is unknown so we don't
-            # accidentally re-introduce a hardcoded EEG-in-V assumption.
-            if _abs_flat_atol is None:
-                flat_threshold = max(median_std * 1e-4, median_std * 1e-6)
-            else:
-                flat_threshold = max(median_std * 1e-4, _abs_flat_atol)
 
-            for i, ch in enumerate(d["channels"]):
-                if ch in bads:
-                    continue
-                if median_std > 0 and stds[i] < flat_threshold:
-                    bads.append(ch)
-                    continue
-                if median_std > 0 and stds[i] > 5.0 * median_std:
-                    bads.append(ch)
-                    continue
-                if global_p99 > 0 and float(np.abs(data[i]).max()) > 5.0 * global_p99:
-                    bads.append(ch)
+            ch_types = meta.get("ch_types")
+            has_per_type = (
+                isinstance(ch_types, list)
+                and len(ch_types) == len(d["channels"])
+                and len(set(ch_types)) > 1
+            )
+
+            if has_per_type:
+                groups: Dict[str, list] = {}
+                for idx, ct in enumerate(ch_types):
+                    groups.setdefault(ct, []).append(idx)
+                group_median_std: Dict[str, float] = {}
+                for ct, indices in groups.items():
+                    finite = [float(stds[i]) for i in indices if stds[i] > 0.0]
+                    group_median_std[ct] = float(np.median(finite)) if finite else 0.0
+
+                for i, ch in enumerate(d["channels"]):
+                    if ch in bads:
+                        continue
+                    ct = ch_types[i]
+                    med = group_median_std.get(ct, 0.0)
+                    if _abs_flat_atol is None:
+                        flat_threshold = max(med * 1e-4, med * 1e-6) if med > 0 else 0.0
+                    else:
+                        flat_threshold = max(med * 1e-4, _abs_flat_atol)
+                    if med > 0 and stds[i] < flat_threshold:
+                        bads.append(ch)
+                        continue
+                    if med > 0 and stds[i] > 5.0 * med:
+                        bads.append(ch)
+                        continue
+                    group_p99_data = data[[j for j in groups[ct] if j != i]]
+                    if group_p99_data.size > 0:
+                        group_p99 = float(np.percentile(np.abs(group_p99_data), 99))
+                        if group_p99 > 0 and float(np.abs(data[i]).max()) > 5.0 * group_p99:
+                            bads.append(ch)
+            else:
+                median_std = float(np.median(nz)) if nz.size else 0.0
+                if _abs_flat_atol is None:
+                    flat_threshold = max(median_std * 1e-4, median_std * 1e-6)
+                else:
+                    flat_threshold = max(median_std * 1e-4, _abs_flat_atol)
+
+                for i, ch in enumerate(d["channels"]):
+                    if ch in bads:
+                        continue
+                    if median_std > 0 and stds[i] < flat_threshold:
+                        bads.append(ch)
+                        continue
+                    if median_std > 0 and stds[i] > 5.0 * median_std:
+                        bads.append(ch)
+                        continue
+                    if global_p99 > 0 and float(np.abs(data[i]).max()) > 5.0 * global_p99:
+                        bads.append(ch)
 
         if bads:
             meta["bad_channels"] = bads

@@ -3282,6 +3282,11 @@ def _resolve_task_provider_model(
 
 
 _DEFAULT_AUX_TIMEOUT = 30.0
+_COMPRESSION_DEFAULT_TIMEOUT = 90.0
+
+_TASK_DEFAULT_TIMEOUTS: Dict[str, float] = {
+    "compression": _COMPRESSION_DEFAULT_TIMEOUT,
+}
 
 
 def _get_auxiliary_task_config(task: str) -> Dict[str, Any]:
@@ -3299,7 +3304,13 @@ def _get_auxiliary_task_config(task: str) -> Dict[str, Any]:
 
 
 def _get_task_timeout(task: str, default: float = _DEFAULT_AUX_TIMEOUT) -> float:
-    """Read timeout from auxiliary.{task}.timeout in config, falling back to *default*."""
+    """Read timeout from auxiliary.{task}.timeout in config, falling back to *default*.
+
+    Some tasks have a higher built-in default than the generic 30s because
+    they generate longer outputs (compression → 90s).  The per-task default
+    from ``_TASK_DEFAULT_TIMEOUTS`` is used when the config has no explicit
+    override.
+    """
     if not task:
         return default
     task_config = _get_auxiliary_task_config(task)
@@ -3309,7 +3320,7 @@ def _get_task_timeout(task: str, default: float = _DEFAULT_AUX_TIMEOUT) -> float
             return float(raw)
         except (ValueError, TypeError):
             pass
-    return default
+    return _TASK_DEFAULT_TIMEOUTS.get(task, default)
 
 
 def _get_task_extra_body(task: str) -> Dict[str, Any]:

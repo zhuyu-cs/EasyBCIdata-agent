@@ -10478,7 +10478,7 @@ class AIAgent:
         # codegen/execute/QC have accurate context without the full negotiation.
         from easybci_lib.tools.neural_tools import consume_phase1_compact_signal
         if consume_phase1_compact_signal() and self.compression_enabled:
-            _compressor = self._get_context_engine()
+            _compressor = self.context_compressor
             if hasattr(_compressor, 'compress') and _compressor.has_content_to_compress(messages):
                 _focus = (
                     "confirmed pipeline: step names, operators, parameters, "

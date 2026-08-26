@@ -67,6 +67,7 @@ CANONICAL_OPERATORS: frozenset[str] = frozenset({
     "exclude_subjects", "sort_epochs",
     "no_op",
     "sleep_stager",
+    "respiratory_events", "plm_detect", "epoch_qc_sleep",
 })
 
 
@@ -167,6 +168,10 @@ OPERATOR_EXECUTORS: Dict[str, frozenset[str]] = {
     "no_op":                 frozenset({SKILL}),
     # qc
     "sleep_stager":          frozenset({SKILL}),
+    # psg
+    "respiratory_events":    frozenset({SKILL}),
+    "plm_detect":            frozenset({SKILL}),
+    "epoch_qc_sleep":        frozenset({SKILL}),
 }
 
 # Invariant: the capability table and CANONICAL_OPERATORS describe the same set,
@@ -237,6 +242,34 @@ OPERATOR_SYNONYMS: Dict[str, Callable[[str], str]] = {
 }
 
 
+_ROUTED_OPERATORS: frozenset = frozenset({"bandpass"})
+
+_ROUTE_LABEL_ALIASES: Dict[str, str] = {
+    "respiratory": "resp",
+    "respiration": "resp",
+    "ekg": "ecg",
+    "ref": "ref_meg",
+}
+
+
+def _normalize_routed_param(op: str, param: str) -> Tuple[str, bool]:
+    """Normalize route label aliases in operators that support channel routing.
+
+    Returns ``(normalized_param, was_changed)``.
+    """
+    if op not in _ROUTED_OPERATORS or not param:
+        return param, False
+    parts = param.split(",")
+    if len(parts) < 3 or not parts[2].strip():
+        return param, False
+    route = parts[2].strip().lower()
+    canonical = _ROUTE_LABEL_ALIASES.get(route)
+    if canonical:
+        parts[2] = canonical
+        return ",".join(parts), True
+    return param, False
+
+
 def normalize_step(step_str: str) -> Tuple[str, bool]:
     """Normalize a single ``operator[:param]`` step to canonical form.
 
@@ -247,16 +280,28 @@ def normalize_step(step_str: str) -> Tuple[str, bool]:
     - Known synonym → rewritten to canonical form (``was_normalized=True``).
     - Unknown operator → ``UnknownOperatorError`` with a nearest-match hint.
     """
+    if isinstance(step_str, dict):
+        op = step_str.get("name") or step_str.get("operator") or ""
+        params = step_str.get("params") or step_str.get("parameters") or ""
+        if isinstance(params, dict):
+            params = ",".join(f"{v}" for v in params.values())
+        step_str = f"{op}:{params}" if params else str(op)
     op, param = _split(step_str)
     if not op:
         raise UnknownOperatorError(f"empty operator in step {step_str!r}")
 
     if op in CANONICAL_OPERATORS:
+        param, route_changed = _normalize_routed_param(op, param)
         canonical = f"{op}:{param}" if param else op
-        return canonical, canonical != (step_str or "").strip()
+        changed = canonical != (step_str or "").strip() or route_changed
+        return canonical, changed
 
     if op in OPERATOR_SYNONYMS:
-        return OPERATOR_SYNONYMS[op](param), True
+        result = OPERATOR_SYNONYMS[op](param)
+        result_op, result_param = _split(result)
+        result_param, _ = _normalize_routed_param(result_op, result_param)
+        result = f"{result_op}:{result_param}" if result_param else result_op
+        return result, True
 
     # Unknown — fail loud with a suggestion.
     candidates = sorted(CANONICAL_OPERATORS) + sorted(OPERATOR_SYNONYMS)

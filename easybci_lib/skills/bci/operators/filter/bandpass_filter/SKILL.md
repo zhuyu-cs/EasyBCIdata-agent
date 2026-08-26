@@ -75,22 +75,26 @@ look-ahead.
 
 ## Parameter Format & Defaults
 
-`bandpass:{low},{high}` — comma-separated, both optional but not both
-empty:
+`bandpass:{low},{high}[,{channels}]` — comma-separated, both `low`/`high`
+optional but not both empty:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | ``low`` | float or empty | None | High-pass cutoff (Hz). Empty disables high-pass arm. |
 | ``high`` | float or empty | None | Low-pass cutoff (Hz). Empty disables low-pass arm. |
+| ``channels`` | string or empty | (all) | Channel route label. Matches MNE ch_type (eeg/eog/emg/misc) or channel-name substring. When absent, filter applies to all channels. |
 | ``method`` (kw) | "fir" \| "iir" | "fir" | FIR for analysis, IIR only for online_inference. |
 | ``order`` (kw, IIR only) | int | 4 | Butterworth order per arm. |
 
 Examples:
-- `bandpass:1,40` — standard EEG analysis band.
+- `bandpass:1,40` — standard EEG analysis band (all channels).
 - `bandpass:0.5,100` — wider band for sEEG/ECoG.
 - `bandpass:,40` — low-pass only (drop high-frequency EMG without
   touching DC/drift).
 - `bandpass:1,` — high-pass only (remove drift; keep all high freq).
+- `bandpass:0.3,35,eeg` — 0.3–35 Hz on EEG channels only (PSG routing).
+- `bandpass:10,100,emg` — 10–100 Hz on EMG channels only.
+- `bandpass:0.05,3,NPress` — 0.05–3 Hz on channels matching "NPress".
 
 See ``parameter_uncertainty/bandpass_filter.yaml`` for per-paradigm
 empirical defaults with citations.

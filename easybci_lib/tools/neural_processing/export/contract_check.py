@@ -322,7 +322,7 @@ def enumerate_pending(
             if not qc.is_file():
                 missing.append("qc_report")
 
-            if inp.get("events_path") and wants_ai_ready:
+            if wants_ai_ready:
                 epochs = (
                     wd / "preprocessed_output" / "AI_ready"
                     / sub / f"ses-{ses}" / f"{stem}_epochs.pkl"

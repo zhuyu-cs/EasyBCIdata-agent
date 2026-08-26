@@ -410,6 +410,14 @@ prompt_caching:
 # Other providers pick a sensible default automatically.
 #
 # auxiliary:
+#   # Context compression summaries
+#   compression:
+#     provider: "auto"
+#     model: ""
+#     timeout: 90            # LLM API call timeout (seconds); compression
+#                            # generates long structured summaries, needs more
+#                            # time than other auxiliary tasks (default: 90)
+#
 #   # Image analysis: vision_analyze tool + browser screenshots
 #   vision:
 #     provider: "auto"

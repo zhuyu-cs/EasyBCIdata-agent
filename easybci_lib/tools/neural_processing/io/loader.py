@@ -2204,6 +2204,37 @@ def _load_unknown_format(filepath: str, inspect_only: bool = False) -> Dict[str,
         except Exception as pkl_err:
             logger.debug("Pickle reader failed for %s: %s", path.name, pkl_err)
 
+    # Check if this file is a member of a directory-based recording bundle.
+    # Some formats (Compumedics, CTF .ds, etc.) store data as a directory of
+    # component files. When the agent passes a member file instead of the
+    # directory, guide it to use the parent directory path.
+    _parent_backend = "unknown"
+    if path.parent.is_dir():
+        _parent_backend = _detect_backend(path.parent)
+
+    if _parent_backend != "unknown":
+        logger.warning(
+            "Cannot load '%s': this file is a member of a directory-based "
+            "recording bundle (%s) at '%s'. Pass the directory path instead.",
+            path.name, _parent_backend, path.parent,
+        )
+        return {
+            "data": np.zeros((1, 0), dtype=np.float32),
+            "frequency": 1.0,
+            "channels": ["Ch0"],
+            "duration": 0.0,
+            "meta": {
+                "format": "unknown",
+                "source_file": filepath,
+                "load_error": (
+                    f"'{path.name}' is a member of a directory-based recording "
+                    f"bundle ({_parent_backend}). Pass the parent directory "
+                    f"instead: '{path.parent}'"
+                ),
+                "bundle_directory": str(path.parent),
+            },
+        }
+
     logger.warning(
         "Cannot load '%s': format not recognized and all fallback readers failed. "
         "Supported formats: %s. "
