@@ -270,6 +270,47 @@ def _maybe_archive_prior_run(args: dict, kw: dict, *, phase: str) -> None:
         logger.debug("%s: archive check failed (continuing): %s", phase, exc)
 
 
+def _reject_if_already_confirmed(work_dir, tool_name: str) -> dict | None:
+    """Symmetric Phase-1 gate: refuse plan/propose/suggest when Phase 1 has
+    already closed.
+
+    Mirrors the marker check in ``_do_handle_generate_code``: once
+    ``middle_process/proposal.confirmed`` exists, calling plan/propose/
+    suggest again is a state-machine violation that used to trigger a
+    resume-time loop (the propose handler unlinked the marker, forcing
+    another user confirmation). Returns an error dict ready for
+    ``json.dumps``, or None if the call is allowed to proceed.
+
+    A per-work_dir counter (``autofix_state.plan_after_confirm``) bounds a
+    runaway LLM that ignores the fix_hint — once it hits
+    ``MAX_AUTOFIX_ATTEMPTS``, the returned payload carries
+    ``recovery_exhausted=True`` so upstream can escalate.
+    """
+    if work_dir is None:
+        return None
+    marker = Path(str(work_dir)) / "middle_process" / "proposal.confirmed"
+    if not marker.is_file():
+        return None
+    from easybci_agent.i18n import t
+    payload = {
+        "success": False,
+        "error": t("plan.reject_after_confirmed_error"),
+        "fix_hint": t("plan.reject_after_confirmed_fix_hint"),
+        "rejected_tool": tool_name,
+        "work_dir": str(work_dir),
+    }
+    try:
+        rec = _bump_autofix_attempts(work_dir=str(work_dir),
+                                     stage="plan_after_confirm")
+        attempts = int(rec.get("attempts", 0))
+        payload["attempts_after_confirm"] = attempts
+        if attempts >= MAX_AUTOFIX_ATTEMPTS:
+            payload["recovery_exhausted"] = True
+    except Exception:
+        pass
+    return payload
+
+
 def _require_inspection_report(args: dict) -> dict | None:
     """Phase 1 gate: returns None on success or an error payload on failure.
 
@@ -2867,22 +2908,45 @@ def _resolve_analysis_goal_for_run(args: dict, work_dir: str) -> str:
 def _script_header_matches(script_path: Path, *, steps: list, analysis_goal: str) -> bool:
     """Return True iff the existing script's EASYBCI_STEPS / GOAL header matches.
 
-    Compared by the canonical representation of the (post-enforce) step list
-    serialized as ``repr(list)``. Mismatch means the steps changed since the
-    script was last generated — the handler will archive + regenerate. Match
-    means the script's logic still corresponds to the current call (so any
-    agent-applied repair edits are preserved across retries).
+    The header records exactly the steps codegen embedded — the canonicalized
+    (normalize + inspection-driven notch) form of the AUTHORED step list.
+    Goal-driven channel cleanup is already baked into the authored steps at
+    plan-construction time (propose / batch), so the comparator does NOT
+    re-run ``_enforce_clean_output``: it reproduces only codegen's
+    deterministic canonicalization via the SHARED
+    ``canonicalize_steps_for_header`` helper. This guarantees the comparator
+    and generator can never drift — a match means the confirmed plan is
+    unchanged, so any agent-applied repair edits are preserved across retries;
+    a mismatch means the plan genuinely changed.
     """
     try:
         head = script_path.read_text(encoding="utf-8")[:1024]
     except OSError:
         return False
-    from easybci_lib.tools.neural_processing.codegen.generator import _enforce_clean_output
+    from easybci_lib.tools.neural_processing.codegen.generator import (
+        canonicalize_steps_for_header,
+    )
+    # Load the same inspection_report codegen used (notch-override input), via
+    # the SAME loader/shape (load_inspection_report(...).to_dict()) so the
+    # recomputed header steps match byte-for-byte. Best-effort: absent /
+    # unreadable report just means no notch override, matching codegen.
+    inspection_report = None
     try:
-        enforced = _enforce_clean_output(list(steps), analysis_goal=analysis_goal)
+        from easybci_lib.tools.neural_processing.io.inspection_report import (
+            load_inspection_report,
+        )
+        _insp = script_path.parent.parent / "middle_process" / "inspection_report.json"
+        if _insp.is_file():
+            inspection_report = load_inspection_report(_insp).to_dict()
+    except Exception:
+        inspection_report = None
+    try:
+        canonical = canonicalize_steps_for_header(
+            list(steps), inspection_report=inspection_report
+        )
     except Exception:
         return False
-    want_steps = f"EASYBCI_STEPS: {repr(enforced)}"
+    want_steps = f"EASYBCI_STEPS: {repr(canonical)}"
     want_goal = f"EASYBCI_GOAL: {analysis_goal}"
     return want_steps in head and want_goal in head
 
@@ -3284,12 +3348,63 @@ def _do_handle_preprocess_neural(args, **kw):
                 "fix_hint": "Call deep_inspect again on each input file to rebuild middle_process/inputs_routing.json.",
             })
 
-    result = run_script(
-        work_dir=str(work_dir),
-        stage="pipeline",
-        input_path=None if multi_input else str(data_path),
-        timeout=_resolve_timeout(args.get("timeout")),
-    )
+    # Dispatch-layer XL admission: any input whose recorded peak_mb reaches
+    # EXCLUSIVE_RATIO of physical RAM triggers a machine-wide exclusive lease
+    # held for the entire pipeline.py subprocess. The in-pipeline per-file gate
+    # (inlined into generated code) remains as defense-in-depth. Two agent
+    # instances launching XL batches will now serialize at the parent level.
+    _gate_token = None
+    try:
+        from easybci_lib.tools.neural_processing.preprocess.memory_strategy import (
+            is_exclusive_peak,
+        )
+        from easybci_lib.tools.neural_processing.batch import global_gate as _gate
+        _xl_peaks: list[float] = []
+        if multi_input:
+            try:
+                _tbl = json.loads(routing_path.read_text(encoding="utf-8"))
+                for _inp in (_tbl.get("inputs") or []):
+                    # XL classification uses NATIVE peak: the dispatch-layer
+                    # lease is taken BEFORE pipeline.py's runtime branch picks
+                    # native vs decimated loading. Fall back to peak_mb only
+                    # for legacy routing tables that predate peak_native_mb.
+                    _p = _inp.get("peak_native_mb") or _inp.get("peak_mb")
+                    if isinstance(_p, (int, float)) and _p > 0 and is_exclusive_peak(float(_p)):
+                        _xl_peaks.append(float(_p))
+            except Exception:
+                _xl_peaks = []
+        if _xl_peaks:
+            _max_peak = max(_xl_peaks)
+            _wd_id = work_dir.name
+            logger.info(
+                "[gate] XL batch %s: %d file(s) peak>=50%% RAM, "
+                "acquiring exclusive lease (max_peak=%.0f MB)",
+                _wd_id, len(_xl_peaks), _max_peak,
+            )
+            _gate_token = _gate.acquire_exclusive(
+                _max_peak, file_id=_wd_id, timeout=None,
+            )
+            logger.info("[gate] exclusive lease acquired for %s", _wd_id)
+    except Exception as _gate_err:
+        # Gate is defense-in-depth; a failure here must not break dispatch.
+        # The in-pipeline per-file gate still runs inside the subprocess.
+        logger.warning("dispatch-layer gate skipped: %s", _gate_err)
+        _gate_token = None
+
+    try:
+        result = run_script(
+            work_dir=str(work_dir),
+            stage="pipeline",
+            input_path=None if multi_input else str(data_path),
+            timeout=_resolve_timeout(args.get("timeout")),
+        )
+    finally:
+        if _gate_token:
+            try:
+                _gate.release(_gate_token)
+                logger.info("[gate] exclusive lease released for %s", work_dir.name)
+            except Exception as _rel_err:
+                logger.warning("gate release failed: %s", _rel_err)
 
     if result["ok"]:
         # Stage succeeded — clear its AutoFixer counter (other stages preserved).
@@ -4498,6 +4613,65 @@ def _classify_label_from_fingerprint(fingerprint) -> dict:
     return None
 
 
+def _project_step_dict_to_str(s: dict) -> str:
+    """Project a structured proposal step dict to its ``operator:params`` string
+    form (matching generate_code's ``_auto_step_to_str`` / the legacy propose
+    convention), for enforcement in string-space."""
+    op = s.get("operator", "")
+    params = s.get("params", {})
+    if params and isinstance(params, dict):
+        pvals = ",".join(str(v) for v in params.values())
+        return f"{op}:{pvals}" if pvals else op
+    return op
+
+
+def _enforce_proposal_step_dicts(raw_steps: list, *, analysis_goal: str) -> list:
+    """Apply the goal-driven channel-cleanup injection ONCE, at proposal
+    construction, to a structured (dict) step list.
+
+    The evidence propose path stores structured steps (operator/method/params/
+    param_evidence). To keep proposal.json the authoritative final plan — the
+    same invariant the legacy path already satisfies — the injection is
+    materialized here as visible steps rather than deferred to codegen. Existing
+    steps keep their param_evidence; injected steps (which carry none) become
+    minimal dicts, matching the legacy proposal shape.
+
+    Enforcement runs in string-space (``_enforce_clean_output`` inserts/replaces
+    whole operators, never mutates existing params), then the result is mapped
+    back to dicts in the enforced order.
+    """
+    from collections import deque
+    try:
+        from easybci_lib.tools.neural_processing.codegen.generator import (
+            _enforce_clean_output,
+        )
+    except Exception:
+        return list(raw_steps)
+    projected = [_project_step_dict_to_str(s) for s in raw_steps if isinstance(s, dict)]
+    try:
+        enforced = _enforce_clean_output(projected, analysis_goal=analysis_goal)
+    except Exception:
+        return list(raw_steps)
+    by_str: dict = {}
+    for s in raw_steps:
+        if isinstance(s, dict):
+            by_str.setdefault(_project_step_dict_to_str(s), deque()).append(s)
+    out: list = []
+    for step_str in enforced:
+        q = by_str.get(step_str)
+        if q:
+            out.append(q.popleft())
+        else:
+            op, _, praw = step_str.partition(":")
+            out.append({
+                "operator": op,
+                "method": "",
+                "params": {"raw": praw} if praw else {},
+                "param_evidence": {},
+            })
+    return out
+
+
 def _handle_propose_pipeline_evidence(args, **kw):
     """Evidence-driven propose: validates step-level param_evidence, hydrates
     missing entries from the parameter-uncertainty registry, and STAGES the
@@ -4622,6 +4796,23 @@ def _handle_propose_pipeline_evidence(args, **kw):
         question=_build_research_question(args)["question"],
     )
 
+    # Enforce the goal-driven channel cleanup ONCE, here at proposal
+    # construction, so proposal.json carries the final authoritative step list
+    # (visible to the user at confirm, editable via revise_proposal). Codegen
+    # renders it verbatim thereafter — no hidden re-injection downstream. This
+    # matches the legacy propose path, which already enforces before storing.
+    _enforced_step_dicts = _enforce_proposal_step_dicts(
+        [
+            {
+                "operator": s.get("operator", ""),
+                "method": str(s.get("method", "") or ""),
+                "params": s.get("params", {}) or {},
+                "param_evidence": s.get("param_evidence", {}) or {},
+            }
+            for s in raw_steps
+        ],
+        analysis_goal=analysis_goal,
+    )
     proposal = {
         "modality": modality,
         "paradigm": paradigm,
@@ -4631,15 +4822,7 @@ def _handle_propose_pipeline_evidence(args, **kw):
         "registry_version": registry_version,
         "segment_duration": args.get("segment_duration"),
         "stride": args.get("stride"),
-        "steps": [
-            {
-                "operator": s.get("operator", ""),
-                "method": str(s.get("method", "") or ""),
-                "params": s.get("params", {}) or {},
-                "param_evidence": s.get("param_evidence", {}) or {},
-            }
-            for s in raw_steps
-        ],
+        "steps": _enforced_step_dicts,
         "rationale": rationale,
         "web_evidence": _evidence_payload,
     }
@@ -4760,18 +4943,21 @@ def _handle_propose_pipeline_evidence(args, **kw):
         },
     }
     staged_path = middle_dir / "proposal.staged.json"
+
+    # Symmetric Phase-1 gate: refuse propose when the user has already
+    # confirmed a prior proposal on this work_dir. The previous behavior
+    # (silently unlinking proposal.confirmed) caused a resume-time loop
+    # where a re-planning LLM would drop the marker and force the user to
+    # confirm the same proposal again. Refuse BEFORE writing the staged
+    # envelope so on-disk state stays consistent with the rejection.
+    _rej = _reject_if_already_confirmed(work_dir_path, "propose_pipeline")
+    if _rej is not None:
+        return json.dumps(_rej)
+
     staged_path.write_text(
         json.dumps(envelope, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
-
-    # A fresh propose invalidates any prior confirmation — drop the marker so
-    # the agent has to re-confirm against the new staged proposal. Without
-    # this clearing, a stale marker from a previous confirm could let
-    # generate_code run against an outdated plan/ once the agent materializes.
-    confirmed_marker = middle_dir / "proposal.confirmed"
-    if confirmed_marker.exists():
-        confirmed_marker.unlink()
 
     # Structured pipeline view for Step 7 CONFIRM. The legacy propose branch
     # returns a `viz` field and the SKILL.md CONFIRM step tells the LLM to
@@ -5064,16 +5250,19 @@ def _handle_propose_pipeline(args, **kw):
         },
     }
     staged_path = middle_dir / "proposal.staged.json"
+
+    # Symmetric Phase-1 gate: refuse propose after prior confirmation.
+    # See _reject_if_already_confirmed / _handle_propose_pipeline_evidence
+    # for the shared rationale — this branch previously silently unlinked
+    # the marker, which was the propose-side half of the resume-time loop.
+    _rej = _reject_if_already_confirmed(work_dir, "propose_pipeline")
+    if _rej is not None:
+        return json.dumps(_rej)
+
     staged_path.write_text(
         json.dumps(envelope, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
-
-    # A fresh propose invalidates any prior confirmation — drop the marker
-    # so the agent has to re-confirm against the new staged proposal.
-    confirmed_marker = middle_dir / "proposal.confirmed"
-    if confirmed_marker.exists():
-        confirmed_marker.unlink()
 
     # Register work_dir with the finalize registry so the run's finally hook
     # can produce a (possibly partial) mini-repo if the LLM stops before
@@ -5187,6 +5376,16 @@ def _do_handle_plan_pipeline(args, **kw):
 
     # Archive any previously-finalized run on this work_dir (same session).
     _maybe_archive_prior_run(args, kw, phase="plan_pipeline")
+
+    # Symmetric Phase-1 gate: refuse re-planning once the user has confirmed
+    # a proposal on this work_dir. Mirrors the marker check in
+    # _do_handle_generate_code. Without this, an LLM recovering from an API
+    # disconnect could re-run plan/propose, triggering the propose handler's
+    # marker unlink and forcing the user to confirm the same proposal again.
+    _wd_gate = _resolve_work_dir_from_args(args)
+    _rej = _reject_if_already_confirmed(_wd_gate, "plan_pipeline")
+    if _rej is not None:
+        return json.dumps(_rej)
 
     # Contract: every plan call must reference a fresh inspection_report.
     insp_err = _require_inspection_report(args)
@@ -5797,6 +5996,43 @@ def _handle_list_data(args, **kw):
     return json.dumps(result)
 
 
+def _recover_steps_from_proposal(work_dir, args):
+    """Return `steps` list for post-confirm handlers.
+
+    Order: args["steps"] (explicit override) → plan/proposal.json (SoT after
+    mark_proposal_confirmed). Dict-shaped steps are normalized to "op:p1,p2"
+    strings. Returns [] when neither source yields a non-empty list; caller
+    decides whether that is fatal (generate_code) or worth a fix_hint envelope.
+    """
+    steps = args.get("steps") if isinstance(args, dict) else None
+    if steps:
+        return steps
+    if work_dir is None:
+        return []
+    try:
+        _p = Path(work_dir) / "plan" / "proposal.json"
+        if not _p.is_file():
+            return []
+        _obj = json.loads(_p.read_text(encoding="utf-8"))
+        _cs = _obj.get("steps")
+        if not isinstance(_cs, list) or not _cs:
+            return []
+    except Exception:
+        return []
+
+    def _step_to_str(s):
+        if isinstance(s, dict):
+            op = s.get("operator", "")
+            params = s.get("params", {})
+            if params and isinstance(params, dict):
+                pvals = ",".join(str(v) for v in params.values())
+                return f"{op}:{pvals}" if pvals else op
+            return op
+        return str(s)
+
+    return [_step_to_str(s) for s in _cs]
+
+
 def _handle_generate_code(args, **kw):
     """Write the full code bundle: pipeline.py + qc.py + run.py + requirements.txt
     (+ build_ai_ready.py iff 'ai_ready' in deliverables).
@@ -5889,26 +6125,7 @@ def _do_handle_generate_code(args, **kw):
         generate_vis_script,
     )
 
-    steps = args.get("steps")
-    if not steps and work_dir_check:
-        try:
-            _p = work_dir_check / "plan" / "proposal.json"
-            if _p.is_file():
-                _obj = json.loads(_p.read_text(encoding="utf-8"))
-                _cs = _obj.get("steps")
-                if isinstance(_cs, list) and _cs:
-                    def _auto_step_to_str(s):
-                        if isinstance(s, dict):
-                            op = s.get("operator", "")
-                            params = s.get("params", {})
-                            if params and isinstance(params, dict):
-                                pvals = ",".join(str(v) for v in params.values())
-                                return f"{op}:{pvals}" if pvals else op
-                            return op
-                        return str(s)
-                    steps = [_auto_step_to_str(s) for s in _cs]
-        except Exception:
-            pass
+    steps = _recover_steps_from_proposal(work_dir_check, args)
     if not steps:
         return json.dumps({
             "success": False,
@@ -6476,9 +6693,29 @@ def _handle_export_repo(args, **kw):
     except Exception:  # noqa: BLE001
         pass
 
+    # Steps: args override → plan/proposal.json (post-confirm SoT). Same
+    # recovery pattern as _do_handle_generate_code — export_repo runs after
+    # mark_proposal_confirmed, so the LLM omitting steps is expected when
+    # the proposal on disk is authoritative.
+    _steps = _recover_steps_from_proposal(output_dir, args)
+    if not _steps:
+        return json.dumps({
+            "success": False,
+            "error": (
+                "export_repo requires 'steps' — a list of pipeline step "
+                "strings (e.g. ['notch:50', 'bandpass:0.3,35'])."
+            ),
+            "fix_hint": (
+                "Read the confirmed proposal at "
+                f"{output_dir}/plan/proposal.json for the step list, then "
+                "pass it as steps=[...]. Each step is a string like "
+                "'operator:param1,param2', not a dict."
+            ),
+        })
+
     result = build_mini_repo(
         output_dir=output_dir,
-        steps=args["steps"],
+        steps=_steps,
         data_info=_data_info,
         pipeline_record=pipeline_record,
         input_path=_input_path,
@@ -6519,8 +6756,8 @@ def _handle_export_repo(args, **kw):
                 data_path=args.get("input_path", ""),
                 modality=args.get("modality", "eeg"),
                 paradigm=args.get("paradigm", ""),
-                initial_steps=args["steps"],
-                final_steps=args["steps"],
+                initial_steps=_steps,
+                final_steps=_steps,
                 success=True,
                 stage="exported",
             )
@@ -6749,6 +6986,37 @@ def _aggregate_batch_label_diagnostics(work_dir: Path) -> dict:
     }
 
 
+def _aggregate_batch_decimation_notes(work_dir: Path) -> dict:
+    """Union per-file ``decimated_at_load`` notes across the batch's
+    pipeline_status sidecars.
+
+    The generated pipeline.py records this when native-rate loading would have
+    exceeded the memory budget and it fell back to load-time decimation
+    (filters before the resample step then only see content up to
+    target_hz/2 — high-frequency content is IRREVERSIBLY lost). Surfacing the
+    count + affected files in the final chat block prevents the downgrade
+    from going unnoticed."""
+    mp = work_dir / "middle_process"
+    files = []
+    if mp.is_dir():
+        for sidecar in mp.glob("pipeline_status__*.json"):
+            try:
+                data = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            note = data.get("decimated_at_load")
+            if not note:
+                continue
+            files.append({
+                "file_id": data.get("file_id"),
+                "loaded_target_hz": note.get("loaded_target_hz"),
+                "native_peak_mb": note.get("native_peak_mb"),
+                "decimated_peak_mb": note.get("decimated_peak_mb"),
+                "budget_mb": note.get("budget_mb"),
+            })
+    return {"count": len(files), "files": files}
+
+
 def _handle_batch_process_adaptive(args, **kw):
     import fnmatch
     import glob as _glob
@@ -6936,6 +7204,13 @@ def _handle_batch_process_adaptive(args, **kw):
     # pipeline_status sidecar; aggregate + flag the suspicious subset here.
     diag = _aggregate_batch_label_diagnostics(Path(output_dir))
     result["label_diagnostics"] = diag
+    # Surface memory-gated decimation: files where native-rate loading would
+    # have exceeded the budget and the runtime fell back to decimated load
+    # (filters before resample only saw content <= target_hz/2 — the loss is
+    # irreversible for THIS run). Aggregated for the completion block so the
+    # user sees the downgrade in the final chat.
+    result["decimation_diagnostics"] = _aggregate_batch_decimation_notes(
+        Path(output_dir))
     if diag.get("suspicious_count"):
         result["reject_review_needed"] = (
             f"{diag['suspicious_count']} label(s) went unmatched but look "
@@ -6991,6 +7266,23 @@ def _render_batch_completion_block(result):
         lines.append(line)
     if result.get("excluded_by_user"):
         lines.append(f"**Excluded by your request:** {len(result['excluded_by_user'])} file(s)")
+    dec = result.get("decimation_diagnostics") or {}
+    if dec.get("count"):
+        n = dec["count"]
+        # Take the first file's target as a representative — batches with mixed
+        # targets are rare; individual per-file numbers are in the sidecars.
+        first = (dec.get("files") or [{}])[0]
+        tgt = first.get("loaded_target_hz")
+        lines.append("")
+        tgt_txt = f"~{tgt:.0f} Hz" if isinstance(tgt, (int, float)) else "the resample target"
+        lines.append(
+            f"⚠ **Memory-gated decimation:** {n} file(s) loaded at {tgt_txt} "
+            "instead of native rate because the native-rate peak footprint "
+            "exceeded the memory budget. Filters BEFORE the resample step in "
+            "those files only saw content up to Nyquist=(target/2) — "
+            "high-frequency content was NOT preserved. If you need full "
+            "bandwidth, re-run on a larger host or crop with max_duration."
+        )
     if result.get("reject_review_needed"):
         lines.append("")
         lines.append(f"⚠ {result['reject_review_needed']}")

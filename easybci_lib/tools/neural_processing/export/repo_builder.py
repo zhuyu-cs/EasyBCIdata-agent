@@ -417,7 +417,6 @@ def build_mini_repo(
         (e.g. ``"keyboard_interrupt"``, ``"failed: TimeoutError: ..."``).
     """
     from easybci_lib.tools.neural_processing.codegen.generator import (
-        _enforce_clean_output,
         generate_config_yaml,
         generate_pipeline_script,
         generate_requirements,
@@ -491,12 +490,13 @@ def build_mini_repo(
     if not web_evidence:
         web_evidence = {"status": "unavailable", "reason": "no web_evidence recorded"}
 
-    # Enforce data-only cleanup on the canonical step list
-    # at the build_mini_repo boundary so reasoning.md, config.yaml, and
-    # pipeline.py all see the same enforced steps. Idempotent — calling
-    # _enforce_clean_output a second time on already-enforced steps is a
-    # no-op (rule 1). Goal-conditional gate decides whether to inject at all.
-    steps = _enforce_clean_output(steps, analysis_goal=analysis_goal)
+    # NOTE: goal-driven channel cleanup is NOT applied here. `steps` arriving
+    # at build_mini_repo are already the AUTHORED final list — enforced once at
+    # plan-construction time (propose for the interactive flow, orchestrate for
+    # batch). build_mini_repo renders them verbatim so reasoning.md,
+    # config.yaml, and pipeline.py all reflect exactly the confirmed/authored
+    # plan (and a step the user removed via revise_proposal stays removed).
+    steps = list(steps)
 
     # --- Layout salvage (runs first, idempotent) -------------------------
     # Robustness ramp: rescue stray sibling files and unbury misplaced .pkl

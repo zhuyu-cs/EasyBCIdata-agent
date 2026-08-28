@@ -154,6 +154,16 @@ def build_top_level_parser():
         help="Resume a session by name, or the most recent if no name given",
     )
     parser.add_argument(
+        "--no-resume-phase-hint",
+        action="store_true",
+        default=False,
+        help=(
+            "Suppress the work_dir phase snapshot injected at session resume. "
+            "For regression testing only — the hint is a factual state summary "
+            "and has no side effects."
+        ),
+    )
+    parser.add_argument(
         "--worktree",
         "-w",
         action="store_true",
@@ -290,6 +300,15 @@ def build_top_level_parser():
         default=argparse.SUPPRESS,
         metavar="SESSION_NAME",
         help="Resume a session by name, or the most recent if no name given",
+    )
+    chat_parser.add_argument(
+        "--no-resume-phase-hint",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=(
+            "Suppress the work_dir phase snapshot injected at session resume "
+            "(regression testing only)."
+        ),
     )
     chat_parser.add_argument(
         "--worktree",

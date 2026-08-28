@@ -60,7 +60,15 @@ class RoutingEntry:
     # memory_strategy.estimate_peak_mb. Recorded once at routing time so the
     # batch scheduler and the cross-instance memory gate reuse it without
     # re-reading the inspection report. None when metadata was too thin.
+    #
+    # ``peak_mb`` is the LOWER-BOUND estimate (assumes decimated load when a
+    # resample target is set) — used by ``_oom_excluded`` as the admission
+    # gate ("can this run at all, even with load-time decimation?").
+    # ``peak_native_mb`` is the UPPER-BOUND estimate at native rate — used by
+    # the runtime memory-adaptive branch in pipeline.py to decide native vs
+    # decimated loading, and by the dispatch-layer XL exclusive lease.
     peak_mb: Optional[float] = None
+    peak_native_mb: Optional[float] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -82,6 +90,8 @@ class RoutingEntry:
                 str(d["override_script"]) if d.get("override_script") else None
             ),
             peak_mb=(float(d["peak_mb"]) if d.get("peak_mb") is not None else None),
+            peak_native_mb=(float(d["peak_native_mb"])
+                            if d.get("peak_native_mb") is not None else None),
         )
 
 

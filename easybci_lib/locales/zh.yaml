@@ -73,3 +73,16 @@ deliverables:
   preprocessed: "预处理信号 (NWB)"
   ai_ready: "AI-ready 训练数据 (epochs)"
 
+plan:
+  reject_after_confirmed_error: >-
+    该 work_dir 已存在已确认的方案（middle_process/proposal.confirmed）。
+    Phase 1 已闭合。
+  reject_after_confirmed_fix_hint: >-
+    请选其一：(1) generate_code(work_dir=...) 继续 Phase 2；
+    (2) revise_proposal(work_dir=..., steps=[...], revision_reason=...)
+    就地微调 steps；(3) mark_proposal_confirmed(work_dir=...,
+    user_decision='abort') 放弃并重新开始。已确认后禁止再调用
+    plan_pipeline / propose_pipeline / suggest_pipeline —— pipeline 是线性的。
+
+resume:
+  phase_hint_line: "恢复阶段：{facts}"

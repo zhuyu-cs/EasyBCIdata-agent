@@ -24,6 +24,12 @@ _PIPELINE_OVERHEAD_FACTOR = 8.0  # raw + MNE copy + ICA decomposition + intermed
 # calibration (261ch/2000Hz/4h decimated peaks ~14 GB, real ~1.9x).
 _NO_ICA_OVERHEAD_FACTOR = 3.0
 
+# A single file whose estimated peak reaches this fraction of physical RAM is
+# "exclusive": it must own the machine alone at both scheduler and dispatch
+# level. 0.5 is intentionally conservative — two such files summed would exceed
+# RAM before swap/reclaim can catch up, which is the OOM-reboot signature.
+EXCLUSIVE_RATIO = 0.5
+
 
 def _available_cpu_count() -> int:
     """Usable CPU cores, cgroup/cpuset-aware.
@@ -81,6 +87,50 @@ def estimate_peak_mb(
         eff_fs = float(target_hz)
     overhead = _PIPELINE_OVERHEAD_FACTOR if has_ica else _NO_ICA_OVERHEAD_FACTOR
     return (n_ch * eff_fs * dur * 4 * overhead) / (1024 * 1024)  # float32
+
+
+def _physical_ram_mb() -> float:
+    """Total physical RAM (MB). EASYBCI_PHYSICAL_RAM_MB overrides for tests.
+
+    Distinct from ``_get_available_memory_mb`` which returns *available* (after
+    cache/buffers). The exclusive-file classification is about the absolute
+    ceiling of the machine, not the currently-free portion.
+    """
+    env = os.environ.get("EASYBCI_PHYSICAL_RAM_MB")
+    if env:
+        try:
+            v = float(env)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / 1024  # kB -> MB
+    except (OSError, ValueError, IndexError):
+        pass
+    return 8000.0
+
+
+def is_exclusive_peak(peak_mb: float,
+                      *, physical_ram_mb: Optional[float] = None) -> bool:
+    """Whether one file's peak footprint demands machine-exclusive execution.
+
+    True when ``peak_mb >= EXCLUSIVE_RATIO * physical_ram_mb``. Callers use this
+    to force serial scheduling and take a machine-wide exclusive gate lease
+    before spawning the subprocess. Zero/negative peaks (unknown metadata)
+    return False — an unknown footprint is not automatically exclusive; the
+    conservative-substitution logic in ``compute_strategy_from_peaks`` handles
+    unknowns at the batch level.
+    """
+    if peak_mb is None or peak_mb <= 0:
+        return False
+    ram = float(physical_ram_mb) if physical_ram_mb else _physical_ram_mb()
+    if ram <= 0:
+        return False
+    return float(peak_mb) >= EXCLUSIVE_RATIO * ram
 
 
 @dataclass
@@ -256,6 +306,24 @@ def compute_strategy_from_peaks(
     max_per_file = peaks[0]
     total_estimated = float(sum(peaks))
     avg_per_file = total_estimated / n_files
+
+    # XL-file rule: any single peak >= 50% of physical RAM forces machine-wide
+    # serial. Two such files summed would exceed RAM before reclaim catches up
+    # (the JIANG/ZHU OOM-reboot signature). Short-circuits the safe-workers
+    # arithmetic so the reason string reports the classification, not the sum.
+    ram_mb = _physical_ram_mb()
+    xl_count = sum(1 for p in peaks if is_exclusive_peak(p, physical_ram_mb=ram_mb))
+    if xl_count > 0:
+        return ExecutionStrategy(
+            mode="sequential", max_workers=1, memory_budget_mb=budget_int,
+            estimated_per_file_mb=avg_per_file, total_estimated_mb=total_estimated,
+            available_mb=available_mb,
+            reason=(
+                f"XL-file rule: {xl_count}/{n_files} peak >= "
+                f"{int(EXCLUSIVE_RATIO * 100)}% RAM ({ram_mb:.0f} MB) — "
+                f"forced serial + exclusive machine lease."
+            ),
+        )
 
     # Case 1: the single largest file alone blows the budget. Layer A
     # (_oom_excluded) should have dropped it; be defensive and force chunking.

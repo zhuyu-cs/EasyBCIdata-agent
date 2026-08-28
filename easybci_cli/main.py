@@ -11427,6 +11427,11 @@ Examples:
         cmd_version(args)
         return
 
+    # Propagate --no-resume-phase-hint into an env var so both the in-process
+    # REPL (easybci_lib/cli.py) and any TUI subprocess it spawns see it.
+    if getattr(args, "no_resume_phase_hint", False):
+        os.environ["EASYBCI_TUI_RESUME_PHASE_HINT_DISABLE"] = "1"
+
     # Discover Python plugins and register shell hooks once, before any
     # command that can fire lifecycle hooks.  Both are idempotent; gated
     # so introspection/management commands (easybci hooks list,

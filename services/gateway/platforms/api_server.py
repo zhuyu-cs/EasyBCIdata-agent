@@ -1186,6 +1186,21 @@ class APIServerAdapter(BasePlatformAdapter):
                 db = self._ensure_session_db()
                 if db is not None:
                     history = db.get_messages_as_conversation(session_id)
+                    try:
+                        from easybci_agent.resume_phase_hint import (
+                            build_resume_phase_hint,
+                        )
+                        _hint = build_resume_phase_hint(db, session_id)
+                    except Exception:
+                        _hint = None
+                    if _hint:
+                        if history is None:
+                            history = []
+                        history.append({
+                            "role": "user",
+                            "content": _hint,
+                            "metadata": {"kind": "resume_phase_hint"},
+                        })
             except Exception as e:
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
                 history = []

@@ -268,7 +268,7 @@ _PIPELINE_SCRIPT_TEMPLATE = '''"""Auto-generated preprocessing pipeline.
 EASYBCI_STEPS: {steps_repr}
 EASYBCI_GOAL: {analysis_goal}
 EASYBCI_MODALITY: {modality}
-EASYBCI_VERSION: 5
+EASYBCI_VERSION: 6
 EASYBCI_CODE_STANDARD: 0.0.1
 
 Standalone script — runs on a plain `pip install mne numpy scipy scikit-learn`
@@ -1432,13 +1432,58 @@ def _process_one(work_dir, inp, steps):
     # host. Fail-open: an empty token means the gate was unavailable/timed out.
     _has_ica = any(isinstance(_s, str) and _s.split(":", 1)[0].strip() == "ica"
                    for _s in steps)
-    _peak_mb = _gate_peak_mb(_exp_nch, _exp_fs, _exp_dur, _has_ica,
-                             target_hz=_load_target)
+    # Memory-adaptive load decision (estimate-first, NEVER try/except):
+    # * native fits budget      → load native (preserves filter semantics
+    #                             — filters see full bandwidth before resample).
+    # * native > budget, decimated fits → load at target_hz + WARN loud
+    #                             (bandpass/notch WILL lose content above
+    #                             target_hz/2; sidecar records the downgrade).
+    # * both exceed budget      → refuse to load (Linux would SIGKILL us if we
+    #                             tried; upstream _oom_excluded should have
+    #                             already dropped this file).
+    _peak_native = _gate_peak_mb(_exp_nch, _exp_fs, _exp_dur, _has_ica)
+    _peak_decimated = (
+        _gate_peak_mb(_exp_nch, _exp_fs, _exp_dur, _has_ica, target_hz=_load_target)
+        if _load_target and _load_target > 0 and _exp_fs > 0 and _load_target < _exp_fs
+        else _peak_native
+    )
+    _budget = _gate_budget_mb()
+    _use_target = None
+    _decimation_note = None
+    if _peak_native <= _budget or _peak_native <= 0:
+        # <=0 means fingerprint too thin to estimate — fall back to native path
+        # (upstream _oom_excluded couldn't decide either; global gate still
+        # serializes via preload_full_mb bookkeeping).
+        _peak_mb = _peak_native if _peak_native > 0 else 0.0
+    elif _load_target and _peak_decimated > 0 and _peak_decimated <= _budget:
+        _use_target = float(_load_target)
+        _peak_mb = _peak_decimated
+        _decimation_note = {{
+            "loaded_target_hz": _use_target,
+            "native_peak_mb": round(_peak_native, 1),
+            "decimated_peak_mb": round(_peak_decimated, 1),
+            "budget_mb": round(_budget, 1),
+            "reason": "memory_gated_decimation",
+        }}
+        print("WARN [{{}}]: native peak {{:.0f}} MB > budget {{:.0f}} MB — "
+              "loading DECIMATED at {{:.0f}} Hz. Filters BEFORE the resample "
+              "step will see only content <= {{:.0f}} Hz (Nyquist). Consider "
+              "cropping with max_duration or running on a larger host to "
+              "preserve full bandwidth.".format(
+              file_id, _peak_native, _budget, _use_target, _use_target / 2))
+    else:
+        raise RuntimeError(
+            "peak_decimated {{:.0f}} MB > budget {{:.0f}} MB and no lower "
+            "resample target available — this file should have been excluded "
+            "by _oom_excluded upstream. Refusing to load and crash the host. "
+            "(file_id={{}}, native_peak={{:.0f}} MB, target_hz={{}})".format(
+            _peak_decimated, _budget, file_id, _peak_native, _load_target))
     _gate_token = _gate_acquire(_peak_mb, file_id=file_id)
     try:
-        print("Loading: {{}}  (sub={{}} ses={{}} file_id={{}})".format(
-            data_path, sub_id, ses, file_id))
-        data_dict = _load_input(data_path)
+        print("Loading: {{}}  (sub={{}} ses={{}} file_id={{}}{{}})".format(
+            data_path, sub_id, ses, file_id,
+            "" if _use_target is None else ", target_hz={{:.0f}}".format(_use_target)))
+        data_dict = _load_input(data_path, target_hz=_use_target)
         n_ch_in = len(data_dict.get("channels", []))
         fs_in = float(data_dict.get("frequency", 0.0))
         print("  Channels in: {{}}, fs: {{}} Hz".format(n_ch_in, fs_in))
@@ -1496,6 +1541,8 @@ def _process_one(work_dir, inp, steps):
             "output_file": str(out_file),
             "success": True,
         }}
+        if _decimation_note is not None:
+            status["decimated_at_load"] = _decimation_note
         mp = work_dir / "middle_process"
         mp.mkdir(parents=True, exist_ok=True)
         (mp / "pipeline_status__{{}}.json".format(file_id)).write_text(
@@ -2027,6 +2074,40 @@ def _load_preprocessed_nwb(pre_nwb):
 '''
 
 
+def canonicalize_steps_for_header(
+    steps: List[Any],
+    *,
+    inspection_report: Optional[Dict[str, Any]] = None,
+) -> List[Any]:
+    """Deterministic canonicalization applied to a step list before it is
+    embedded into a generated script's ``EASYBCI_STEPS`` header.
+
+    This is the SINGLE source of truth for "what steps a script is generated
+    from", shared by :func:`generate_pipeline_script` (emit side) and the
+    staleness comparator (``neural_tools._script_header_matches``) so the two
+    can never drift and trigger a spurious regeneration.
+
+    It performs ONLY canonicalizations that are pure functions of the input:
+      - synonym normalization (``highpass:x`` → ``bandpass:x,``…) via
+        :func:`_normalize_steps`
+      - notch-frequency override to the inspection-detected power-line peak
+
+    It deliberately does NOT run :func:`_enforce_clean_output`. Goal-driven
+    channel-cleanup injection is a PLAN-CONSTRUCTION decision, applied exactly
+    once where the step list is authored (propose / batch), and thereafter the
+    stored step list is authoritative — codegen and the comparator render it
+    verbatim. Re-injecting here would (a) override a step the user removed via
+    ``revise_proposal`` and (b) reintroduce recompute drift.
+    """
+    out = list(steps)
+    out, _norm_notes = _normalize_steps(out)
+    if inspection_report:
+        line_freq = (inspection_report.get("psd_summary") or {}).get("power_line_peak_hz")
+        if line_freq:
+            out = _override_notch_freq(out, line_freq)
+    return out
+
+
 def generate_pipeline_script(
     *,
     steps: List[str],
@@ -2053,19 +2134,17 @@ def generate_pipeline_script(
     - Prepends an "Inspection-driven hints" comment block so a human
       reading pipeline.py can see why these parameters were chosen
     """
-    steps_list = list(steps)
-    # Normalize synonyms to canonical names BEFORE embedding into the generated
-    # script, so the standalone bundle only ever sees canonical operators
-    # (highpass→bandpass:X, etc.). Unknown names fail loud here at generation
-    # time rather than being silently skipped at run time.
-    steps_list, _norm_notes = _normalize_steps(steps_list)
-    if inspection_report:
-        line_freq = (inspection_report.get("psd_summary") or {}).get("power_line_peak_hz")
-        if line_freq:
-            steps_list = _override_notch_freq(steps_list, line_freq)
-    enforced = _enforce_clean_output(steps_list, analysis_goal=analysis_goal)
+    # Canonicalize (normalize synonyms + inspection-driven notch override).
+    # NOTE: goal-driven channel cleanup (_enforce_clean_output) is NOT applied
+    # here — it is a one-time plan-construction step baked into the authored
+    # step list (propose / batch). Codegen renders the authored steps verbatim
+    # so the confirmed proposal stays authoritative and the staleness
+    # comparator (which shares canonicalize_steps_for_header) never drifts.
+    steps_list = canonicalize_steps_for_header(
+        list(steps), inspection_report=inspection_report
+    )
     body = _PIPELINE_SCRIPT_TEMPLATE.format(
-        steps_repr=repr(enforced),
+        steps_repr=repr(steps_list),
         analysis_goal=analysis_goal,
         modality=modality,
         nwb_helpers_block=_NWB_HELPERS_BLOCK,

@@ -3967,6 +3967,7 @@ class EasybciCLI:
                     f"[bold {_accent_hex()}]{_escape(title_part)}[/] "
                     f"({msg_count} user message{'s' if msg_count != 1 else ''}, {len(restored)} total messages)"
                 )
+                self._inject_resume_phase_hint()
             else:
                 ChatConsole().print(
                     f"[bold {_accent_hex()}]Session {_escape(self.session_id)} found but has no messages. Starting fresh.[/]"
@@ -4215,6 +4216,7 @@ class EasybciCLI:
                 f"({msg_count} user message{'s' if msg_count != 1 else ''}, "
                 f"{len(restored)} total messages)[/]"
             )
+            self._inject_resume_phase_hint()
         else:
             accent_color = _accent_hex()
             self._console_print(
@@ -4235,6 +4237,37 @@ class EasybciCLI:
             pass
 
         return True
+
+    def _inject_resume_phase_hint(self) -> None:
+        """After ``conversation_history`` is restored from the DB, append a
+        factual phase snapshot of the session's work_dir so a re-entering
+        LLM does not have to reconstruct pipeline state from a truncated
+        tool-call replay. Best-effort: any failure leaves history alone.
+        """
+        try:
+            from easybci_agent.resume_phase_hint import (
+                build_resume_phase_hint,
+                build_resume_phase_hint_short,
+            )
+            hint = build_resume_phase_hint(self._session_db, self.session_id)
+            short = build_resume_phase_hint_short(self._session_db, self.session_id)
+        except Exception:
+            return
+        if not hint:
+            return
+        self.conversation_history.append({
+            "role": "user",
+            "content": hint,
+            "metadata": {"kind": "resume_phase_hint"},
+        })
+        if short:
+            try:
+                from easybci_agent.i18n import t
+                ChatConsole().print(
+                    f"[dim]{_escape(t('resume.phase_hint_line', facts=short))}[/]"
+                )
+            except Exception:
+                pass
 
     def _display_resumed_history(self):
         """Render a compact recap of previous conversation messages.
@@ -5686,6 +5719,7 @@ class EasybciCLI:
         restored = self._session_db.get_messages_as_conversation(target_id)
         restored = [m for m in (restored or []) if m.get("role") != "session_meta"]
         self.conversation_history = restored
+        self._inject_resume_phase_hint()
 
         # Re-open the target session so it's not marked as ended
         try:

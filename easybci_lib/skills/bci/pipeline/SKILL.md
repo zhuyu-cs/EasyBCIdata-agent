@@ -44,7 +44,7 @@ You MUST complete steps 1–3 below BEFORE calling `skill_view` on any workflow.
 9. **Layout contract is highest-priority (equal to correctness)** — use `repair_layout`, never manual `mv`/`rm`/`mkdir`.
 10. **Path safety** — always wrap `work_dir` and data paths in double quotes in terminal commands.
 11. **`ai_ready` is intent-driven, NOT auto-inferred** — add to deliverables ONLY when user explicitly asks. Presence of events alone is NOT a request.
-12. **Phase 2 NEVER re-does Phase 1** — no calling `inspect_data`/`deep_inspect`/`suggest_pipeline`/`plan_pipeline`/`propose_pipeline`/`mark_proposal_confirmed` after confirmation.
+12. **Phase 2 NEVER re-does Phase 1** — no calling `inspect_data`/`deep_inspect`/`suggest_pipeline`/`plan_pipeline`/`propose_pipeline`/`mark_proposal_confirmed` after confirmation. Runtime enforcement: those Phase-1 tools reject the call when `middle_process/proposal.confirmed` exists — use `revise_proposal` for step tweaks, or `mark_proposal_confirmed(user_decision='abort')` to discard and restart.
 13. **`pipeline.py` is standalone** — does NOT import easybci_lib (CODE_STANDARD.md Rule 15).
 
 ## Workflow Files

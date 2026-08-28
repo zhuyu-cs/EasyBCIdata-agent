@@ -86,11 +86,15 @@ def _oom_excluded(report: dict, target_hz: Optional[float] = None,
     """Return an exclusion record when this file's estimated peak footprint
     blows the memory budget, else None.
 
-    Delegates the estimate to ``_peak_for_report`` (→ ``estimate_peak_mb``): the
-    loader decimates on the fly (io/nk_backend._read_decimated_uV) so a
-    261ch/2000Hz/4h recording peaks at ~14 GB (measured) instead of ~56 GB when a
-    lower resample ``target_hz`` is set. Overhead is recipe-aware (8× with ICA's
-    eigendecomposition, 3× without)."""
+    Threshold semantics: this is the LOWER-BOUND admission gate — a file is
+    rejected only when even the decimated-load peak (target_hz-effective fs)
+    still exceeds the memory budget. Generated pipeline.py runs a second
+    per-file check at load time and picks between native-rate loading (preserves
+    filter semantics; requires more RAM) and decimated loading (fits the budget
+    but filters lose content above Nyquist=target_hz/2). If we gated on the
+    native peak here, huge sEEG that CAN run in decimated mode would be
+    incorrectly excluded from the batch. Overhead is recipe-aware (8× with ICA,
+    3× without)."""
     from easybci_lib.tools.neural_processing.preprocess.memory_strategy import (
         _NO_ICA_OVERHEAD_FACTOR, _PIPELINE_OVERHEAD_FACTOR, safe_max_duration_s,
     )
@@ -193,6 +197,18 @@ def build_repro_repo(
         repo_steps = list(steps or [])
     if not repo_steps:
         return {"success": False, "error": "no steps to run"}
+    # Enforce the goal-driven channel cleanup ONCE, here at the point batch
+    # authors its step list — batch never passes through a proposal, so this is
+    # its plan-construction boundary. Downstream (build_mini_repo / codegen)
+    # renders repo_steps verbatim, so this single enforce is what keeps batch
+    # output clean without any re-injection at emit time.
+    try:
+        from easybci_lib.tools.neural_processing.codegen.generator import (
+            _enforce_clean_output,
+        )
+        repo_steps = _enforce_clean_output(repo_steps, analysis_goal=analysis_goal)
+    except Exception:
+        pass
     load_target_hz = resample_target_hz(repo_steps)
 
     # ---- Step 1: populate routing SEQUENTIALLY + pre-filter ----------------
@@ -227,13 +243,19 @@ def build_repro_repo(
                 continue
         routed_modalities.append(_infer_modality_from_report(report))
 
-        # Record the recipe-aware peak estimate on this file's routing entry so
-        # the batch scheduler (Layer B) and the cross-instance memory gate
-        # (Layer C, in the generated pipeline.py) reuse it without recomputing.
+        # Record BOTH peak estimates on this file's routing entry:
+        # * peak_mb          — decimated (target_hz) peak, i.e. LOWER-BOUND used
+        #   by _oom_excluded as the admission gate and by the batch scheduler.
+        # * peak_native_mb   — native-rate peak, i.e. UPPER-BOUND used by the
+        #   runtime memory-adaptive branch in pipeline.py (native vs decimated
+        #   load decision) and by the dispatch-layer XL exclusive lease.
         peak_mb, _budget_mb = _peak_for_report(report, target_hz=load_target_hz,
                                                 steps=repo_steps)
-        if peak_mb > 0:
-            _record_peak(wd, str(f), peak_mb)
+        peak_native_mb, _ = _peak_for_report(report, target_hz=None,
+                                              steps=repo_steps)
+        if peak_mb > 0 or peak_native_mb > 0:
+            _record_peak(wd, str(f), peak_mb=peak_mb,
+                         peak_native_mb=peak_native_mb)
 
     # Record exclusions loudly (never silent).
     excluded_path = wd / "middle_process" / "excluded_inputs.json"
@@ -341,12 +363,17 @@ def _unroute(work_dir: Path, data_path: str) -> None:
         save_routing_table(work_dir, table)
 
 
-def _record_peak(work_dir: Path, data_path: str, peak_mb: float) -> None:
-    """Stamp the recipe-aware peak estimate (MB) onto this file's routing entry.
+def _record_peak(work_dir: Path, data_path: str, *,
+                 peak_mb: float = 0.0,
+                 peak_native_mb: float = 0.0) -> None:
+    """Stamp recipe-aware peak estimates (MB) onto this file's routing entry.
 
-    Matched by ``data_path`` like :func:`_unroute`. Idempotent; a no-op when the
-    entry is absent (deep_inspect failed to route it). Never raises — peak
-    recording is advisory and must not break the batch."""
+    Records two values (either may be 0/skipped): ``peak_mb`` is the decimated
+    lower-bound (admission gate + scheduler); ``peak_native_mb`` is the native
+    upper-bound (runtime load-decision + XL exclusive lease). Matched by
+    ``data_path`` like :func:`_unroute`. Idempotent; a no-op when the entry is
+    absent (deep_inspect failed to route it). Never raises — peak recording is
+    advisory and must not break the batch."""
     from easybci_lib.tools.neural_processing.io.routing_table import (
         load_routing_table, save_routing_table,
     )
@@ -357,8 +384,12 @@ def _record_peak(work_dir: Path, data_path: str, peak_mb: float) -> None:
         changed = False
         for e in table.inputs:
             if e.data_path == str(data_path):
-                e.peak_mb = round(float(peak_mb), 1)
-                changed = True
+                if peak_mb > 0:
+                    e.peak_mb = round(float(peak_mb), 1)
+                    changed = True
+                if peak_native_mb > 0:
+                    e.peak_native_mb = round(float(peak_native_mb), 1)
+                    changed = True
         if changed:
             save_routing_table(work_dir, table)
     except Exception as exc:  # advisory only — never break the batch
@@ -375,11 +406,13 @@ def _write_memory_plan(work_dir: Path, table) -> dict:
     concurrency safe. Never raises — a plan-write failure must not break the
     batch. Returns the plan dict (also embedded in the preview envelope)."""
     from easybci_lib.tools.neural_processing.preprocess.memory_strategy import (
-        _available_cpu_count, compute_strategy_from_peaks,
+        _available_cpu_count, compute_strategy_from_peaks, is_exclusive_peak,
     )
     try:
         peaks = [e.peak_mb for e in (table.inputs if table else [])
                  if e.peak_mb is not None]
+        peaks_native = [e.peak_native_mb for e in (table.inputs if table else [])
+                        if e.peak_native_mb is not None]
         n_known = len(peaks)
         # Files with no recorded peak (thin metadata) count as unknown; pass 0.0
         # so the scheduler pessimistically treats them as the batch max.
@@ -387,6 +420,20 @@ def _write_memory_plan(work_dir: Path, table) -> dict:
         peaks_arg = peaks + [0.0] * n_missing
         strat = compute_strategy_from_peaks(peaks_arg)
         cpu = _available_cpu_count()
+        # XL classification uses NATIVE peak (upper-bound) — a file whose native
+        # peak reaches EXCLUSIVE_RATIO of physical RAM must own the machine
+        # even if its decimated fallback would fit, because the dispatch-layer
+        # lease is acquired BEFORE the runtime branch selects native vs decimated.
+        xl_entries = []
+        for e in (table.inputs if table else []):
+            p_native = e.peak_native_mb if e.peak_native_mb is not None else e.peak_mb
+            if p_native is not None and is_exclusive_peak(float(p_native)):
+                xl_entries.append({
+                    "data_path": e.data_path,
+                    "peak_native_mb": round(float(p_native), 1),
+                    "peak_decimated_mb": (round(float(e.peak_mb), 1)
+                                          if e.peak_mb is not None else None),
+                })
         plan = {
             "mode": strat.mode,
             "max_workers": strat.max_workers,
@@ -397,10 +444,19 @@ def _write_memory_plan(work_dir: Path, table) -> dict:
             "n_peaks_known": n_known,
             "n_peaks_missing": n_missing,
             "peak_max_mb": (round(max(peaks), 1) if peaks else None),
+            "peak_native_max_mb": (round(max(peaks_native), 1)
+                                   if peaks_native else None),
             "total_estimated_mb": round(strat.total_estimated_mb, 1),
             "reason": strat.reason,
+            "exclusive": bool(xl_entries),
+            "xl_files": xl_entries,
             "note": ("advisory — batch executes serially; the in-pipeline global "
-                     "memory gate makes any concurrency safe"),
+                     "memory gate makes any concurrency safe. peak_max_mb is the "
+                     "decimated lower-bound (used by _oom_excluded); "
+                     "peak_native_max_mb is the native upper-bound (used by the "
+                     "runtime load-decision and XL exclusive lease). When "
+                     "exclusive=true, the dispatch layer additionally takes a "
+                     "machine-wide lease so peer batches cannot overlap."),
         }
         out = work_dir / "middle_process" / "batch_memory_plan.json"
         out.parent.mkdir(parents=True, exist_ok=True)

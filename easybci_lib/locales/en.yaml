@@ -73,5 +73,17 @@ deliverables:
   preprocessed: "Preprocessed signal (NWB)"
   ai_ready: "AI-ready training data (epochs)"
 
+plan:
+  reject_after_confirmed_error: >-
+    This work_dir already has a confirmed proposal at
+    middle_process/proposal.confirmed. Phase 1 is closed for this work_dir.
+  reject_after_confirmed_fix_hint: >-
+    Choose one of: (1) generate_code(work_dir=...) to continue Phase 2;
+    (2) revise_proposal(work_dir=..., steps=[...], revision_reason=...)
+    to tweak steps in place; (3) mark_proposal_confirmed(work_dir=...,
+    user_decision='abort') to discard and start over. Never call
+    plan_pipeline / propose_pipeline / suggest_pipeline again after
+    confirmation — the pipeline is linear.
 
-
+resume:
+  phase_hint_line: "Resume phase: {facts}"

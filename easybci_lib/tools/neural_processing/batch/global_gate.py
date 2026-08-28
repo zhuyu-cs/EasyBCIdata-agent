@@ -163,11 +163,44 @@ def _reserved_total(ledger: dict) -> float:
                for r in ledger.values() if isinstance(r, dict))
 
 
+def _has_exclusive_holder(ledger: dict) -> bool:
+    """Whether any current reservation is an exclusive lease."""
+    for r in ledger.values():
+        if isinstance(r, dict) and r.get("exclusive"):
+            return True
+    return False
+
+
 def _try_reserve(peak_mb: float, file_id: str, token: str,
-                 now: float) -> bool:
-    """One atomic sweep+admit attempt. Returns True if the reservation landed."""
+                 now: float, *, exclusive: bool = False) -> bool:
+    """One atomic sweep+admit attempt. Returns True if the reservation landed.
+
+    Exclusive semantics
+    -------------------
+    * exclusive=True: only admit when the ledger is provably empty. No
+      ``or not ledger`` shortcut — an XL request must wait for real quiet,
+      not "empty when I looked a moment ago."
+    * exclusive=False: reject if any existing reservation is exclusive
+      (a non-XL file must wait its turn while an XL lease is held).
+    """
     with _locked():
         ledger = _sweep(_load(), now)
+        # Reject non-exclusive when an exclusive holder is present.
+        if not exclusive and _has_exclusive_holder(ledger):
+            _save(ledger)
+            return False
+        # Exclusive: only admit when ledger is empty (no ``or not ledger``
+        # anti-starvation shortcut — the whole point is provable exclusivity).
+        if exclusive:
+            if ledger:
+                _save(ledger)
+                return False
+            ledger[token] = {
+                "pid": os.getpid(), "reserved_mb": round(float(peak_mb), 1),
+                "ts": now, "file_id": file_id, "exclusive": True,
+            }
+            _save(ledger)
+            return True
         budget = _budget_mb()
         reserved = _reserved_total(ledger)
         # Admit if it fits, OR if nothing else is reserved (anti-starvation: a
@@ -203,6 +236,33 @@ def acquire(peak_mb: float, *, file_id: str = "",
             raise TimeoutError(
                 f"memory gate: waited {timeout:.0f}s for ~{peak_mb:.0f} MB "
                 f"(file_id={file_id!r}); other instances still hold reservations")
+        time.sleep(_POLL_INTERVAL_S)
+
+
+def acquire_exclusive(peak_mb: float, *, file_id: str = "",
+                      timeout: Optional[float] = None,
+                      _now=time.time) -> str:
+    """Block until the machine ledger is empty, then take an exclusive lease.
+
+    Used at dispatch time when the batch contains at least one XL file
+    (``is_exclusive_peak(peak) == True``). An exclusive holder blocks every
+    other request — exclusive OR non-exclusive — until it releases.
+
+    Contract differences vs :func:`acquire`:
+    * Waits for provably-empty ledger, not fits-in-budget.
+    * Records ``exclusive=True`` on the reservation so peers back off.
+    * No anti-starvation shortcut: exclusivity is the whole point.
+    """
+    token = f"{os.getpid()}-{int(_now() * 1000)}-{file_id}-x"
+    start = _now()
+    while True:
+        if _try_reserve(peak_mb, file_id, token, _now(), exclusive=True):
+            return token
+        if timeout is not None and (_now() - start) >= timeout:
+            raise TimeoutError(
+                f"memory gate (exclusive): waited {timeout:.0f}s for a machine-"
+                f"wide lease on ~{peak_mb:.0f} MB (file_id={file_id!r}); another "
+                f"batch is still holding reservations")
         time.sleep(_POLL_INTERVAL_S)
 
 
