@@ -234,6 +234,23 @@ def build_top_level_parser():
         help="With --tui: run TypeScript sources via tsx (skip dist build)",
     )
 
+    scope_group = parser.add_mutually_exclusive_group()
+    scope_group.add_argument(
+        "--systemd-scope",
+        action="store_true",
+        default=None,
+        help="Re-exec easybci inside a fresh systemd user scope cgroup so "
+             "kernel OOM only kills easybci, not the parent tmux/shell "
+             "(Linux only, requires systemd-run + D-Bus user session; "
+             "consumed before argparse and stripped from argv)",
+    )
+    scope_group.add_argument(
+        "--no-systemd-scope",
+        action="store_true",
+        default=None,
+        help="Disable systemd-scope launcher even if config or env opts in",
+    )
+
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
     # =========================================================================

@@ -40,7 +40,7 @@ Stage = Literal["pipeline", "ai_ready", "build_ai_ready", "qc", "vis"]
 TAIL_BYTES = 4096
 
 
-def _subprocess_env() -> Dict[str, str]:
+def _subprocess_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Build the env passed to generated-script subprocesses.
 
     Generated ``pipeline.py`` / ``qc.py`` import ``from easybci_lib...``.
@@ -51,6 +51,10 @@ def _subprocess_env() -> Dict[str, str]:
     parent directory at runtime (it must be importable here — the agent
     is using it) and prepend it to ``PYTHONPATH`` so the child sees it
     regardless of how its interpreter was originally provisioned.
+
+    ``extra``: caller-supplied env overrides merged AFTER the PYTHONPATH
+    fix-up. Used by the batch orchestrator to pass EASYBCI_FILE_IDS to a
+    chunked pipeline subprocess.
     """
     env = os.environ.copy()
     try:
@@ -58,12 +62,16 @@ def _subprocess_env() -> Dict[str, str]:
         pkg_parent = str(Path(easybci_lib.__file__).resolve().parent.parent)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Could not locate easybci_lib for PYTHONPATH propagation: %s", exc)
+        if extra:
+            env.update(extra)
         return env
     existing = env.get("PYTHONPATH", "")
     parts = [pkg_parent]
     if existing:
         parts.extend(p for p in existing.split(os.pathsep) if p and p != pkg_parent)
     env["PYTHONPATH"] = os.pathsep.join(parts)
+    if extra:
+        env.update(extra)
     return env
 
 
@@ -161,6 +169,28 @@ def _archive_failed(work_dir: Path, stage: Stage) -> Optional[Path]:
         return None
 
 
+def _archive_stderr(work_dir: Path, stage: Stage, stderr: str) -> Optional[Path]:
+    """Persist the FULL stderr from a failed run.
+
+    ``stderr_tail`` in the return dict is only the last 4KB and can be shed by
+    the return-budget compressor. This writes the complete stream to
+    ``middle_process/<stage>_stderr_<ts>.txt`` so the agent (via the returned
+    path) or the user can always retrieve it after a failure.
+    """
+    if not stderr:
+        return None
+    dest_dir = work_dir / "middle_process"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = dest_dir / f"{stage}_stderr_{ts}.txt"
+    try:
+        dest.write_text(stderr, encoding="utf-8")
+        return dest
+    except OSError as exc:
+        logger.warning("Failed to persist stderr for %s: %s", stage, exc)
+        return None
+
+
 def _load_status(work_dir: Path, stage: Stage) -> Optional[Dict[str, Any]]:
     """Read the stage's status sidecar.
 
@@ -197,6 +227,7 @@ def run_script(
     stage: Stage,
     input_path: Optional[str] = None,
     timeout: Optional[int] = None,
+    env_extra: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Run the generated stage script and return a structured result.
 
@@ -261,7 +292,7 @@ def run_script(
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
-            cwd=str(wd), check=False, env=_subprocess_env(),
+            cwd=str(wd), check=False, env=_subprocess_env(env_extra),
         )
         stdout, stderr, retcode = proc.stdout, proc.stderr, proc.returncode
     except subprocess.TimeoutExpired as exc:
@@ -291,12 +322,14 @@ def run_script(
         tb["error_message"] = f"Script exceeded {timeout}s wall time"
         tb["suggestion_kind"] = "timeout"
     archived = _archive_failed(wd, stage)
+    stderr_path = _archive_stderr(wd, stage, stderr)
     return {
         "ok": False,
         "stage": stage,
         "retcode": retcode,
         "stdout_tail": _tail(stdout),
         "stderr_tail": _tail(stderr),
+        "stderr_path": str(stderr_path) if stderr_path else None,
         "traceback": tb,
         "archived_to": str(archived) if archived else None,
     }

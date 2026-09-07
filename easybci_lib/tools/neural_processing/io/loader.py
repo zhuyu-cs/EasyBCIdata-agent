@@ -166,7 +166,13 @@ def load_neural(
         if not _meta.get("data_unit"):
             _meta["data_unit"] = "unknown"
 
-    validate_loaded_data(result)
+    # Skip validator when the backend already flagged a fatal load_error.
+    # In that case data is a documented zeros-sentinel and validator would
+    # only produce a redundant "Data array is empty" warning.
+    if not (isinstance(result, dict)
+            and isinstance(result.get("meta"), dict)
+            and result["meta"].get("load_error")):
+        validate_loaded_data(result)
     return result
 
 
@@ -1672,6 +1678,35 @@ def _load_npz(filepath: str, inspect_only: bool = False) -> Dict[str, Any]:
     For .npy: loads directly as a 2D array.
     """
     path = Path(filepath)
+
+    # Guard: an `events_*.npy` / `events_*.csv` sidecar is a label file, not
+    # a signal file. The old code path shape-transposed a (0,) or (N,3)
+    # events array into "channels x samples", assumed 256 Hz, and passed it
+    # to validate_loaded_data which then logged "Data array is empty
+    # (size=0)" for every such file. Return an explicit load_error so
+    # callers short-circuit on meta.load_error instead of drowning the log.
+    if path.suffix.lower() == ".npy" and path.stem.lower().startswith("events_"):
+        logger.debug(
+            "Skipping events-only .npy file %s — treat as label sidecar, "
+            "not signal input.", path.name,
+        )
+        return {
+            "data": np.zeros((1, 0), dtype=np.float32),
+            "frequency": 0.0,
+            "channels": [],
+            "duration": 0.0,
+            "meta": {
+                "format": "npy",
+                "source_file": filepath,
+                "load_error": (
+                    f"'{path.name}' looks like an events sidecar "
+                    "(events_*.npy), not a signal file. Pass the signal "
+                    "file itself; use inspect_data's events_summary or a "
+                    "sidecar CSV for the event labels."
+                ),
+                "is_events_sidecar": True,
+            },
+        }
 
     if path.suffix.lower() == ".npy":
         data_arr = np.load(filepath, mmap_mode="r" if inspect_only else None)

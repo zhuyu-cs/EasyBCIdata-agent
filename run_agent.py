@@ -1365,10 +1365,27 @@ class AIAgent:
             quiet_mode=self.quiet_mode,
         )
         
-        # Show tool configuration and store valid tool names for validation
+        # Show tool configuration and store valid tool names for validation.
+        # `valid_tool_names` = names whose schema is DOWNSTREAMED to the model
+        # (via self.tools). `_dispatchable_tool_names` = every name the registry
+        # can actually dispatch — a superset that includes internal alias
+        # toolsets like `neural-alias` (propose_pipeline / suggest_pipeline)
+        # whose schemas are intentionally withheld to save tokens but which
+        # remain dispatchable for backward-compat callers (SKILL.md, proven
+        # pipelines). Tool-name validation and _repair_tool_call must use the
+        # superset — otherwise a legit alias like `propose_pipeline` looks
+        # invalid and gets fuzzy-matched to something semantically wrong
+        # (e.g. `compare_pipelines`).
         self.valid_tool_names = set()
+        self._dispatchable_tool_names: set[str] = set()
         if self.tools:
             self.valid_tool_names = {tool["function"]["name"] for tool in self.tools}
+            try:
+                from easybci_lib.tools.registry import registry as _tool_registry
+                self._dispatchable_tool_names = set(_tool_registry.get_all_tool_names())
+            except Exception:
+                self._dispatchable_tool_names = set()
+            self._dispatchable_tool_names |= self.valid_tool_names
             tool_names = sorted(self.valid_tool_names)
             if not self.quiet_mode:
                 print(f"🛠️  Loaded {len(self.tools)} tools: {', '.join(tool_names)}")
@@ -1599,6 +1616,7 @@ class AIAgent:
                 self.tools.append(_wrapped)
                 if _tname:
                     self.valid_tool_names.add(_tname)
+                    self._dispatchable_tool_names.add(_tname)
                     _existing_tool_names.add(_tname)
 
         # Skills config: nudge interval for skill creation reminders
@@ -1905,6 +1923,7 @@ class AIAgent:
                 self.tools.append(_wrapped)
                 if _tname:
                     self.valid_tool_names.add(_tname)
+                    self._dispatchable_tool_names.add(_tname)
                     self._context_engine_tool_names.add(_tname)
                     _existing_tool_names.add(_tname)
 
@@ -5919,18 +5938,34 @@ class AIAgent:
            Claude-style models sometimes tack on (TodoTool_tool ->
            TodoTool -> Todo -> todo). Applied twice so double-tacked
            suffixes like ``TodoTool_tool`` reduce all the way.
-        5. Fuzzy match (difflib, cutoff=0.7).
+        5. Fuzzy match (difflib, cutoff=0.85).
 
         Handles the original failure reports (TodoTool_tool, Patch_tool,
         BrowserClick_tool were all returning "Unknown tool" before).
 
-        Returns the repaired name if found in valid_tool_names, else None.
+        Match target is ``_dispatchable_tool_names`` — the union of the
+        model-visible tool surface and every registry-dispatchable name
+        (including alias-only toolsets like ``neural-alias`` that hide
+        their schema from the model). Small models frequently emit
+        legit alias names such as ``propose_pipeline`` / ``suggest_pipeline``
+        from SKILL.md, and matching only against ``valid_tool_names``
+        used to fuzzy-repair those to unrelated tools like
+        ``compare_pipelines`` (SequenceMatcher ratio 0.727).
+
+        Returns the repaired name if found in the dispatchable set, else
+        None.
         """
         import re
         from difflib import get_close_matches
 
         if not tool_name:
             return None
+
+        # Target set: any name the registry can dispatch, including
+        # schema-hidden aliases. Falls back to the model-visible set if
+        # the dispatchable set wasn't populated (defensive; construction
+        # order guarantees it exists whenever `tools` is truthy).
+        target = getattr(self, "_dispatchable_tool_names", None) or self.valid_tool_names
 
         def _norm(s: str) -> str:
             return s.lower().replace("-", "_").replace(" ", "_")
@@ -5947,10 +5982,10 @@ class AIAgent:
 
         # Cheap fast-paths first — these cover the common case.
         lowered = tool_name.lower()
-        if lowered in self.valid_tool_names:
+        if lowered in target:
             return lowered
         normalized = _norm(tool_name)
-        if normalized in self.valid_tool_names:
+        if normalized in target:
             return normalized
 
         # Build the full candidate set for class-like emissions.
@@ -5967,11 +6002,15 @@ class AIAgent:
             cands |= extra
 
         for c in cands:
-            if c and c in self.valid_tool_names:
+            if c and c in target:
                 return c
 
-        # Fuzzy match as last resort.
-        matches = get_close_matches(lowered, self.valid_tool_names, n=1, cutoff=0.7)
+        # Fuzzy match as last resort. Cutoff bumped from 0.7 → 0.85 —
+        # SequenceMatcher scores like propose_pipeline vs compare_pipelines
+        # sit at ~0.73, which is high enough to silently mis-route the
+        # LLM to a semantically-unrelated tool. 0.85 still catches
+        # typos / camel-vs-snake variants but rejects near-collisions.
+        matches = get_close_matches(lowered, list(target), n=1, cutoff=0.85)
         if matches:
             return matches[0]
 
@@ -13943,16 +13982,21 @@ class AIAgent:
                             logging.debug(f"Tool call: {tc.function.name} with args: {tc.function.arguments[:200]}...")
                     
                     # Validate tool call names - detect model hallucinations
-                    # Repair mismatched tool names before validating
+                    # Repair mismatched tool names before validating. Check
+                    # against the dispatchable superset so backward-compat
+                    # aliases (schemas hidden from model, but registered in
+                    # the tool registry) don't get flagged as invalid and
+                    # fuzzy-repaired to something semantically unrelated.
+                    _dispatchable = getattr(self, "_dispatchable_tool_names", None) or self.valid_tool_names
                     for tc in assistant_message.tool_calls:
-                        if tc.function.name not in self.valid_tool_names:
+                        if tc.function.name not in _dispatchable:
                             repaired = self._repair_tool_call(tc.function.name)
                             if repaired:
                                 print(f"{self.log_prefix}🔧 Auto-repaired tool name: '{tc.function.name}' -> '{repaired}'")
                                 tc.function.name = repaired
                     invalid_tool_calls = [
                         tc.function.name for tc in assistant_message.tool_calls
-                        if tc.function.name not in self.valid_tool_names
+                        if tc.function.name not in _dispatchable
                     ]
                     if invalid_tool_calls:
                         # Track retries for invalid tool calls
@@ -13980,7 +14024,7 @@ class AIAgent:
                         assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
                         messages.append(assistant_msg)
                         for tc in assistant_message.tool_calls:
-                            if tc.function.name not in self.valid_tool_names:
+                            if tc.function.name not in _dispatchable:
                                 content = f"Tool '{tc.function.name}' does not exist. Available tools: {available}"
                             else:
                                 content = "Skipped: another tool call in this turn used an invalid name. Please retry this tool call."

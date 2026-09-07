@@ -35,6 +35,9 @@ _PROTECTED_KEYS = frozenset({
     "presentation_block", "work_dir", "report_path", "staged_path",
     "success", "error", "fix_hint", "next_action",
     "presented_steps_expected", "awaiting_confirmation",
+    "stage_results", "traceback", "stderr_path", "stderr_tail",
+    "chunks", "n_success", "n_failed", "n_pending",
+    "memory_footprint", "proposal_hint",
 })
 
 _MAX_LIST_ITEMS = 8

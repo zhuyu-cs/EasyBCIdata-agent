@@ -503,6 +503,129 @@ def _load_input(path, target_hz=None):
 # in-place without touching the rest of the script.
 # --------------------------------------------------------------------------
 
+def _apply_chunked_filter_inplace(data, sfreq, kind, params, budget_mb=None,
+                                  overlap_sec=None, _min_chunk_samples=10000):
+    """Zero-phase IIR filter with time-chunked overlap-add processing.
+
+    Applied for notch/bandpass/highpass/lowpass to avoid the 2-3x memory
+    overhead of MNE's float64 round-trip. Data stays float32 in place;
+    scipy.signal.sosfiltfilt is applied per extended chunk (previous chunk's
+    trailing raw samples + current chunk + next chunk's leading raw samples)
+    so filter transients at both edges settle within the discarded overlap.
+
+    Falls back to a single sosfiltfilt call (still float32, no chunking) when
+    the data fits comfortably. Returns ``None`` when scipy is unavailable to
+    signal the caller to take the MNE fallback path.
+
+    Overlap length auto-scales with the filter's lowest cutoff (a Butterworth
+    IIR settles in ~4/fc seconds). Explicit ``overlap_sec`` or the env var
+    ``EASYBCI_FILTER_OVERLAP_SEC`` overrides.
+    """
+    try:
+        from scipy.signal import iirnotch, butter, sosfiltfilt, tf2sos
+    except ImportError:
+        return None
+
+    n_ch, n_samp = data.shape
+    ny = sfreq / 2.0
+
+    lo_cutoff_hz = None
+    if kind == "notch":
+        freq = float(params["freq"])
+        if freq <= 0 or freq >= ny:
+            return data
+        b, a = iirnotch(freq / ny, Q=30.0)
+        sos = tf2sos(b, a)
+        lo_cutoff_hz = max(freq * 0.5, 1.0)
+    elif kind == "bandpass":
+        lo = params.get("lo"); hi = params.get("hi")
+        if lo is not None and hi is not None:
+            if lo <= 0 or hi >= ny or lo >= hi:
+                return data
+            sos = butter(4, [lo / ny, hi / ny], btype="bandpass", output="sos")
+            lo_cutoff_hz = float(lo)
+        elif lo is not None and lo > 0 and lo < ny:
+            sos = butter(4, lo / ny, btype="highpass", output="sos")
+            lo_cutoff_hz = float(lo)
+        elif hi is not None and hi > 0 and hi < ny:
+            sos = butter(4, hi / ny, btype="lowpass", output="sos")
+            lo_cutoff_hz = float(hi)
+        else:
+            return data
+    elif kind == "highpass":
+        lo = float(params["lo"])
+        if lo <= 0 or lo >= ny:
+            return data
+        sos = butter(4, lo / ny, btype="highpass", output="sos")
+        lo_cutoff_hz = float(lo)
+    elif kind == "lowpass":
+        hi = float(params["hi"])
+        if hi <= 0 or hi >= ny:
+            return data
+        sos = butter(4, hi / ny, btype="lowpass", output="sos")
+        lo_cutoff_hz = float(hi)
+    else:
+        return data
+
+    if budget_mb is None:
+        try:
+            budget_mb = float(_os.environ.get("EASYBCI_MEMORY_BUDGET_MB") or 4000)
+        except (TypeError, ValueError):
+            budget_mb = 4000.0
+    chunk_samples = max(_min_chunk_samples,
+                        int(budget_mb * 0.4 * 1e6 / (n_ch * 4)))
+    if chunk_samples >= int(n_samp * 0.8):
+        data[:] = sosfiltfilt(sos, data, axis=1).astype(np.float32, copy=False)
+        return data
+
+    if overlap_sec is None:
+        env = _os.environ.get("EASYBCI_FILTER_OVERLAP_SEC")
+        if env:
+            try:
+                overlap_sec = float(env)
+            except (TypeError, ValueError):
+                overlap_sec = None
+        if overlap_sec is None:
+            # Auto: 4 e-folds of the slowest transient (~ 4 / fc seconds),
+            # clamped to a sensible range so short data still chunks and huge
+            # data doesn't waste memory on a giant overlap buffer.
+            if lo_cutoff_hz and lo_cutoff_hz > 0:
+                overlap_sec = max(2.0, min(16.0, 4.0 / lo_cutoff_hz))
+            else:
+                overlap_sec = 2.0
+    overlap = max(1, int(sfreq * overlap_sec))
+
+    prev_right_raw = None
+    start = 0
+    while start < n_samp:
+        end = min(start + chunk_samples, n_samp)
+        # Extended block = prev_right_raw (raw samples from before this chunk,
+        # saved before the previous iteration overwrote them) + current chunk
+        # + next chunk's leading raw samples. Both edges get real signal so
+        # the sosfiltfilt transient decays into throw-away territory.
+        ext_left = (prev_right_raw if prev_right_raw is not None
+                    else np.empty((n_ch, 0), dtype=data.dtype))
+        right_ext_end = min(n_samp, end + overlap)
+        ext_right = data[:, end:right_ext_end].copy() if right_ext_end > end \
+            else np.empty((n_ch, 0), dtype=data.dtype)
+        # Snapshot the tail of the current chunk before overwriting; it becomes
+        # the next iteration's left-side overlap.
+        if end < n_samp:
+            next_left = data[:, max(start, end - overlap):end].copy()
+        else:
+            next_left = None
+        ext_block = np.concatenate([ext_left, data[:, start:end], ext_right], axis=1)
+        filtered = sosfiltfilt(sos, ext_block, axis=1).astype(np.float32, copy=False)
+        trim_start = ext_left.shape[1]
+        trim_end = trim_start + (end - start)
+        data[:, start:end] = filtered[:, trim_start:trim_end]
+        prev_right_raw = next_left
+        if end == n_samp:
+            break
+        start = end
+    return data
+
+
 def _to_mne_raw(d):
     """Build an in-memory mne.io.RawArray from a data_dict."""
     import mne
@@ -575,6 +698,10 @@ def op_notch(d, param):
     """Notch filter. param='auto' detects this file's mains freq + harmonics
     at runtime (per-file power-line detection); a numeric param notches that
     fixed frequency. 'auto' with no detectable line noise falls back to 50 Hz.
+
+    Default path: chunked overlap-add IIR notch on float32 in place (no MNE
+    round-trip). Falls back to MNE ``notch_filter`` when scipy is missing or
+    when the user forces ``EASYBCI_FILTER_MODE=mne``.
     """
     if (param or "").strip().lower() == "auto":
         freqs = _detect_powerline_hz(d["data"], float(d.get("frequency") or 0.0))
@@ -582,6 +709,18 @@ def op_notch(d, param):
             freqs = [50.0]
     else:
         freqs = [float(param) if param else 50.0]
+    force_mne = (_os.environ.get("EASYBCI_FILTER_MODE") or "").lower() == "mne"
+    if not force_mne:
+        ok = True
+        for f in freqs:
+            r = _apply_chunked_filter_inplace(
+                d["data"], float(d["frequency"]), "notch", {{"freq": f}}
+            )
+            if r is None:
+                ok = False
+                break
+        if ok:
+            return dict(d)
     raw = _to_mne_raw(d)
     raw.notch_filter(freqs=freqs, verbose="ERROR")
     return _from_mne_raw(raw, d.get("meta", {{}}))
@@ -626,16 +765,26 @@ def op_bandpass(d, param):
     # Channel routing: ``bandpass:lo,hi,ROUTE`` applies the filter only to
     # channels matching ROUTE (MNE ch_type or channel-name substring). When
     # ROUTE is absent the filter is global (backward compatible).
+    #
+    # Default path (global filters only): chunked overlap-add IIR on float32
+    # in place — no MNE round-trip. Route filters, scipy-missing, and
+    # EASYBCI_FILTER_MODE=mne all fall back to MNE .filter().
     parts = (param or "").split(",")
     lo = float(parts[0]) if len(parts) >= 1 and parts[0] else None
     hi = float(parts[1]) if len(parts) >= 2 and parts[1] else None
     route_label = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else None
-    # Nyquist guard: h_freq must be strictly < sfreq/2 for MNE.
     sfreq = d["frequency"]
     if hi is not None and hi >= sfreq / 2:
         hi = None
     if lo is None and hi is None:
         return d
+    force_mne = (_os.environ.get("EASYBCI_FILTER_MODE") or "").lower() == "mne"
+    if route_label is None and not force_mne:
+        r = _apply_chunked_filter_inplace(
+            d["data"], float(sfreq), "bandpass", {{"lo": lo, "hi": hi}}
+        )
+        if r is not None:
+            return dict(d)
     raw = _to_mne_raw(d)
     picks = _resolve_route_picks(d, route_label) or None
     raw.filter(l_freq=lo, h_freq=hi, picks=picks, verbose="ERROR")
@@ -644,6 +793,13 @@ def op_bandpass(d, param):
 
 def op_highpass(d, param):
     lo = float(param) if param else 1.0
+    force_mne = (_os.environ.get("EASYBCI_FILTER_MODE") or "").lower() == "mne"
+    if not force_mne:
+        r = _apply_chunked_filter_inplace(
+            d["data"], float(d["frequency"]), "highpass", {{"lo": lo}}
+        )
+        if r is not None:
+            return dict(d)
     raw = _to_mne_raw(d)
     raw.filter(l_freq=lo, h_freq=None, verbose="ERROR")
     return _from_mne_raw(raw, d.get("meta", {{}}))
@@ -654,6 +810,13 @@ def op_lowpass(d, param):
     sfreq = d["frequency"]
     if hi >= sfreq / 2:
         return d
+    force_mne = (_os.environ.get("EASYBCI_FILTER_MODE") or "").lower() == "mne"
+    if not force_mne:
+        r = _apply_chunked_filter_inplace(
+            d["data"], float(sfreq), "lowpass", {{"hi": hi}}
+        )
+        if r is not None:
+            return dict(d)
     raw = _to_mne_raw(d)
     raw.filter(l_freq=None, h_freq=hi, verbose="ERROR")
     return _from_mne_raw(raw, d.get("meta", {{}}))
@@ -1582,6 +1745,18 @@ def main():
     work_dir.mkdir(parents=True, exist_ok=True)
 
     inputs = _load_inputs(work_dir, sys.argv)
+    # Chunk-driven filter: when EASYBCI_FILE_IDS is set (comma-separated),
+    # process only routing entries whose file_id appears in the whitelist.
+    # Used by batch_process_adaptive's chunked orchestration; empty/unset =
+    # process everything (backwards-compatible single-run mode).
+    _ebci_wl = _os.environ.get("EASYBCI_FILE_IDS", "").strip()
+    if _ebci_wl:
+        _wl = {{fid.strip() for fid in _ebci_wl.split(",") if fid.strip()}}
+        inputs = [inp for inp in inputs if (inp.get("file_id") or "legacy") in _wl]
+        if not inputs:
+            print("[pipeline] EASYBCI_FILE_IDS filter matched 0 inputs; nothing to do",
+                  file=sys.stderr)
+            sys.exit(0)
     steps = {steps_repr}
 
     aggregate = {{"inputs": [], "n_success": 0, "n_failed": 0}}

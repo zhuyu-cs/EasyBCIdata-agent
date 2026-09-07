@@ -486,10 +486,29 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         # source directory — those carry full trial-level data that bloats
         # context without adding value (the inspection_report already
         # summarizes events/labels).
+        #
+        # Narrow exemption: obvious human-readable documentation files
+        # (README.md, README.rst, LICENSE*, CHANGELOG.md, …) that happen
+        # to live alongside signal files should be readable — a dataset
+        # README is exactly the sort of context the agent needs before
+        # planning a pipeline, and it never contains raw trial data. The
+        # exemption is deliberately narrow (documentation extensions +
+        # well-known no-extension doc filenames) and does NOT cover
+        # `.txt` / `.csv` / `.tsv` / `.json` etc., which are the formats
+        # events / labels / manifests are typically exported to.
         try:
             from easybci_agent.source_data_guard import is_source_data, is_inside_protected_dir
             _resolved_str_guard = str(_resolved)
-            if is_source_data(_resolved_str_guard) or is_inside_protected_dir(_resolved_str_guard):
+            _docs_exts = {".md", ".rst", ".markdown"}
+            _docs_stems = {"readme", "license", "licence", "changelog",
+                           "contributing", "authors", "notice"}
+            _ext_lc = _resolved.suffix.lower()
+            _stem_lc = _resolved.stem.lower()
+            _is_doc_file = _ext_lc in _docs_exts or _stem_lc in _docs_stems
+            if not _is_doc_file and (
+                is_source_data(_resolved_str_guard)
+                or is_inside_protected_dir(_resolved_str_guard)
+            ):
                 return json.dumps({
                     "error": (
                         f"Cannot read source data file '{path}' directly into context. "

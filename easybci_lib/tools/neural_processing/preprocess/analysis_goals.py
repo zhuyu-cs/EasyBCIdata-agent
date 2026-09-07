@@ -10,7 +10,7 @@ Adding a new goal is one entry here, not a 3-file edit.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 from .analysis_goals_loader import load_and_merge_third_party as _load_tp
 
@@ -32,6 +32,14 @@ class AnalysisGoalSpec:
     # infers deliverables; codegen/contract_check no longer read it as a gate.
     produces_ai_ready: bool = True
     crystallize_eligible: bool = True
+    # Optional Nyquist requirement floor for this goal's analysis type,
+    # consumed by preprocess/memory_advisory.build_memory_footprint(). When
+    # peak_native_mb > warn ratio * memory_budget_mb, the advisory suggests
+    # `resample:<min_sfreq_hz>` so the LLM can propose a downsample step
+    # before the pipeline hits the runtime _gate_peak_mb decimation
+    # fallback. None = no specific recommendation (e.g. exploratory /
+    # generic goals where any downsample is user's call).
+    min_sfreq_hz: Optional[float] = None
     notes: str = ""
 
 
@@ -42,6 +50,7 @@ REGISTRY: Dict[str, AnalysisGoalSpec] = {
         description="ML classification (motor imagery, P300, SSVEP, …)",
         inject_drop_bads=True,
         inject_drop_nondata=True,
+        min_sfreq_hz=100.0,
     ),
     "source_localization": AnalysisGoalSpec(
         name="source_localization",
@@ -49,6 +58,7 @@ REGISTRY: Dict[str, AnalysisGoalSpec] = {
         description="Inverse modelling (sLORETA, beamforming, dipole fitting)",
         inject_drop_bads=False,
         inject_drop_nondata=False,
+        min_sfreq_hz=250.0,
         notes="Keep EOG / physio for source modelling.",
     ),
     "feature_extraction": AnalysisGoalSpec(
@@ -57,6 +67,7 @@ REGISTRY: Dict[str, AnalysisGoalSpec] = {
         description="Bandpower / PSD / time-frequency features for downstream models",
         inject_drop_bads=True,
         inject_drop_nondata=True,
+        min_sfreq_hz=200.0,
     ),
     "clinical_screening": AnalysisGoalSpec(
         name="clinical_screening",
@@ -64,6 +75,7 @@ REGISTRY: Dict[str, AnalysisGoalSpec] = {
         description="Reviewing EEG/MEG for clinically-relevant patterns",
         inject_drop_bads=True,
         inject_drop_nondata=True,
+        min_sfreq_hz=200.0,
     ),
     "exploratory": AnalysisGoalSpec(
         name="exploratory",
@@ -90,6 +102,7 @@ REGISTRY: Dict[str, AnalysisGoalSpec] = {
         inject_drop_bads=True,
         inject_drop_nondata=False,
         allow_aggressive_notch=False,
+        min_sfreq_hz=500.0,
         notes="Aggressive notch can distort phase; keep wide-band signal.",
     ),
     "phase_amplitude_coupling": AnalysisGoalSpec(
@@ -100,6 +113,7 @@ REGISTRY: Dict[str, AnalysisGoalSpec] = {
         inject_drop_nondata=False,
         allow_aggressive_notch=False,
         allow_ica=False,
+        min_sfreq_hz=500.0,
         notes="ICA may inadvertently strip PAC components.",
     ),
     "online_inference": AnalysisGoalSpec(
@@ -110,6 +124,7 @@ REGISTRY: Dict[str, AnalysisGoalSpec] = {
         inject_drop_nondata=True,
         allow_ica=False,
         produces_figures=False,
+        min_sfreq_hz=100.0,
         notes="No offline ICA; QC figures not produced. mini-repo contract relaxes for this goal.",
     ),
     "sleep_staging": AnalysisGoalSpec(
@@ -124,6 +139,7 @@ REGISTRY: Dict[str, AnalysisGoalSpec] = {
         allow_ica=False,
         produces_figures=True,
         crystallize_eligible=True,
+        min_sfreq_hz=100.0,
         notes=("Do NOT high-pass above 0.5 Hz — slow waves (0.5–2 Hz) are "
                "critical. Low-pass ~35 Hz suffices. Resample default 100 Hz "
                "(AASM). Labels optional: study may be unscored."),

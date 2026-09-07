@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -303,29 +304,52 @@ def build_repro_repo(
         return {"success": False, "work_dir": str(wd), "error": scaffold.get("error"),
                 "steps": repo_steps}
 
-    # ---- Step 4: run pipeline → qc → vis -----------------------------------
+    # ---- Step 4: run pipeline (chunked) → qc → vis --------------------------
     from easybci_lib.tools.neural_processing.codegen.script_runner import run_script
-    stage_results: dict[str, Any] = {}
-    for stage in ("pipeline", "qc", "vis"):
-        res = run_script(work_dir=str(wd), stage=stage, input_path=None, timeout=timeout)
-        stage_results[stage] = {"ok": res.get("ok"), "retcode": res.get("retcode"),
+    chunk_size = _resolve_chunk_size(memory_plan)
+
+    pipe_result = _run_pipeline_chunks(wd, table, timeout=timeout,
+                                        chunk_size=chunk_size)
+    stage_results: dict[str, Any] = {
+        "pipeline": {
+            "ok": pipe_result["ok"],
+            "chunks": pipe_result["chunks"],
+            "n_success": pipe_result["n_success"],
+            "n_failed": pipe_result["n_failed"],
+            "first_failure": pipe_result["first_failure"],
+            "chunk_size": chunk_size,
+        }
+    }
+    # Pipeline stage is fatal ONLY when zero files completed. Any partial
+    # progress lets qc/vis + finalize run so the user gets a repo for the
+    # successful subset (rest can be resumed via resume_preprocessing).
+    if pipe_result["n_success"] == 0:
+        return {"success": False, "work_dir": str(wd), "steps": repo_steps,
+                "n_routed": n_routed, "n_excluded": len(excluded),
+                "excluded": excluded, "stage_results": stage_results,
+                "chunks": pipe_result["chunks"],
+                "n_success": 0, "n_failed": pipe_result["n_failed"],
+                "n_pending": pipe_result["n_pending"],
+                "error": "pipeline stage failed — 0 files completed"}
+
+    for stage in ("qc", "vis"):
+        res = run_script(work_dir=str(wd), stage=stage, input_path=None,
+                         timeout=timeout)
+        stage_results[stage] = {"ok": res.get("ok"),
+                                "retcode": res.get("retcode"),
                                 "status": res.get("status")}
         if not res.get("ok"):
-            # pipeline failure is fatal; qc/vis failures are surfaced but the
-            # repo is still finalized so the user can inspect + repair.
+            # qc/vis failures are surfaced but the repo is still finalized so
+            # the user can inspect + repair.
             stage_results[stage]["stderr_tail"] = res.get("stderr_tail")
-            if stage == "pipeline":
-                return {"success": False, "work_dir": str(wd), "steps": repo_steps,
-                        "n_routed": n_routed, "n_excluded": len(excluded),
-                        "excluded": excluded, "stage_results": stage_results,
-                        "error": "pipeline stage failed"}
+            stage_results[stage]["stderr_path"] = res.get("stderr_path")
 
     # ---- Step 5: finalize + contract-check ---------------------------------
     _finalize_repo(wd, repo_steps, resolved_modality, analysis_goal, paradigm, table)
     contract = _contract_check(wd, analysis_goal)
 
     result = {
-        "success": bool(contract.get("ok")),
+        "success": bool(contract.get("ok")) and pipe_result["ok"],
         "work_dir": str(wd),
         "n_inputs": len(files),
         "n_routed": n_routed,
@@ -336,6 +360,10 @@ def build_repro_repo(
         "adaptive": adaptive,
         "contract": contract,
         "stage_results": stage_results,
+        "chunks": pipe_result["chunks"],
+        "n_success": pipe_result["n_success"],
+        "n_failed": pipe_result["n_failed"],
+        "n_pending": pipe_result["n_pending"],
     }
     # Surface the raw-vs-preprocessed footprint build_mini_repo stamped into
     # plan/pipeline_record.json, so the batch tool return shows it in chat.
@@ -516,6 +544,148 @@ def _scaffold_repo(wd: Path, steps, modality, analysis_goal, paradigm, table, sc
     except Exception as exc:
         return {"ok": False, "error": f"qc/vis codegen failed: {exc}"}
     return {"ok": True}
+
+
+def _pending_file_ids(work_dir: Path, table) -> list[str]:
+    """Return file_ids in the routing table that have NO successful
+    pipeline_status__<fid>.json yet. Used as chunk-loop scheduling input so
+    each new chunk skips work the previous chunks already committed.
+
+    Idempotent: pipeline.py itself also runs _already_done() per file, so a
+    stale status file re-included here is a cheap no-op inside the subprocess.
+    """
+    mp = work_dir / "middle_process"
+    pending: list[str] = []
+    for e in getattr(table, "inputs", []) or []:
+        fid = getattr(e, "file_id", None) or ""
+        if not fid:
+            continue
+        sidecar = mp / f"pipeline_status__{fid}.json"
+        if not sidecar.is_file():
+            pending.append(fid)
+            continue
+        try:
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pending.append(fid)
+            continue
+        if not payload.get("success"):
+            pending.append(fid)
+    return pending
+
+
+def _resolve_chunk_size(memory_plan: Optional[dict]) -> int:
+    """Decide how many files pipeline.py should process per subprocess.
+
+    Policy:
+      1. Env override EASYBCI_BATCH_CHUNK wins (integer >= 1). Lets a user
+         force strict isolation (=1) or aggressive throughput regardless of
+         what the memory plan estimates.
+      2. Otherwise: chunk_size = max(1, floor(memory_budget_mb / (2 *
+         peak_max_mb))). Halving the budget guards against peak-alignment
+         overshoot when several files hit their working-set apex at the same
+         instant inside one subprocess.
+      3. Falls back to 1 when the plan is missing/empty/invalid (safest
+         default when we can't reason about footprint).
+
+    Returns a positive int.
+    """
+    env_override = os.environ.get("EASYBCI_BATCH_CHUNK", "").strip()
+    if env_override:
+        try:
+            v = int(env_override)
+            if v >= 1:
+                return v
+        except ValueError:
+            pass
+    try:
+        budget = float((memory_plan or {}).get("memory_budget_mb") or 0)
+        peak = float((memory_plan or {}).get("peak_max_mb") or 0)
+        if budget > 0 and peak > 0:
+            return max(1, int(budget // (2 * peak)))
+    except (TypeError, ValueError):
+        pass
+    return 1
+
+
+def _run_pipeline_chunks(wd: Path, table, timeout, chunk_size: int) -> dict:
+    """Run pipeline.py in chunks of chunk_size file_ids at a time.
+
+    Each chunk = a fresh subprocess with EASYBCI_FILE_IDS=<comma-separated>
+    in its env. pipeline.py filters inputs by this whitelist. Between chunks
+    all working memory is released (subprocess exits). A chunk's failure
+    (retcode != 0, OOM, timeout) does NOT abort the batch — the next chunk
+    still starts. Final ok/failure is decided by counting successful
+    pipeline_status__*.json sidecars vs the routing table size.
+
+    Returns:
+        {"ok": bool, "chunks": [...], "n_success": int, "n_failed": int,
+         "n_pending": int, "first_failure": <dict or None>}
+    """
+    from easybci_lib.tools.neural_processing.codegen.script_runner import run_script
+
+    pending = _pending_file_ids(wd, table)
+    if not pending:
+        return {"ok": True, "chunks": [],
+                "n_success": len(getattr(table, "inputs", []) or []),
+                "n_failed": 0, "n_pending": 0, "first_failure": None}
+
+    step = max(1, chunk_size)
+    chunks: list[dict] = []
+    first_failure: Optional[dict] = None
+    total_chunks = (len(pending) + step - 1) // step
+    for i in range(0, len(pending), step):
+        chunk_ids = pending[i:i + step]
+        env_extra = {"EASYBCI_FILE_IDS": ",".join(chunk_ids)}
+        res = run_script(
+            work_dir=str(wd), stage="pipeline", input_path=None,
+            timeout=timeout, env_extra=env_extra,
+        )
+        entry = {
+            "chunk_index": i // step,
+            "file_ids": chunk_ids,
+            "ok": bool(res.get("ok")),
+            "retcode": res.get("retcode"),
+            "stderr_path": res.get("stderr_path"),
+        }
+        if not res.get("ok") and first_failure is None:
+            first_failure = {
+                "chunk_index": entry["chunk_index"],
+                "file_ids": chunk_ids,
+                "retcode": res.get("retcode"),
+                "traceback": res.get("traceback"),
+                "stderr_tail": res.get("stderr_tail"),
+                "stderr_path": res.get("stderr_path"),
+                "archived_to": res.get("archived_to"),
+            }
+        chunks.append(entry)
+        logger.info(
+            "batch pipeline chunk %d/%d: file_ids=%s ok=%s",
+            entry["chunk_index"] + 1, total_chunks,
+            ",".join(chunk_ids), entry["ok"],
+        )
+
+    n_total = len(getattr(table, "inputs", []) or [])
+    n_success = 0
+    for e in getattr(table, "inputs", []) or []:
+        fid = getattr(e, "file_id", None) or ""
+        sidecar = wd / "middle_process" / f"pipeline_status__{fid}.json"
+        if not sidecar.is_file():
+            continue
+        try:
+            if json.loads(sidecar.read_text(encoding="utf-8")).get("success"):
+                n_success += 1
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {
+        "ok": n_success == n_total,
+        "chunks": chunks,
+        "n_success": n_success,
+        "n_failed": n_total - n_success,
+        "n_pending": max(0, n_total - n_success
+                         - sum(1 for c in chunks if not c["ok"])),
+        "first_failure": first_failure,
+    }
 
 
 def _finalize_repo(wd: Path, steps, modality, analysis_goal, paradigm, table) -> None:

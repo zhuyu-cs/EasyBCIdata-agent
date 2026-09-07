@@ -23,6 +23,7 @@ import logging
 import os
 import threading
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 from easybci_agent.source_data_guard import register_source_path, check_output_path
 from easybci_lib.tools.neural_processing.progress.context import (
@@ -228,6 +229,79 @@ def _resolve_work_dir_from_args(args: dict) -> Path | None:
             return p.parent.parent
         return p.parent
     return None
+
+
+def _read_memory_footprint_from_workdir(
+    work_dir: Path,
+    analysis_goal: Optional[str],
+    current_sfreq_hz: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    """Read middle_process/batch_memory_plan.json and build an advisory.
+
+    Fail-open: missing file / malformed JSON / missing keys -> None (no
+    advisory, tool return proceeds as usual). See
+    ``preprocess/memory_advisory.build_memory_footprint`` for the schema
+    of the returned dict.
+    """
+    from easybci_lib.tools.neural_processing.preprocess.memory_advisory import (
+        build_memory_footprint,
+    )
+    plan_path = work_dir / "middle_process" / "batch_memory_plan.json"
+    if not plan_path.is_file():
+        return None
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return build_memory_footprint(
+        peak_native_mb=plan.get("peak_native_max_mb") or plan.get("peak_max_mb"),
+        memory_budget_mb=plan.get("memory_budget_mb"),
+        analysis_goal=analysis_goal,
+        current_sfreq_hz=current_sfreq_hz,
+    )
+
+
+def _attach_memory_footprint(result: dict, args: dict) -> None:
+    """Merge a memory_footprint advisory into ``result`` when peak > budget.
+
+    Reads work_dir + sfreq + goal off ``args`` best-effort and attaches:
+      - ``result['memory_footprint']`` (structured dict, protected key)
+      - ``result['proposal_hint']`` (appended recommendation line so it
+        survives cap_return compression as protected content)
+
+    Fail-open: any error -> no advisory, ``result`` unchanged.
+    """
+    try:
+        wd = _resolve_work_dir_from_args(args)
+        if wd is None or not wd.is_dir():
+            return
+        # sfreq: prefer fingerprint.frequency_hz (canonical name used across
+        # tool boundaries), fall back to inspection_report keys, then None.
+        fp = args.get("fingerprint") or {}
+        sfreq = None
+        if isinstance(fp, dict):
+            sfreq = fp.get("frequency_hz") or fp.get("sampling_freq_hz")
+        if sfreq is None:
+            insp = args.get("inspection_report") or {}
+            if isinstance(insp, dict):
+                sfreq = insp.get("sampling_freq_hz") or insp.get("frequency_hz")
+        goal = args.get("analysis_goal")
+        adv = _read_memory_footprint_from_workdir(
+            wd, goal, float(sfreq) if sfreq else None,
+        )
+    except Exception:
+        return
+    if not adv:
+        return
+    result["memory_footprint"] = adv
+    hint_line = adv.get("recommendation") or ""
+    if not hint_line:
+        return
+    existing = result.get("proposal_hint")
+    if existing:
+        result["proposal_hint"] = f"{existing}\n\n{hint_line}"
+    else:
+        result["proposal_hint"] = hint_line
 
 
 def _pipeline_has_produced_output(work_dir: Path) -> bool:
@@ -3616,12 +3690,58 @@ def _handle_resume_preprocessing(args, **kw):
 
     stages_run: list = []
     stage_results: dict = {}
+    chunk_diagnostics: dict = {}
     try:
         for stage in ("pipeline", "qc", "vis", "build_ai_ready"):
             script = wd / "code" / f"{stage}.py"
             if not script.is_file():
                 stage_results[stage] = {"ok": False, "skipped_stage": True,
                                         "reason": f"{stage}.py missing"}
+                continue
+            if stage == "pipeline":
+                # Multi-file pipeline stage runs chunked, mirroring
+                # batch_process_adaptive's orchestration: each chunk is a fresh
+                # subprocess with EASYBCI_FILE_IDS scoping its work, so a single
+                # file crash (OOM/SIGKILL/exception) stops at that chunk instead
+                # of collapsing the whole resume run. qc/vis/build_ai_ready still
+                # run once at the end over the completed subset.
+                from easybci_lib.tools.neural_processing.batch.orchestrate import (
+                    _resolve_chunk_size, _run_pipeline_chunks,
+                )
+                from easybci_lib.tools.neural_processing.io.routing_table import (
+                    load_routing_table,
+                )
+                memory_plan: dict = {}
+                mp_path = wd / "middle_process" / "batch_memory_plan.json"
+                if mp_path.is_file():
+                    try:
+                        memory_plan = json.loads(mp_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError) as exc:
+                        logger.debug("resume: memory_plan unreadable: %s", exc)
+                routing = load_routing_table(wd)
+                chunk_size = _resolve_chunk_size(memory_plan)
+                pipe_result = _run_pipeline_chunks(
+                    wd, routing, timeout=timeout, chunk_size=chunk_size,
+                )
+                stages_run.append(stage)
+                stage_results[stage] = {
+                    "ok": pipe_result["ok"],
+                    "chunks": pipe_result["chunks"],
+                    "n_success": pipe_result["n_success"],
+                    "n_failed": pipe_result["n_failed"],
+                    "first_failure": pipe_result["first_failure"],
+                    "chunk_size": chunk_size,
+                }
+                chunk_diagnostics = {
+                    "chunks": pipe_result["chunks"],
+                    "n_success": pipe_result["n_success"],
+                    "n_failed": pipe_result["n_failed"],
+                    "n_pending": pipe_result["n_pending"],
+                }
+                # Zero files completed → stop; qc/vis have nothing to consume.
+                # Any partial progress → keep going so qc/vis run over the subset.
+                if pipe_result["n_success"] == 0:
+                    break
                 continue
             result = run_script(
                 work_dir=str(wd),
@@ -3635,6 +3755,7 @@ def _handle_resume_preprocessing(args, **kw):
                 "retcode": result.get("retcode"),
                 "stdout_tail": result.get("stdout_tail"),
                 "stderr_tail": result.get("stderr_tail"),
+                "stderr_path": result.get("stderr_path"),
             }
             if not result.get("ok"):
                 break
@@ -3660,6 +3781,7 @@ def _handle_resume_preprocessing(args, **kw):
         "stage_results": stage_results,
         "before": before,
         "after": after,
+        **chunk_diagnostics,
     })
 
 
@@ -4403,6 +4525,7 @@ def _handle_suggest_pipeline(args, **kw):
             ),
         }
 
+    _attach_memory_footprint(result, args)
     return cap_return(result)
 
 
@@ -4997,6 +5120,7 @@ def _handle_propose_pipeline_evidence(args, **kw):
             _evidence_propose_result["scenario_bias"] = _sc.param_bias_notes
     except Exception:
         pass
+    _attach_memory_footprint(_evidence_propose_result, args)
     return cap_return(_evidence_propose_result)
 
 
@@ -5018,9 +5142,33 @@ def _handle_propose_pipeline(args, **kw):
 
     import yaml as _yaml
 
-    data_path = args["data_path"]
+    # Guard the two fields this legacy string-step branch dereferences by
+    # index. `steps` is NOT marked required in the plan_pipeline schema, so an
+    # LLM can legitimately reach propose mode (mode="propose" with empty/absent
+    # steps) and a bare args["steps"]/args["data_path"] would raise an
+    # uncaught KeyError — collapsing the whole tool dispatch into an opaque
+    # "Tool execution failed: KeyError" with no guidance. Return a structured
+    # error instead (same style as the other guards in this handler).
+    if not raw_steps:
+        return json.dumps({
+            "success": False,
+            "error": (
+                "propose mode requires a non-empty `steps` array. Either pass "
+                "the ordered preprocessing steps, or call plan_pipeline in "
+                "suggest mode (omit `mode`/`steps`) to have the system propose "
+                "them for you."
+            ),
+            "field": "steps",
+        })
+    data_path = args.get("data_path")
+    if not data_path:
+        return json.dumps({
+            "success": False,
+            "error": "data_path is required for propose mode (path to the raw neural data file).",
+            "field": "data_path",
+        })
     register_source_path(data_path)
-    steps = args["steps"]
+    steps = raw_steps
     # Analysis_goal is already validated by _handle_plan_pipeline.
     # It flows into pipeline.yaml + plan/goal.json so finalize / build_mini_repo
     # can stamp it into reasoning.md banner and pipeline_record.json.
@@ -5321,6 +5469,7 @@ def _handle_propose_pipeline(args, **kw):
             _propose_result["scenario_bias"] = _sc.param_bias_notes
     except Exception:
         pass
+    _attach_memory_footprint(_propose_result, args)
     return cap_return(_propose_result)
 
 
@@ -7231,14 +7380,47 @@ def _handle_batch_process_adaptive(args, **kw):
     # final chat so the user gets an immediate, visual before/after summary.
     result["completion_block"] = _render_batch_completion_block(result)
     result["must_present"] = True
-    result["next_action"] = {
-        "must_present": True,
-        "hint": (
-            "The batch is DONE. Paste the FULL `completion_block` VERBATIM in "
-            "chat as your final message — including the Storage Footprint line "
-            "(raw → preprocessed size + reduction). Do NOT summarize it away; the "
-            "user wants the before/after size at a glance."),
-    }
+    n_success = int(result.get("n_success") or 0)
+    n_failed = int(result.get("n_failed") or 0)
+    n_pending = int(result.get("n_pending") or 0)
+    first_failure = (
+        ((result.get("stage_results") or {}).get("pipeline") or {}).get("first_failure")
+        or {}
+    )
+    if result["success"]:
+        result["next_action"] = {
+            "must_present": True,
+            "hint": (
+                "The batch is DONE. Paste the FULL `completion_block` VERBATIM in "
+                "chat as your final message — including the Storage Footprint line "
+                "(raw → preprocessed size + reduction). Do NOT summarize it away; the "
+                "user wants the before/after size at a glance."),
+        }
+    else:
+        stderr_hint = ""
+        if first_failure.get("stderr_path"):
+            stderr_hint = (
+                f" Full stderr of the first failed chunk is at "
+                f"`{first_failure['stderr_path']}` — read it BEFORE proposing a fix."
+            )
+        elif first_failure.get("stderr_tail"):
+            stderr_hint = (
+                " (See `stage_results.pipeline.first_failure.stderr_tail` for a snippet.)"
+            )
+        result["next_action"] = {
+            "must_present": True,
+            "hint": (
+                f"Batch PARTIALLY COMPLETED: {n_success} succeeded, {n_failed} failed, "
+                f"{n_pending} not attempted (of {result.get('n_routed', 0)} routed)."
+                f"{stderr_hint} Do NOT claim success. Show the user the counts, propose "
+                "a fix for the failing file(s), then call resume_preprocessing to "
+                "continue where the batch left off. If any files are unrecoverable, "
+                "name them and re-run batch_process_adaptive with exclude_paths=[...]."
+            ),
+        }
+        result["fix_hint"] = (
+            "Read stderr_path, fix pipeline.py or drop the file, then resume_preprocessing."
+        )
     return cap_return(result)
 
 

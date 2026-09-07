@@ -1322,6 +1322,19 @@ DEFAULT_CONFIG = {
         "servers": {},
     },
 
+    # Runtime knobs -- behavior of the easybci CLI process itself.
+    "runtime": {
+        # OOM isolation via systemd-run --user --scope (Linux only, opt-in,
+        # default False). When true and preflight passes, easybci re-execs
+        # itself under a fresh systemd user scope cgroup with
+        # MemoryMax=infinity + OOMPolicy=continue so kernel OOM only kills
+        # easybci, not the parent tmux/shell. Preflight verifies systemd-run
+        # binary, D-Bus user session, XDG_RUNTIME_DIR, not-already-in-scope.
+        # Preflight failure -> stderr warning + run without scope; startup
+        # is never blocked. See `easybci doctor` for a live report.
+        "systemd_scope": False,
+    },
+
     # Config schema version - bump this when adding new required fields
     "_config_version": 26,
 }

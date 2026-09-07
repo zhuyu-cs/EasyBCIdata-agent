@@ -3,6 +3,26 @@
 # This file configures the CLI behavior. Environment variables in .env take precedence.
 
 # =============================================================================
+# Runtime knobs
+# =============================================================================
+runtime:
+  # OOM isolation via systemd-run --user --scope (Linux only, opt-in).
+  #
+  # When true and preflight passes (systemd-run present, D-Bus user session
+  # active, XDG_RUNTIME_DIR set, not already in a scope, not headless CI),
+  # easybci re-execs itself under a fresh systemd user-scope cgroup with
+  # MemoryMax=infinity + OOMPolicy=continue. That means:
+  #   - kernel OOM (or any subprocess crash) kills only easybci, not the
+  #     parent tmux/shell
+  #   - preprocessing subprocesses run inside the same scope, so their
+  #     OOM is also localized
+  # Preflight fail -> warning + run without scope. Never blocks startup.
+  # See `easybci doctor` for a live report of preflight status.
+  # Overridable per invocation with --systemd-scope / --no-systemd-scope
+  # or EASYBCI_SYSTEMD_SCOPE=1/0.
+  systemd_scope: false
+
+# =============================================================================
 # Model Configuration
 # =============================================================================
 model:

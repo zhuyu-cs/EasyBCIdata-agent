@@ -1660,6 +1660,35 @@ def run_doctor(args):
         manual_issues.append(msg)
 
     # =========================================================================
+    # Check: Runtime scope launcher (systemd-run --user --scope)
+    # =========================================================================
+    print()
+    print(color("◆ Runtime", Colors.CYAN, Colors.BOLD))
+    try:
+        from easybci_cli import systemd_scope
+        rep = systemd_scope.diagnostic_report()
+        if rep["preflight_ok"]:
+            check_ok(
+                "systemd-scope launcher available (opt in with "
+                "--systemd-scope, EASYBCI_SYSTEMD_SCOPE=1, or "
+                "runtime.systemd_scope: true)"
+            )
+        else:
+            check_warn(f"systemd-scope launcher NOT available: {rep['preflight_reason']}")
+        check_info(
+            f"platform={rep['platform']} "
+            f"systemd_run={'yes' if rep['systemd_run_present'] else 'no'} "
+            f"dbus_socket={'yes' if rep['dbus_socket_exists'] else 'no'} "
+            f"xdg_runtime_dir={'yes' if rep['xdg_runtime_dir'] else 'no'} "
+            f"in_scope={'yes' if rep['already_in_scope'] else 'no'} "
+            f"in_ci={'yes' if rep['in_ci'] else 'no'}"
+        )
+    except Exception as exc:
+        msg = f"runtime scope probe: {exc}"
+        print(color(f"  ✗ {msg}", Colors.RED))
+        manual_issues.append(msg)
+
+    # =========================================================================
     # Summary
     # =========================================================================
     print()

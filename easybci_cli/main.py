@@ -185,6 +185,7 @@ _apply_profile_override()
 
 # Load .env from ~/.easybci/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
+from easybci_cli import systemd_scope
 from easybci_cli.config import get_easybci_home
 from easybci_cli.doctor import run_doctor_goals
 from easybci_cli.env_loader import load_easybci_dotenv
@@ -9039,6 +9040,8 @@ def _plugin_cli_discovery_needed() -> bool:
 def main():
     """Main entry point for easybci CLI."""
 
+    _maybe_launch_in_scope(sys.argv)
+
     from easybci_cli._parser import build_top_level_parser
 
     parser, subparsers, chat_parser = build_top_level_parser()
@@ -11536,6 +11539,54 @@ Examples:
             sys.exit(_rc)
     else:
         parser.print_help()
+
+
+def _maybe_launch_in_scope(argv):
+    """Decide from CLI flags / env / config whether to re-exec under
+    systemd-run --user --scope. Delegates the actual exec to
+    :mod:`easybci_cli.systemd_scope`.
+
+    Precedence (highest wins):
+      1. --no-systemd-scope on argv    -> explicit off
+      2. --systemd-scope on argv       -> explicit on
+      3. EASYBCI_SYSTEMD_SCOPE=1 env   -> on
+      4. EASYBCI_SYSTEMD_SCOPE=0 env   -> off
+      5. config runtime.systemd_scope  -> follow config value
+      6. default                       -> False
+
+    The two scope flags are consumed here and removed from ``sys.argv`` so
+    argparse (which runs later and doesn't need to know about the launcher)
+    never sees them.
+    """
+    scope_on = "--systemd-scope" in argv
+    scope_off = "--no-systemd-scope" in argv
+    if scope_on or scope_off:
+        for _flag in ("--systemd-scope", "--no-systemd-scope"):
+            while _flag in sys.argv:
+                sys.argv.remove(_flag)
+
+    if scope_off:
+        return
+    opt_in = scope_on
+    if not opt_in:
+        env_val = os.environ.get("EASYBCI_SYSTEMD_SCOPE", "").strip()
+        if env_val == "1":
+            opt_in = True
+        elif env_val == "0":
+            return
+    if not opt_in:
+        try:
+            from easybci_cli.config import load_config
+            cfg = load_config()
+            runtime_cfg = cfg.get("runtime") or {}
+            if bool(runtime_cfg.get("systemd_scope", False)):
+                opt_in = True
+        except Exception:
+            pass
+    if not opt_in:
+        return
+    scrubbed = [a for a in argv if a not in ("--systemd-scope", "--no-systemd-scope")]
+    systemd_scope.maybe_reexec(scrubbed, opt_in=True)
 
 
 if __name__ == "__main__":

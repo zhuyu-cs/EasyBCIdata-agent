@@ -92,6 +92,8 @@ steps = [
 
 **`propose_pipeline` does NOT write `plan/`.** It stages to `middle_process/proposal.staged.json`. `plan/` materializes only at Step 4 confirm. Iterative modify cycles (propose → user changes → propose again → confirm) never leave stale drafts.
 
+**Memory footprint advisory.** If the `plan_pipeline` / `suggest_pipeline` / `propose_pipeline` return carries a `memory_footprint` field (peak native memory > 50% of budget), read its `recommendation` string. When it suggests `resample:<sfreq>`, include that step in your `propose_pipeline` steps list at the recommended target — this heads off the runtime `_gate_peak_mb` fallback that would silently decimate later. When it says "already at or below the goal's Nyquist floor", warn the user directly: this file cannot be processed on the current machine without excluding it or moving to a larger host. The advisory is transparent input, not a mandate — you may propose a different sfreq with reason stated in `rationale`.
+
 ### Step 4 — CONFIRM (the ONE human gate)
 
 Present from `propose_pipeline` return value (`presentation_block` / `proposal` / `viz` / `web_evidence` / `reasoning_preview`). Do NOT read disk — `plan/` does not exist yet.
