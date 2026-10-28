@@ -8959,9 +8959,35 @@ class AIAgent:
                     content[-1]["cache_control"] = {"type": "ephemeral"}
                 break
 
+    def _active_work_dirs(self) -> list:
+        """Return the list of work_dirs the current run has touched.
+
+        Best-effort — swallows every error. Used by the phase toolset filter to
+        pick the current phase. Sources, in priority order: the neural-export
+        finalize thread-local (populated by propose/assemble/train handlers),
+        and any per-session work_dir the SessionDB may have persisted.
+        """
+        result: list = []
+        try:
+            from easybci_lib.tools.neural_processing.export.finalize import (
+                get_current_work_dir,
+            )
+            wd = get_current_work_dir()
+            if wd:
+                result.append(str(wd))
+        except Exception:
+            pass
+        return result
+
     def _build_api_kwargs(self, api_messages: list) -> dict:
         """Build the keyword arguments dict for the active API mode."""
         tools_for_api = self.tools
+        try:
+            from easybci_agent.phase_toolset_filter import filter_tools
+            active_wd = self._active_work_dirs()
+            tools_for_api = filter_tools(tools_for_api, active_wd)
+        except Exception:
+            pass
 
         if self.api_mode == "anthropic_messages":
             _transport = self._get_transport()

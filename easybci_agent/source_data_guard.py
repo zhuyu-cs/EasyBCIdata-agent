@@ -273,6 +273,52 @@ def get_protected_paths() -> FrozenSet[str]:
         return frozenset(_protected_paths)
 
 
+# Dataset documentation found by the dataset survey. Reading it is part of
+# understanding the data (it never holds trial-level samples), so the source
+# read barrier lets these exact paths through and records which were read.
+_readable_docs: dict[str, bool] = {}
+
+
+def register_readable_docs(paths) -> None:
+    """Allow the read barrier to pass these documentation files."""
+    with _lock:
+        for p in paths or []:
+            try:
+                resolved = os.path.realpath(os.path.expanduser(str(p)))
+            except (OSError, ValueError):
+                continue
+            _readable_docs.setdefault(resolved, False)
+
+
+def is_readable_doc(path: str) -> bool:
+    try:
+        resolved = os.path.realpath(os.path.expanduser(path))
+    except (OSError, ValueError):
+        return False
+    with _lock:
+        return resolved in _readable_docs
+
+
+def mark_doc_read(path: str) -> None:
+    try:
+        resolved = os.path.realpath(os.path.expanduser(path))
+    except (OSError, ValueError):
+        return
+    with _lock:
+        if resolved in _readable_docs:
+            _readable_docs[resolved] = True
+
+
+def unread_docs(paths=None) -> list[str]:
+    """Registered docs not read yet (restricted to ``paths`` when given)."""
+    with _lock:
+        items = dict(_readable_docs)
+    if paths is not None:
+        wanted = {os.path.realpath(os.path.expanduser(str(p))) for p in paths}
+        items = {k: v for k, v in items.items() if k in wanted}
+    return sorted(k for k, v in items.items() if not v)
+
+
 def snapshot_source_files() -> dict[str, tuple[float, int]]:
     """Take a snapshot of (mtime, size) for all registered source files.
 
@@ -328,3 +374,9 @@ def _reset_protected_dirs_for_testing() -> None:
     """Clear all registered protected directories. ONLY for test fixtures."""
     with _lock:
         _protected_dirs.clear()
+
+
+def _reset_readable_docs_for_testing() -> None:
+    """Clear the readable-doc registry. ONLY for test fixtures."""
+    with _lock:
+        _readable_docs.clear()

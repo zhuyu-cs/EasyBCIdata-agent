@@ -38,6 +38,10 @@ _PROTECTED_KEYS = frozenset({
     "stage_results", "traceback", "stderr_path", "stderr_tail",
     "chunks", "n_success", "n_failed", "n_pending",
     "memory_footprint", "proposal_hint",
+    "trial_rejection", "session_consistency",
+    "dataset_context", "dataset_understanding_hint", "unread_dataset_docs",
+    "epoch_window_decision", "epoch_window_override_warning", "epoch_window_warning",
+    "epoch_window_synced", "time_separability",
 })
 
 _MAX_LIST_ITEMS = 8
@@ -90,7 +94,6 @@ def cap_return(payload: dict[str, Any], budget: int = MAX_RETURN_CHARS) -> str:
                      "elapsed_s", "proven_recommendation"):
             essential[key] = val
     essential["_compacted"] = True
-    essential["_retrieve_detail"] = "Use inspect_detail tool for full data."
     return json.dumps(essential, ensure_ascii=False, default=str)
 
 

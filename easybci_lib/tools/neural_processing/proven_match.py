@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .preprocess.operator_vocab import CANONICAL_OPERATORS, OPERATOR_SYNONYMS
+from .quality.trial_reject import normalize_epoch_window
 from .proven_match_dimensions import (
     DEFAULT_DIMENSIONS,
     SimilarityDimension,
@@ -67,6 +69,10 @@ class ProvenPipelineEntry:
     # step so labelled windows are excised per recording instead of dropping the
     # whole file. Empty on non-reference / legacy skills.
     reject_keywords: List[str] = field(default_factory=list)
+    # Trial window the pipeline was proven with ([tmin, tmax] s relative to the
+    # trial event) and where it came from. None on skills that pre-date it.
+    epoch_window: Optional[List[float]] = None
+    epoch_window_source: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -88,6 +94,8 @@ class ProvenPipelineEntry:
             "reference_origin": self.reference_origin,
             "adaptation_slots": self.adaptation_slots,
             "qc_baselines": self.qc_baselines,
+            "epoch_window": self.epoch_window,
+            "epoch_window_source": self.epoch_window_source,
         }
 
 
@@ -240,6 +248,8 @@ def _parse_proven_file(filepath: Path) -> Optional[ProvenPipelineEntry]:
         adaptation_slots=list(metadata.get("adaptation_slots", []) or []),
         qc_baselines=dict(metadata.get("qc_baselines", {}) or {}),
         reject_keywords=[str(k) for k in (metadata.get("reject_keywords", []) or [])],
+        epoch_window=normalize_epoch_window(metadata.get("epoch_window")),
+        epoch_window_source=str(metadata.get("epoch_window_source", "") or "").strip(),
     )
 
     # Extract n_channels, frequency from body
@@ -491,7 +501,7 @@ def _extract_steps_from_body(body: str) -> List[str]:
     or code blocks with step lists.
     """
     # Pattern 1: arrow-separated steps
-    arrow_match = re.search(r"([\w:.,]+(?:\s*→\s*[\w:.,]+)+)", body)
+    arrow_match = re.search(r"([\w:.,=~\-]+(?:\s*→\s*[\w:.,=~\-]+)+)", body)
     if arrow_match:
         steps_str = arrow_match.group(1)
         steps = [s.strip() for s in re.split(r"\s*→\s*", steps_str)]
@@ -513,14 +523,7 @@ def _extract_steps_from_body(body: str) -> List[str]:
     return []
 
 
-_KNOWN_STEP_PREFIXES = {
-    "notch", "bandpass", "resample", "scale", "car", "bipolar_ref",
-    "drop_bads", "interpolate_bads", "ica", "hilbert", "clip",
-    "fill_nan", "pick_channels",
-}
-
-
 def _is_valid_step(s: str) -> bool:
-    """Check if a string looks like a valid pipeline step."""
-    name = s.split(":")[0].strip()
-    return name in _KNOWN_STEP_PREFIXES
+    """True when ``s`` names a vocabulary operator (canonical or synonym)."""
+    name = s.split(":")[0].strip().lower()
+    return bool(name) and (name in CANONICAL_OPERATORS or name in OPERATOR_SYNONYMS)

@@ -87,3 +87,13 @@ plan:
 
 resume:
   phase_hint_line: "Resume phase: {facts}"
+
+epoch_window:
+  section_understanding: "Dataset understanding"
+  section_window: "Epoch window"
+  no_understanding: "No dataset understanding was provided."
+  unread_docs: "Dataset documentation not read before planning: {paths}"
+  runtime_resolved: "not set — resolved at run time from the event durations (fallback [-0.2, segment_duration])"
+  not_applicable: "not applicable — continuous recording without trial events; no epoching"
+  warn_no_data_basis: "Epoch window has no basis in this dataset's documentation or metadata — please confirm."
+  warn_label_independent: "Window includes phases identical across classes: {phases}"

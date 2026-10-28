@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 def _easybci_home_path() -> Path:
@@ -115,3 +116,72 @@ def get_read_block_error(path: str) -> Optional[str]:
             "Use the skills_list or skill_view tools instead."
         )
     return None
+
+
+_read_allowlist_hook_lock = threading.Lock()
+_read_allowlist_hook: Optional[Callable[[str], Optional[str]]] = None
+
+
+def set_read_allowlist_hook(hook: Optional[Callable[[str], Optional[str]]]) -> None:
+    """Register a callable that decides whether a read is inside the allowlist.
+
+    The hook receives the raw path string as passed to read_file / search_files
+    and must return either ``None`` (allow) or a human-readable error message
+    (refuse). Pass ``None`` to clear the hook.
+
+    Only one hook is active at a time. The hook is optional: when unset, all
+    reads pass this gate. Personas / toolsets that need a scoped read boundary
+    (e.g. the algorithm agent) install their own hook at import time via a
+    sync-point module.
+    """
+    global _read_allowlist_hook
+    with _read_allowlist_hook_lock:
+        _read_allowlist_hook = hook
+
+
+def get_read_allowlist_error(path: str) -> Optional[str]:
+    """Dispatch to the currently-registered read-allowlist hook.
+
+    Returns ``None`` if no hook is registered or the hook allows the path;
+    returns the hook's error string if the read is refused.
+    """
+    with _read_allowlist_hook_lock:
+        hook = _read_allowlist_hook
+    if hook is None:
+        return None
+    try:
+        return hook(path)
+    except Exception:
+        return None
+
+
+_write_allowlist_hook_lock = threading.Lock()
+_write_allowlist_hook: Optional[Callable[[str], Optional[str]]] = None
+
+
+def set_write_allowlist_hook(hook: Optional[Callable[[str], Optional[str]]]) -> None:
+    """Register a callable that decides whether a write is inside the allowlist.
+
+    The hook receives the raw path string as passed to write_file / patch and
+    must return either ``None`` (allow) or a human-readable error message
+    (refuse). Pass ``None`` to clear the hook.
+
+    Only one hook is active at a time. The hook is optional: when unset, all
+    writes pass this gate. Personas that need a scoped write boundary install
+    their own hook at import time via a sync-point module.
+    """
+    global _write_allowlist_hook
+    with _write_allowlist_hook_lock:
+        _write_allowlist_hook = hook
+
+
+def get_write_allowlist_error(path: str) -> Optional[str]:
+    """Dispatch to the currently-registered write-allowlist hook."""
+    with _write_allowlist_hook_lock:
+        hook = _write_allowlist_hook
+    if hook is None:
+        return None
+    try:
+        return hook(path)
+    except Exception:
+        return None

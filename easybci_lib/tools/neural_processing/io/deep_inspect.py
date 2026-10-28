@@ -392,6 +392,10 @@ def _scan(
     meta = light.get("meta", {}) or {}
     if isinstance(meta, dict) and meta.get("load_error"):
         raise RuntimeError(meta["load_error"])
+    if isinstance(meta, dict) and meta.get("load_degraded"):
+        raise RuntimeError(
+            "loader degraded: " + ", ".join(meta.get("load_degraded_reasons") or [])
+        )
 
     n_channels = int(meta.get("n_channels") or len(light.get("channels") or []))
     n_samples_total = int(meta.get("n_samples_total") or 0)
@@ -427,6 +431,7 @@ def _scan(
         modality=modality,
     )
     warnings = _build_warnings(channel_stats, channel_summary, psd_summary)
+    warnings.extend(_metadata_warnings(meta))
 
     events_block = meta.get("annotations") or {}
     n_events = (
@@ -611,6 +616,12 @@ def _classify_channels(
     flat = [c.name for c in channel_stats if c.flat_pct > 50.0]
     spiky = [c.name for c in channel_stats if c.spike_count > 100]
 
+    # Recording-declared bad channels (e.g. open / high-impedance electrodes
+    # from the acquisition metadata) are authoritative evidence, not a guess.
+    for ch in (meta or {}).get("bad_channels") or []:
+        if ch in channels and ch not in must:
+            must.append(ch)
+
     return ChannelSummary(
         must_drop=must, suggest_drop=suggest,
         bad_candidates_high_variance=high_var,
@@ -647,6 +658,54 @@ def _build_warnings(
     return warns
 
 
+def _metadata_warnings(meta: dict) -> list[str]:
+    """Loader-reported facts the agent must see before planning.
+
+    Bad channels declared by the recording, NaN gaps, the field mapping a
+    heuristic loader chose and the fields it left unmapped all go into the
+    report warnings (the LLM reads the tool return, not logs).
+    """
+    if not isinstance(meta, dict):
+        return []
+    out: list[str] = []
+    reasons = meta.get("bad_channel_reasons") or {}
+    for ch in meta.get("bad_channels") or []:
+        out.append(
+            f"Channel {ch} marked bad by recording metadata ({reasons.get(ch, 'declared')}) "
+            "— drop_bads drops it automatically"
+        )
+    for w in meta.get("load_warnings") or []:
+        out.append(str(w))
+    if meta.get("nan_samples"):
+        out.append(
+            f"{meta['nan_samples']} sample(s) contain NaN (acquisition gaps) — "
+            "drop_bads:auto interpolates them before filtering"
+        )
+    fmap = meta.get("mat_field_map")
+    if fmap:
+        mapping = ", ".join(f"{k}<-{v}" for k, v in fmap.items())
+        conv = meta.get("event_index_convention")
+        out.append(
+            f"MATLAB struct fields auto-mapped: {mapping}"
+            + (f"; event onsets read as {conv}" if conv else "")
+            + ". If any role is wrong, write a dedicated loader with register_io_loader."
+        )
+        if "event_onsets" not in fmap:
+            out.append(
+                "No trial/event onset field recognised in the MATLAB struct — if the "
+                "recording has trials, register an io_loader that returns them as "
+                "meta['annotations']. Unmapped fields: "
+                + ", ".join(list((meta.get("mat_struct_fields") or {}).keys())[:20])
+            )
+    if meta.get("trial_quality_fields"):
+        out.append(
+            "Per-trial quality fields found in the recording ("
+            + ", ".join(meta["trial_quality_fields"])
+            + "); trials they flag are rejected by the trial-rejection step"
+        )
+    return out
+
+
 def _unsupported_format_next_action(data_path: str) -> Optional[dict[str, Any]]:
     """Distinguish 'no loader for this format' from 'loader crashed'.
 
@@ -663,7 +722,28 @@ def _unsupported_format_next_action(data_path: str) -> Optional[dict[str, Any]]:
     except Exception:  # noqa: BLE001 — any load error here is not 'unsupported'
         return None
     meta = light.get("meta", {}) or {}
-    if not isinstance(meta, dict) or meta.get("format") != "unknown":
+    if not isinstance(meta, dict):
+        return None
+    if meta.get("load_degraded"):
+        # A built-in reader matched the extension but had to guess (empty
+        # signal, default 1 Hz rate, ...). Same remedy as an unknown format.
+        return {
+            "next_tool": "register_io_loader",
+            "must_present": True,
+            "reason": "loader_degraded",
+            "degraded_reasons": list(meta.get("load_degraded_reasons") or []),
+            "file_structure": meta.get("mat_struct_fields") or meta.get("mat_top_level") or {},
+            "hint": (
+                f"The built-in reader could not resolve '{Path(data_path).name}' "
+                f"({', '.join(meta.get('load_degraded_reasons') or [])}). Inspect "
+                "file_structure, write a loader exposing matches(path) and "
+                "load(path, inspect_only=False) that returns the standard dict "
+                "(data as n_channels x n_samples, frequency, channels, meta with "
+                "annotations for trials/events), register it with "
+                "register_io_loader, then re-run deep_inspect."
+            ),
+        }
+    if meta.get("format") != "unknown":
         return None
     return {
         "next_tool": "register_io_loader",

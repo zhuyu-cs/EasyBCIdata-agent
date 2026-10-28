@@ -1,6 +1,6 @@
 ---
 name: fill_nan
-description: "Replace non-finite values (NaN, Inf) with a specified constant"
+description: "Replace non-finite values (NaN, Inf) by per-channel linear interpolation or a constant"
 layer: L3
 group: channel
 metadata:
@@ -14,23 +14,24 @@ metadata:
 
 ## Function
 
-Replaces all non-finite values (NaN, +Inf, -Inf) in the data array with a specified constant value. A data cleaning step for corrupted samples.
+Replaces all non-finite values (NaN, +Inf, -Inf) in the data array, either by per-channel linear interpolation between the neighbouring finite samples or by a constant. A data cleaning step for corrupted samples.
 
 ## Parameter Format
 
-`fill_nan:{value}`
+`fill_nan:{linear|constant|value}`
 
 Examples:
-- `fill_nan:0` — Replace with zero (default)
+- `fill_nan:linear` — Interpolate each channel linearly across the gap; leading/trailing gaps hold the nearest finite sample; an all-non-finite channel becomes 0
+- `fill_nan:0` — Replace with zero
 - `fill_nan:-1` — Replace with -1
 
-Default (no parameter): fills with 0.
+Default (no parameter, or `constant`): fills with 0. Any other non-numeric parameter is an error.
 
 ## Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| value | float | 0.0 | Replacement value for non-finite samples |
+| method / value | `linear` \| `constant` \| float | 0.0 | `linear` interpolates; a number is the constant replacement value |
 
 ## When to Use
 
@@ -47,8 +48,8 @@ Default (no parameter): fills with 0.
 
 ## Constraints
 
-- Simple replacement — does not interpolate from neighbors
-- Logs a warning with count of replaced values
+- `linear` only bridges gaps from neighbouring samples — long gaps become straight lines; prefer bad-segment marking for them
+- Logs the count of replaced values
 - If many values are non-finite (> 10%), consider the data quality and whether processing is meaningful
 
 ## Ordering

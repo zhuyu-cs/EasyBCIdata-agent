@@ -40,6 +40,16 @@ import os
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from easybci_lib.tools.neural_processing.quality.session_consistency import (
+    summarize_work_dir as summarize_session_consistency,
+)
+from easybci_lib.tools.neural_processing.quality.time_separability import (
+    summarize_work_dir as summarize_time_separability,
+)
+from easybci_lib.tools.neural_processing.quality.trial_reject import (
+    summarize_work_dir as summarize_trial_rejection,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -139,6 +149,7 @@ def build_repro_repo(
     paradigm: str = "",
     timeout: Optional[int] = None,
     preview: bool = False,
+    epoch_window: Optional[Sequence[float]] = None,
 ) -> dict:
     """Orchestrate a batch into the standard reproducible mini-repo.
 
@@ -152,6 +163,8 @@ def build_repro_repo(
         steps/adaptation_slots/reject_keywords + gold n_channels/modality for
         the out-of-range check.
     reject_keywords : union'd into the adaptive reject_by_labels step.
+    epoch_window : trial window passed to the generated pipeline.py (proven
+        skill / plan); None keeps runtime resolution.
 
     Returns a dict envelope: {success, work_dir, n_inputs, n_routed,
     n_excluded, excluded, steps, contract, stage_results}.
@@ -295,11 +308,12 @@ def build_repro_repo(
             "steps": repo_steps, "modality": resolved_modality,
             "analysis_goal": analysis_goal, "adaptive": adaptive,
             "memory_plan": memory_plan,
+            "epoch_window": list(epoch_window) if epoch_window else None,
         }
 
     # ---- Step 3: scaffold repo (writes code/pipeline.py) + qc.py/vis.py ----
     scaffold = _scaffold_repo(wd, repo_steps, resolved_modality, analysis_goal,
-                              paradigm, table)
+                              paradigm, table, epoch_window=epoch_window)
     if not scaffold.get("ok"):
         return {"success": False, "work_dir": str(wd), "error": scaffold.get("error"),
                 "steps": repo_steps}
@@ -345,7 +359,8 @@ def build_repro_repo(
             stage_results[stage]["stderr_path"] = res.get("stderr_path")
 
     # ---- Step 5: finalize + contract-check ---------------------------------
-    _finalize_repo(wd, repo_steps, resolved_modality, analysis_goal, paradigm, table)
+    _finalize_repo(wd, repo_steps, resolved_modality, analysis_goal, paradigm, table,
+                   epoch_window=epoch_window)
     contract = _contract_check(wd, analysis_goal)
 
     result = {
@@ -373,6 +388,20 @@ def build_repro_repo(
             result["storage_footprint"] = _rec["storage_footprint"]
     except Exception:
         pass
+    # Trial rejection (pipeline.py) + cross-session consistency and
+    # time-resolved separability (qc.py).
+    try:
+        _tr = summarize_trial_rejection(wd)
+        if _tr:
+            result["trial_rejection"] = _tr
+        _sc = summarize_session_consistency(wd)
+        if _sc:
+            result["session_consistency"] = _sc
+        _ts = summarize_time_separability(wd)
+        if _ts:
+            result["time_separability"] = _ts
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("quality summaries skipped: %s", exc)
     return result
 
 
@@ -504,7 +533,8 @@ def _data_info_from_table(table) -> dict:
     return {}
 
 
-def _scaffold_repo(wd: Path, steps, modality, analysis_goal, paradigm, table, scenario="research") -> dict:
+def _scaffold_repo(wd: Path, steps, modality, analysis_goal, paradigm, table, scenario="research",
+                   epoch_window=None) -> dict:
     """Run build_mini_repo (writes plan/ + code/pipeline.py + run.py +
     requirements.txt + README) and additionally write code/qc.py + code/vis.py
     (build_mini_repo deliberately omits them)."""
@@ -524,7 +554,7 @@ def _scaffold_repo(wd: Path, steps, modality, analysis_goal, paradigm, table, sc
             output_dir=str(wd), steps=list(steps), data_info=data_info,
             pipeline_record=pipeline_record, input_path=input_path,
             modality=modality, paradigm=paradigm, analysis_goal=analysis_goal,
-            status="ok", force=True,
+            status="ok", force=True, epoch_window=epoch_window,
         )
     except Exception as exc:
         return {"ok": False, "error": f"build_mini_repo failed: {exc}"}
@@ -688,7 +718,8 @@ def _run_pipeline_chunks(wd: Path, table, timeout, chunk_size: int) -> dict:
     }
 
 
-def _finalize_repo(wd: Path, steps, modality, analysis_goal, paradigm, table) -> None:
+def _finalize_repo(wd: Path, steps, modality, analysis_goal, paradigm, table,
+                   epoch_window=None) -> None:
     """Re-run build_mini_repo after execution to consolidate intermediates +
     refresh README/record now that outputs exist."""
     try:
@@ -699,7 +730,7 @@ def _finalize_repo(wd: Path, steps, modality, analysis_goal, paradigm, table) ->
             pipeline_record={"analysis_goal": analysis_goal, "batch": True},
             input_path=table.inputs[0].data_path if (table and table.inputs) else "",
             modality=modality, paradigm=paradigm, analysis_goal=analysis_goal,
-            status="ok", force=True,
+            status="ok", force=True, epoch_window=epoch_window,
         )
     except Exception as exc:  # non-fatal — outputs already on disk
         logger.warning("batch finalize build_mini_repo failed: %s", exc)

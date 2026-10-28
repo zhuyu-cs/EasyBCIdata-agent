@@ -31,6 +31,7 @@ import argparse
 import json
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -342,7 +343,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             Path("improved_docs/plans/post-phase-4-followups/_audits"),
             Path("../improved_docs/plans/post-phase-4-followups/_audits"),
         ]
-        audit_dir = next((c for c in candidates if c.parent.exists()), candidates[0])
+        # Fall back to a temp dir when no doc tree is present, so the audit
+        # never fabricates directories inside the project checkout.
+        audit_dir = next(
+            (c for c in candidates if c.parent.exists()),
+            Path(tempfile.gettempdir()) / "easybci_audits",
+        )
         args.jsonl = audit_dir / f"skill_consistency_{date}.jsonl"
     _write_jsonl(findings, args.jsonl)
 

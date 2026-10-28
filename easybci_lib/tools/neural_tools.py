@@ -25,7 +25,17 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from easybci_agent.source_data_guard import register_source_path, check_output_path
+from easybci_agent.source_data_guard import (
+    check_output_path,
+    register_source_path,
+    unread_docs as _unread_docs,
+)
+from easybci_lib.tools.neural_processing.preprocess.operator_vocab import (
+    check_runnable as _check_runnable,
+    non_runnable_envelope as _non_runnable_envelope,
+    runnable_operators as _runnable_operators,
+    step_to_string as _step_to_string,
+)
 from easybci_lib.tools.neural_processing.progress.context import (
     end_stage_if_active,
     start_stage_if_active,
@@ -55,7 +65,157 @@ try:
 except Exception:  # noqa: BLE001
     diagnose_active_provider = None  # type: ignore[assignment]
 
+try:
+    from easybci_lib.tools.neural_processing.quality.trial_reject import (
+        summarize_work_dir as _summarize_trial_rejection,
+    )
+    from easybci_lib.tools.neural_processing.quality.session_consistency import (
+        summarize_work_dir as _summarize_session_consistency,
+    )
+except Exception:  # noqa: BLE001
+    _summarize_trial_rejection = None  # type: ignore[assignment]
+    _summarize_session_consistency = None  # type: ignore[assignment]
+
+try:
+    from easybci_lib.tools.neural_processing.quality.time_separability import (
+        summarize_work_dir as _summarize_time_separability,
+    )
+except Exception:  # noqa: BLE001
+    _summarize_time_separability = None  # type: ignore[assignment]
+
+try:
+    from easybci_lib.tools.neural_processing.quality.trial_reject import (
+        normalize_epoch_window as _normalize_epoch_window,
+    )
+except Exception:  # noqa: BLE001
+    def _normalize_epoch_window(value):  # type: ignore[misc]
+        try:
+            a, b = float(value[0]), float(value[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            return None
+        return [a, b] if b > a else None
+
+try:
+    from easybci_lib.tools.neural_processing.io.dataset_survey import (
+        register_survey_docs as _register_survey_docs,
+        survey_dataset_dir as _survey_dataset_dir,
+        survey_next_action as _survey_next_action,
+    )
+except Exception:  # noqa: BLE001
+    _survey_dataset_dir = None  # type: ignore[assignment]
+
+try:
+    from easybci_lib.tools.neural_processing.preprocess.epoch_window_policy import (
+        NOT_APPLICABLE as _WINDOW_NOT_APPLICABLE,
+        decide_epoch_window as _decide_epoch_window,
+        render_reasoning_sections as _render_window_sections,
+        trial_events_present as _trial_events_present,
+    )
+except Exception:  # noqa: BLE001
+    _decide_epoch_window = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
+
+
+def _trial_rejection_block(work_dir) -> Optional[dict]:
+    """Tool-return block summarising pipeline.py's trial decisions (fail-open)."""
+    if _summarize_trial_rejection is None or not work_dir:
+        return None
+    try:
+        return _summarize_trial_rejection(work_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("trial_rejection summary skipped: %s", exc)
+        return None
+
+
+def _qc_quality_blocks(work_dir) -> dict:
+    """trial_rejection + session_consistency blocks for QC tool returns."""
+    out = {}
+    tr = _trial_rejection_block(work_dir)
+    if tr:
+        out["trial_rejection"] = tr
+    sc = _session_consistency_block(work_dir)
+    if sc:
+        out["session_consistency"] = sc
+    if _summarize_time_separability is not None and work_dir:
+        try:
+            ts = _summarize_time_separability(work_dir)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("time_separability summary skipped: %s", exc)
+            ts = None
+        if ts:
+            out["time_separability"] = ts
+    return out
+
+
+def _qc_extra_hint(blocks: dict) -> str:
+    """Presentation instructions for the quality blocks (empty when none)."""
+    parts = []
+    tr = blocks.get("trial_rejection")
+    if tr:
+        parts.append(
+            " Also present trial_rejection: kept/rejected trials per session and "
+            "the reasons" + (" — and its warnings" if tr.get("warnings") else "") + "."
+        )
+    sc = blocks.get("session_consistency")
+    if sc and sc.get("status") in ("PASS", "WARN"):
+        parts.append(
+            " Present session_consistency (status " + str(sc.get("status")) + ")"
+            + (": " + sc["hint"] if sc.get("hint") else ".")
+        )
+    ts = blocks.get("time_separability")
+    if ts and ts.get("status") in ("WARN", "INFO"):
+        parts.append(" Present time_separability (status " + str(ts.get("status")) + ")"
+                     + (": " + ts["hint"] if ts.get("hint") else "."))
+    return "".join(parts)
+
+
+def _session_consistency_block(work_dir) -> Optional[dict]:
+    """Tool-return block summarising qc.py's cross-session check (fail-open)."""
+    if _summarize_session_consistency is None or not work_dir:
+        return None
+    try:
+        return _summarize_session_consistency(work_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("session_consistency summary skipped: %s", exc)
+        return None
+
+
+def _attach_dataset_context(result: dict, data_path: str, *, then: str,
+                            work_dir: Optional[str] = None) -> None:
+    """Attach the dataset survey (docs / timing metadata / derived files) and
+    steer next_action to the docs first. Fail-open."""
+    if _survey_dataset_dir is None or not data_path or not isinstance(result, dict):
+        return
+    try:
+        ctx = _survey_dataset_dir(data_path)
+        _register_survey_docs(ctx)
+        result["dataset_context"] = ctx
+        na = _survey_next_action(ctx, then=then)
+        if na is not None:
+            prev = result.get("next_action")
+            if isinstance(prev, dict) and prev.get("must_present"):
+                # A blocking step (e.g. register_io_loader) stays first; the
+                # docs ride along since they often describe the file layout.
+                if na["next_tool"] == "read_file":
+                    prev["dataset_docs"] = na["paths"]
+                prev["hint"] = (str(prev.get("hint") or "") + " " + na["hint"]).strip()
+            elif na["next_tool"] == "read_file":
+                result["next_action"] = na
+            elif isinstance(prev, dict):
+                prev["hint"] = (str(prev.get("hint") or "") + " " + na["hint"]).strip()
+                prev["dataset_info_case"] = na["case"]
+            elif isinstance(prev, str) and prev:
+                result["next_action"] = prev + " " + na["hint"]
+            else:
+                result["next_action"] = na
+        if work_dir:
+            mp = Path(work_dir) / "middle_process"
+            mp.mkdir(parents=True, exist_ok=True)
+            (mp / "dataset_survey.json").write_text(
+                json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("dataset survey skipped: %s", exc)
 
 # ---------------------------------------------------------------------------
 # Session-level data cache — avoids redundant load_neural() calls within a
@@ -944,6 +1104,20 @@ REVISE_PROPOSAL_SCHEMA = {
                     "drop_bads because it deletes respiratory channels')"
                 ),
             },
+            "epoch_window": {
+                "type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
+                "description": (
+                    "Optional new [tmin, tmax] seconds relative to each trial onset. "
+                    "Omit to keep the confirmed window."
+                ),
+            },
+            "epoch_window_basis": {
+                "type": "object",
+                "description": (
+                    "Why this window: {source: dataset_doc|metadata|paradigm_default|"
+                    "event_duration|user, evidence: '<file + phase/time it states>'}."
+                ),
+            },
         },
         "required": ["work_dir", "steps", "revision_reason"],
     },
@@ -1273,6 +1447,59 @@ PLAN_PIPELINE_SCHEMA = {
             "segment_method": {"type": "string", "enum": ["sliding", "event", "none"]},
             "segment_duration": {"type": "number"},
             "stride": {"type": "number"},
+            "epoch_window": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 2,
+                "maxItems": 2,
+                "description": (
+                    "[tmin, tmax] seconds relative to each trial event. For event-locked "
+                    "classification take the phase whose signal differs between classes "
+                    "(task / imagery / stimulus); phases identical for all classes "
+                    "(fixation, cue, rest) do not belong in the feature window — a "
+                    "baseline is for normalisation only. Take the timeline from the "
+                    "dataset's documentation or metadata (dataset_context); without "
+                    "either, use the paradigm default and say so in epoch_window_basis. "
+                    "Omit only when dataset_understanding.trial_timeline marks the "
+                    "label-dependent phase (the window is then taken from it), or for a "
+                    "continuous recording without trial events (any modality: sleep, "
+                    "resting state, connectivity) where no epoching applies."
+                ),
+            },
+            "dataset_understanding": {
+                "type": "object",
+                "description": (
+                    "What you learned about the dataset BEFORE planning: the documents / "
+                    "metadata files you read, the trial timeline and other facts that "
+                    "constrain the pipeline. Times are relative to the trial event "
+                    "(same reference as epoch_window)."
+                ),
+                "properties": {
+                    "sources": {"type": "array", "items": {"type": "object", "properties": {
+                        "path": {"type": "string"},
+                        "kind": {"type": "string", "enum": ["doc", "metadata", "data_inspection", "user"]},
+                    }}},
+                    "trial_timeline": {"type": "array", "items": {"type": "object", "properties": {
+                        "phase": {"type": "string"},
+                        "start_s": {"type": "number"},
+                        "end_s": {"type": "number"},
+                        "label_dependent": {"type": "boolean",
+                                            "description": "True when this phase differs between classes."},
+                    }}},
+                    "notes": {"type": "array", "items": {"type": "string"},
+                              "description": "Bad/open channels, units, reference, files not to use, …"},
+                },
+            },
+            "epoch_window_basis": {
+                "type": "object",
+                "description": "Where the epoch window comes from.",
+                "properties": {
+                    "source": {"type": "string", "enum": [
+                        "dataset_doc", "metadata", "paradigm_default", "event_duration", "user", "proven_skill"]},
+                    "evidence": {"type": "string",
+                                 "description": "File + the phase/time it states, e.g. '说明.md: Task 3.5–7.0 s'."},
+                },
+            },
             "output_format": {"type": "string", "enum": ["nwb", "auto"]},
             "scenario": {
                 "type": "string",
@@ -1913,6 +2140,7 @@ def _handle_inspect_data(args, **kw):
             "bad-channel candidates) before planning the pipeline."
         ),
     }
+    _attach_dataset_context(result, data_path, then="deep_inspect")
 
     return cap_return(result)
 
@@ -2327,6 +2555,8 @@ def _handle_deep_inspect(args, **kw):
                     _start_background_research(_prewarm_args)
         except Exception as _exc:  # noqa: BLE001 — prewarm must never break inspect
             logger.debug("deep_inspect research prewarm skipped: %s", _exc)
+    if isinstance(result, dict) and result.get("success"):
+        _attach_dataset_context(result, data_path, then="plan_pipeline", work_dir=work_dir)
     return cap_return(result)
 
 
@@ -2418,6 +2648,9 @@ def _render_staged_pipeline(envelope: dict) -> str:
     reasoning = plan_files.get("reasoning.md")
     if isinstance(reasoning, str) and reasoning.strip():
         return reasoning
+    # Legacy (string-step) proposals do not pre-render reasoning.md; their
+    # dataset-understanding / epoch-window sections lead the fallback render.
+    _du_md = plan_files.get("dataset_understanding.md") or ""
     steps = _staged_proposal_steps(envelope)
     if steps:
         try:
@@ -2428,7 +2661,7 @@ def _render_staged_pipeline(envelope: dict) -> str:
             ]
             rendered = render_proposal(steps, evidence_per_step)
             if rendered and rendered.strip():
-                return rendered
+                return _du_md + rendered
         except Exception:  # noqa: BLE001 — renderer is best-effort
             pass
         # Bare fallback: numbered operator + params list.
@@ -2438,8 +2671,8 @@ def _render_staged_pipeline(envelope: dict) -> str:
                 continue
             lines.append(f"Step {i} — {s.get('operator','?')}  params={s.get('params', {})}")
         if lines:
-            return "\n".join(lines)
-    return "(no structured steps found in staged proposal)"
+            return _du_md + "\n".join(lines)
+    return _du_md + "(no structured steps found in staged proposal)"
 
 
 def _handle_mark_proposal_confirmed(args, **kw):
@@ -2499,6 +2732,12 @@ def _handle_mark_proposal_confirmed(args, **kw):
                 "success": False,
                 "error": "staged proposal envelope is not a JSON object",
             })
+
+        _bad = _check_runnable(_staged_proposal_steps(envelope))
+        if _bad:
+            _env = _non_runnable_envelope(_bad, tool="propose_pipeline")
+            _env["error"] = "Cannot confirm: " + _env["error"]
+            return json.dumps(_env, ensure_ascii=False)
 
         # ── Presentation guard (code-enforced Step-7 gate) ──────────────────
         # The FULL pipeline (every step + rationale) MUST be shown to the user
@@ -2580,6 +2819,9 @@ def _handle_mark_proposal_confirmed(args, **kw):
                 "deliverables": envelope.get("deliverables") or ["preprocessed"],
                 "segment_duration": envelope.get("segment_duration"),
                 "stride": envelope.get("stride"),
+                "epoch_window": envelope.get("epoch_window"),
+                "epoch_window_source": envelope.get("epoch_window_source"),
+                "epoch_window_evidence": envelope.get("epoch_window_evidence"),
                 "materialized": materialized,
             }, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -2682,10 +2924,26 @@ def _handle_revise_proposal(args, **kw):
             "error": "steps must be a non-empty list of strings.",
         })
     revision_reason = args.get("revision_reason") or ""
+    _new_window = None
+    if args.get("epoch_window") is not None:
+        _new_window = _normalize_epoch_window(args.get("epoch_window"))
+        if _new_window is None:
+            return json.dumps({
+                "success": False,
+                "field": "epoch_window",
+                "error": f"epoch_window must be [tmin, tmax] with tmax > tmin, got {args.get('epoch_window')!r}",
+            })
+    _basis = args.get("epoch_window_basis") if isinstance(args.get("epoch_window_basis"), dict) else {}
+
+    _bad = _check_runnable(new_steps)
+    if _bad:
+        return json.dumps(
+            _non_runnable_envelope(_bad, tool="revise_proposal"), ensure_ascii=False,
+        )
 
     try:
         normalized, warnings = _normalize_steps(
-            [str(s) for s in new_steps],
+            [_step_to_string(s) for s in new_steps],
         )
     except Exception as exc:
         return json.dumps({
@@ -2707,6 +2965,7 @@ def _handle_revise_proposal(args, **kw):
         })
 
     old_steps = proposal.get("steps", [])
+    old_window = proposal.get("epoch_window")
 
     proposal["steps"] = [
         {
@@ -2717,6 +2976,10 @@ def _handle_revise_proposal(args, **kw):
         }
         for s in normalized
     ]
+    if _new_window is not None:
+        proposal["epoch_window"] = _new_window
+        proposal["epoch_window_source"] = str(_basis.get("source") or "user")
+        proposal["epoch_window_evidence"] = str(_basis.get("evidence") or revision_reason)
 
     proposal_path.write_text(
         json.dumps(proposal, ensure_ascii=False, indent=2),
@@ -2729,6 +2992,10 @@ def _handle_revise_proposal(args, **kw):
         marker_data = {}
     marker_data["revised_at"] = _dt.utcnow().isoformat(timespec="seconds")
     marker_data["revision_reason"] = revision_reason
+    if _new_window is not None:
+        marker_data["epoch_window"] = _new_window
+        marker_data["epoch_window_source"] = proposal["epoch_window_source"]
+        marker_data["epoch_window_evidence"] = proposal["epoch_window_evidence"]
     marker.write_text(
         json.dumps(marker_data, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -2761,6 +3028,8 @@ def _handle_revise_proposal(args, **kw):
         "reason": revision_reason,
         "old_steps": old_steps,
         "new_steps": normalized,
+        "old_epoch_window": old_window,
+        "new_epoch_window": _new_window if _new_window is not None else old_window,
         "archived_code": deleted_files,
     }
     history_path = work_dir / "middle_process" / "revision_history.jsonl"
@@ -2770,6 +3039,7 @@ def _handle_revise_proposal(args, **kw):
     payload = {
         "success": True,
         "revised_steps": normalized,
+        "epoch_window": proposal.get("epoch_window"),
         "archived_code": deleted_files,
         "next_action": (
             "Call generate_code to regenerate the code bundle with the "
@@ -2804,14 +3074,6 @@ def _handle_inspect_directory(directory: str, args: dict, kw: dict) -> str:
     modality = args.get("modality", "auto")
     n_files = len(signal_files)
 
-    # Classify all files in directory by role and build relationship matrix
-    file_classification = None
-    try:
-        from easybci_lib.tools.neural_processing.io.file_classifier import classify_directory_files
-        file_classification = classify_directory_files(directory)
-    except Exception as exc:
-        logger.debug("File classification failed: %s", exc)
-
     try:
         from easybci_lib.tools.neural_processing.io.sidecar_detector import detect_sidecar_files
         # Use first file to get sidecar context for the whole directory
@@ -2842,9 +3104,15 @@ def _handle_inspect_directory(directory: str, args: dict, kw: dict) -> str:
                     "channels_preview": channels[:8],
                 })
             except Exception as exc:
-                inspections.append({"file": fpath, "error": str(exc)})
+                # Loader errors can embed whole arrays / file dumps; keep the
+                # per-file entry short so a directory of failures stays small.
+                _msg = f"{type(exc).__name__}: {exc}"
+                inspections.append({
+                    "file": fpath,
+                    "error": _msg if len(_msg) <= 300 else _msg[:300] + f"… [+{len(_msg) - 300} chars]",
+                })
 
-        return json.dumps({
+        payload = {
             "success": True,
             "mode": "full_directory",
             "directory": directory,
@@ -2852,7 +3120,6 @@ def _handle_inspect_directory(directory: str, args: dict, kw: dict) -> str:
             "inspections": inspections,
             "sidecar_files": sidecar_result.get("sidecar_files", []),
             "data_type": sidecar_result.get("data_type", "signal-only"),
-            "file_classification": file_classification,
             "next_action": {
                 "next_tool": "deep_inspect",
                 "hint": (
@@ -2860,7 +3127,9 @@ def _handle_inspect_directory(directory: str, args: dict, kw: dict) -> str:
                     "Call deep_inspect on each file to get full profiling."
                 ),
             },
-        }, default=str)
+        }
+        _attach_dataset_context(payload, directory, then="deep_inspect")
+        return cap_return(payload)
 
     # Large directory: sampling mode — inspect one representative
     sample_path = signal_files[0]
@@ -2869,9 +3138,11 @@ def _handle_inspect_directory(directory: str, args: dict, kw: dict) -> str:
     try:
         data_dict = load_neural(sample_path, modality=modality, inspect_only=True)
     except Exception as exc:
+        _msg = str(exc)
         return json.dumps({
             "success": False,
-            "error": f"Failed to inspect sample file {sample_path}: {exc}",
+            "error": f"Failed to inspect sample file {sample_path}: "
+                     + (_msg if len(_msg) <= 300 else _msg[:300] + "…"),
             "directory": directory,
             "n_signal_files": n_files,
         })
@@ -2926,7 +3197,7 @@ def _handle_inspect_directory(directory: str, args: dict, kw: dict) -> str:
     except Exception:
         dataset_fingerprint["label_type"] = "none"
 
-    return json.dumps({
+    payload = {
         "success": True,
         "mode": "sampling",
         "directory": directory,
@@ -2936,7 +3207,6 @@ def _handle_inspect_directory(directory: str, args: dict, kw: dict) -> str:
         "sidecar_files": sidecar_result.get("sidecar_files", []),
         "data_type": sidecar_result.get("data_type", "signal-only"),
         "batch_strategy": batch_strategy,
-        "file_classification": file_classification,
         "all_signal_files": signal_files[:50],  # cap listing at 50
         "note": (
             f"Sampled 1 of {n_files} files. Dataset appears homogeneous "
@@ -2950,7 +3220,9 @@ def _handle_inspect_directory(directory: str, args: dict, kw: dict) -> str:
                 "Call deep_inspect on a representative file, then plan_pipeline."
             ),
         },
-    }, default=str)
+    }
+    _attach_dataset_context(payload, directory, then="deep_inspect")
+    return cap_return(payload)
 
 
 def _resolve_analysis_goal_for_run(args: dict, work_dir: str) -> str:
@@ -2980,60 +3252,15 @@ def _resolve_analysis_goal_for_run(args: dict, work_dir: str) -> str:
 
 
 def _script_header_matches(script_path: Path, *, steps: list, analysis_goal: str) -> bool:
-    """Return True iff the existing script's EASYBCI_STEPS / GOAL header matches.
-
-    The header records exactly the steps codegen embedded — the canonicalized
-    (normalize + inspection-driven notch) form of the AUTHORED step list.
-    Goal-driven channel cleanup is already baked into the authored steps at
-    plan-construction time (propose / batch), so the comparator does NOT
-    re-run ``_enforce_clean_output``: it reproduces only codegen's
-    deterministic canonicalization via the SHARED
-    ``canonicalize_steps_for_header`` helper. This guarantees the comparator
-    and generator can never drift — a match means the confirmed plan is
-    unchanged, so any agent-applied repair edits are preserved across retries;
-    a mismatch means the plan genuinely changed.
-    """
-    try:
-        head = script_path.read_text(encoding="utf-8")[:1024]
-    except OSError:
-        return False
-    from easybci_lib.tools.neural_processing.codegen.generator import (
-        canonicalize_steps_for_header,
-    )
-    # Load the same inspection_report codegen used (notch-override input), via
-    # the SAME loader/shape (load_inspection_report(...).to_dict()) so the
-    # recomputed header steps match byte-for-byte. Best-effort: absent /
-    # unreadable report just means no notch override, matching codegen.
-    inspection_report = None
-    try:
-        from easybci_lib.tools.neural_processing.io.inspection_report import (
-            load_inspection_report,
-        )
-        _insp = script_path.parent.parent / "middle_process" / "inspection_report.json"
-        if _insp.is_file():
-            inspection_report = load_inspection_report(_insp).to_dict()
-    except Exception:
-        inspection_report = None
-    try:
-        canonical = canonicalize_steps_for_header(
-            list(steps), inspection_report=inspection_report
-        )
-    except Exception:
-        return False
-    want_steps = f"EASYBCI_STEPS: {repr(canonical)}"
-    want_goal = f"EASYBCI_GOAL: {analysis_goal}"
-    return want_steps in head and want_goal in head
+    """See ``codegen.generator.script_header_matches``."""
+    from easybci_lib.tools.neural_processing.codegen.generator import script_header_matches
+    return script_header_matches(script_path, steps=steps, analysis_goal=analysis_goal)
 
 
 def _script_has_version_marker(script_path: Path) -> bool:
-    """True iff the script carries an EASYBCI_VERSION header — ie. was emitted
-    by codegen.generator. Hand-written / user-provided scripts (no marker) are
-    preserved as-is by the handlers, never regenerated."""
-    try:
-        head = script_path.read_text(encoding="utf-8")[:1024]
-    except OSError:
-        return False
-    return "EASYBCI_VERSION" in head
+    """See ``codegen.generator.script_has_version_marker``."""
+    from easybci_lib.tools.neural_processing.codegen.generator import script_has_version_marker
+    return script_has_version_marker(script_path)
 
 
 def _inject_nwb_banners(work_dir: Path) -> None:
@@ -3492,6 +3719,7 @@ def _do_handle_preprocess_neural(args, **kw):
             _inject_nwb_banners(Path(work_dir))
         except Exception as _ban_err:
             logger.debug("NWB banner injection skipped: %s", _ban_err)
+        _trial_block = _trial_rejection_block(work_dir)
         return json.dumps({
             "success": True,
             "stage": "pipeline",
@@ -3499,6 +3727,7 @@ def _do_handle_preprocess_neural(args, **kw):
             "output_file": status.get("output_file"),
             "stdout_tail": result["stdout_tail"],
             "analysis_goal": analysis_goal,
+            **({"trial_rejection": _trial_block} if _trial_block else {}),
             "next_action": {
                 "next_tool": "quality_check",
                 "hint": (
@@ -3782,6 +4011,7 @@ def _handle_resume_preprocessing(args, **kw):
         "before": before,
         "after": after,
         **chunk_diagnostics,
+        **_qc_quality_blocks(wd),
     })
 
 
@@ -3856,6 +4086,7 @@ def _do_handle_quality_check(args, **kw):
         # refactor. When vis.py is absent, the analysis_goal opted out of
         # figures (REGISTRY[goal].produces_figures=False, e.g.
         # online_inference) — return the qc-only success payload.
+        _qc_extra = _qc_quality_blocks(work_dir)
         vis_script_path = work_dir / "code" / "vis.py"
         if not vis_script_path.exists():
             return json.dumps({
@@ -3866,10 +4097,12 @@ def _do_handle_quality_check(args, **kw):
                 "figures": status.get("figures", []),
                 "stdout_tail": result["stdout_tail"],
                 "vis": {"skipped": True, "reason": "vis.py not generated for this goal"},
+                **_qc_extra,
                 "next_action": {
                     "hint": (
                         "QC complete (figures skipped for this goal). Present "
                         "the grade to the user, then finalize with export_repo."
+                        + _qc_extra_hint(_qc_extra)
                     ),
                     "must_present": True,
                 },
@@ -3908,11 +4141,13 @@ def _do_handle_quality_check(args, **kw):
                     "stdout_tail": vis_result["stdout_tail"],
                     "status": vis_status,
                 },
+                **_qc_extra,
                 "next_action": {
                     "hint": (
                         "QC complete. Present the grade and figures to "
                         "the user, then finalize with export_repo or "
                         "save_processed."
+                        + _qc_extra_hint(_qc_extra)
                     ),
                     "must_present": True,
                 },
@@ -4344,6 +4579,29 @@ def _handle_suggest_pipeline(args, **kw):
         pass
 
     # Build response
+    # Recommend only what the generated pipeline can run: a non-runnable
+    # default is swapped for its first substitute (dropped when there is none
+    # or the substitute is already present) and reported, so propose does
+    # not bounce on a step the system itself suggested.
+    _bad_rec = _check_runnable(steps)
+    if _bad_rec:
+        _bad_idx = {p["index"]: p for p in _bad_rec}
+        _present = {str(s).split(":", 1)[0].strip() for s in steps}
+        _kept_steps = []
+        for _i, _s in enumerate(steps):
+            _p = _bad_idx.get(_i)
+            if _p is None:
+                _kept_steps.append(_s)
+                continue
+            _sub = next(iter(_p.get("substitutes") or []), None)
+            if _sub and _sub not in _present:
+                _kept_steps.append(_sub)
+                _present.add(_sub)
+                _p["replaced_by"] = _sub
+            else:
+                _p["replaced_by"] = None
+        steps = _kept_steps
+
     result = {
         "success": True,
         "modality": modality,
@@ -4351,7 +4609,10 @@ def _handle_suggest_pipeline(args, **kw):
         "recommended_steps": steps,
         "description": " → ".join(steps),
         "complexity_level": level,
+        "runnable_operators": _runnable_operators(),
     }
+    if _bad_rec:
+        result["non_runnable_recommended"] = _bad_rec
     if _scenario_bias:
         result["scenario_bias"] = _scenario_bias
 
@@ -4417,7 +4678,11 @@ def _handle_suggest_pipeline(args, **kw):
                         "reference_origin": getattr(best.entry, "reference_origin", ""),
                         "adaptation_report": _adapted.self_report,
                         "qc_baselines": getattr(best.entry, "qc_baselines", {}),
-                        "reuse_note": "Adaptive reference: skeleton locked, values adapted from this recording.",
+                        "reuse_note": (
+                            "Adaptive reference: skeleton locked, values adapted from this recording."
+                            " Pass its epoch_window + epoch_window_basis={source:'proven_skill'} to propose."
+                        ),
+                        **_proven_window_fields(best.entry),
                     }
                     result["next_action"] = {
                         "next_tool": "batch_process_adaptive",
@@ -4438,7 +4703,11 @@ def _handle_suggest_pipeline(args, **kw):
                     "similarity": round(best.similarity, 2),
                     "analysis_goal": best.entry.analysis_goal,
                     "reuse_contract": "full_flow_required",
-                    "reuse_note": "Proven pipeline matched. Lock steps+params; run full flow per SKILL.md Step 2.0.",
+                    "reuse_note": (
+                        "Proven pipeline matched. Lock steps+params; run full flow per SKILL.md Step 2.0."
+                        " Pass its epoch_window + epoch_window_basis={source:'proven_skill'} to propose."
+                    ),
+                    **_proven_window_fields(best.entry),
                 }
                 result["next_action"] = {
                     "next_tool": "batch_process_adaptive",
@@ -4520,8 +4789,10 @@ def _handle_suggest_pipeline(args, **kw):
                 "Call propose_pipeline with the recommended_steps above. "
                 "Map each step to the evidence-driven form with param_evidence "
                 "(source: inspection_report / paradigm_skill / web_evidence / "
-                "empirical_default). Do NOT call skill_view on individual "
-                "operators — the suggest return already contains all parameters."
+                "empirical_default). Use ONLY operators in runnable_operators — "
+                "propose_pipeline rejects any other step. Do NOT call skill_view "
+                "on individual operators — the suggest return already contains "
+                "all parameters."
             ),
         }
 
@@ -4738,14 +5009,8 @@ def _classify_label_from_fingerprint(fingerprint) -> dict:
 
 def _project_step_dict_to_str(s: dict) -> str:
     """Project a structured proposal step dict to its ``operator:params`` string
-    form (matching generate_code's ``_auto_step_to_str`` / the legacy propose
-    convention), for enforcement in string-space."""
-    op = s.get("operator", "")
-    params = s.get("params", {})
-    if params and isinstance(params, dict):
-        pvals = ",".join(str(v) for v in params.values())
-        return f"{op}:{pvals}" if pvals else op
-    return op
+    form, for enforcement in string-space."""
+    return _step_to_string(s)
 
 
 def _enforce_proposal_step_dicts(raw_steps: list, *, analysis_goal: str) -> list:
@@ -4793,6 +5058,120 @@ def _enforce_proposal_step_dicts(raw_steps: list, *, analysis_goal: str) -> list
                 "param_evidence": {},
             })
     return out
+
+
+def _proposal_data_info_from_args(args: dict) -> tuple:
+    """``(data_info, input_path)`` from the inspection report a propose call
+    references — embedded in proposal.json so the README "Input Data" table
+    survives middle_process/ cleanup. Fail-open: ``({}, "")``."""
+    try:
+        _insp_path = args.get("inspection_report_path")
+        if not _insp_path or not Path(_insp_path).is_file():
+            return {}, str(args.get("data_path") or "")
+        _insp = json.loads(Path(_insp_path).read_text(encoding="utf-8"))
+        _fp = (_insp or {}).get("fingerprint") or {}
+        info = {
+            k: v for k, v in {
+                "n_channels": _fp.get("n_channels"),
+                "frequency_hz": _fp.get("sampling_freq_hz"),
+                "duration_seconds": _fp.get("duration_s"),
+                "format": _fp.get("format"),
+            }.items() if v not in (None, "")
+        }
+        return info, str(_insp.get("data_path") or args.get("data_path") or "")
+    except Exception:  # noqa: BLE001
+        return {}, str(args.get("data_path") or "")
+
+
+def _align_rationale(raw_steps: list, final_steps: list, rationale: list) -> tuple:
+    """Re-key ``rationale`` (aligned with ``raw_steps``) onto ``final_steps``.
+
+    Steps injected by plan construction (``_enforce_clean_output``) get an
+    explicit system note instead of silently inheriting the next step's
+    rationale. Returns ``(aligned_rationale, warning_or_None)``.
+    """
+    rationale = list(rationale or [])
+    keys = [_step_to_string(s) for s in raw_steps]
+    warning = None
+    if rationale and len(rationale) != len(raw_steps):
+        warning = (
+            f"rationale has {len(rationale)} entries for {len(raw_steps)} steps — "
+            "rationale[i] must describe steps[i]; unmatched steps are marked."
+        )
+    pool: dict = {}
+    for i, k in enumerate(keys):
+        pool.setdefault(k, []).append(rationale[i] if i < len(rationale) else "")
+    out, injected = [], []
+    for s in final_steps:
+        k = _step_to_string(s)
+        if pool.get(k):
+            out.append(pool[k].pop(0))
+        else:
+            injected.append(k)
+            out.append(
+                "[system-inserted] Added by the goal-driven output cleanup "
+                "(analysis_goal) — no user/LLM rationale."
+            )
+    if injected and warning is None and rationale:
+        warning = (
+            "steps inserted by the system received a placeholder rationale: "
+            + ", ".join(injected)
+        )
+    return out, warning
+
+
+def _epoch_window_plan(args: dict, work_dir) -> dict:
+    """Window decision + reasoning sections + hints for a proposal (fail-open).
+
+    Returns ``{decision, sections_md, understanding, unread, hint}``; the
+    decision's ``epoch_window`` replaces ``args['epoch_window']`` downstream.
+    Whether the recording has trial events comes from the inspection report —
+    continuous recordings (any modality) get a ``not_applicable`` decision.
+    """
+    empty = {"decision": None, "sections_md": "", "understanding": None, "unread": [], "hint": None}
+    if _decide_epoch_window is None:
+        return empty
+    try:
+        du = args.get("dataset_understanding") if isinstance(args.get("dataset_understanding"), dict) else None
+        report = None
+        _rp = args.get("inspection_report_path")
+        if not _rp and work_dir:
+            _rp = str(Path(work_dir) / "middle_process" / "inspection_report.json")
+        if _rp and Path(_rp).is_file():
+            report = json.loads(Path(_rp).read_text(encoding="utf-8"))
+        decision = _decide_epoch_window(args.get("epoch_window"), du, args.get("epoch_window_basis"),
+                                        has_trial_events=_trial_events_present(report))
+        docs: list = []
+        if work_dir:
+            _sv = Path(work_dir) / "middle_process" / "dataset_survey.json"
+            if _sv.is_file():
+                docs = [d["path"] for d in json.loads(_sv.read_text(encoding="utf-8")).get("docs") or []]
+        unread = _unread_docs(docs) if docs else []
+        hint = None
+        if docs and not du:
+            if decision.get("source") == _WINDOW_NOT_APPLICABLE:
+                hint = ("This dataset has documentation ({}). Read it and pass "
+                        "dataset_understanding (sources + notes: bad channels, units, "
+                        "reference, files not to use) in the next propose call.").format(", ".join(docs))
+            else:
+                hint = ("This dataset has documentation ({}). Read it and pass "
+                        "dataset_understanding (sources + trial_timeline + notes) and "
+                        "epoch_window_basis in the next propose call.").format(", ".join(docs))
+        return {"decision": decision,
+                "sections_md": _render_window_sections(du, decision, unread_docs=unread),
+                "understanding": du, "unread": unread, "hint": hint}
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("epoch window plan skipped: %s", exc)
+        return empty
+
+
+def _attach_window_plan(result: dict, plan: dict) -> None:
+    if plan.get("decision") is not None:
+        result["epoch_window_decision"] = plan["decision"]
+    if plan.get("unread"):
+        result["unread_dataset_docs"] = plan["unread"]
+    if plan.get("hint"):
+        result["dataset_understanding_hint"] = plan["hint"]
 
 
 def _handle_propose_pipeline_evidence(args, **kw):
@@ -4936,6 +5315,11 @@ def _handle_propose_pipeline_evidence(args, **kw):
         ],
         analysis_goal=analysis_goal,
     )
+    rationale, _rationale_warning = _align_rationale(raw_steps, _enforced_step_dicts, rationale)
+    _ev_data_info, _ev_input_path = _proposal_data_info_from_args(args)
+    _wplan = _epoch_window_plan(args, output_path)
+    _wdec = _wplan["decision"] or {}
+    _epoch_window = _wdec.get("epoch_window", args.get("epoch_window"))
     proposal = {
         "modality": modality,
         "paradigm": paradigm,
@@ -4945,9 +5329,14 @@ def _handle_propose_pipeline_evidence(args, **kw):
         "registry_version": registry_version,
         "segment_duration": args.get("segment_duration"),
         "stride": args.get("stride"),
+        "epoch_window": _epoch_window,
+        "epoch_window_source": _wdec.get("source"),
+        "epoch_window_evidence": _wdec.get("evidence"),
         "steps": _enforced_step_dicts,
         "rationale": rationale,
         "web_evidence": _evidence_payload,
+        "data_info": _ev_data_info,
+        "input_path": _ev_input_path,
     }
     # Reuse Mode signal (P3): persist the proven-skill name so reuse_mode_guard
     # can recognize Reuse Mode from plan/proposal.json downstream. Only written
@@ -4978,17 +5367,20 @@ def _handle_propose_pipeline_evidence(args, **kw):
     try:
         from easybci_lib.tools.neural_processing.quality.reasoning_writer import render_full_reasoning
         evidence_per_step: list = []
-        for s in raw_steps:
+        for s in _enforced_step_dicts:
             block = s.get("param_evidence", {}) or {}
             evidence_per_step.append({
                 k: ParameterEvidence.from_dict(v) for k, v in block.items()
             })
         md = render_full_reasoning(
             title=f"{paradigm} {modality} — Reasoning",
-            steps=raw_steps,
+            steps=_enforced_step_dicts,
             rationales=rationale,
             evidence_per_step=evidence_per_step,
         )
+        if _wplan["sections_md"]:
+            _h1, _sep, _rest = md.partition("\n")
+            md = _h1 + "\n\n" + _wplan["sections_md"] + _rest.lstrip("\n")
         # Prepend the web-evidence banner so reviewers see, immediately under
         # the title, which search provider (if any) shaped the proposal.
         # Format mirrors `_write_reasoning_md` (the export-time fallback) so
@@ -5056,6 +5448,9 @@ def _handle_propose_pipeline_evidence(args, **kw):
         "deliverables": args.get("deliverables") or ["preprocessed"],
         "segment_duration": args.get("segment_duration"),
         "stride": args.get("stride"),
+        "epoch_window": _epoch_window,
+        "epoch_window_source": _wdec.get("source"),
+        "epoch_window_evidence": _wdec.get("evidence"),
         "web_evidence": _evidence_payload,
         "root_files": {},
         "plan_files": {
@@ -5063,6 +5458,8 @@ def _handle_propose_pipeline_evidence(args, **kw):
             "goal.json": goal_json_text,
             "web_evidence.json": web_evidence_json_text,
             "reasoning.md": reasoning_md_text,
+            **({"dataset_understanding.json": json.dumps(_wplan["understanding"], ensure_ascii=False, indent=2)}
+               if _wplan["understanding"] else {}),
         },
     }
     staged_path = middle_dir / "proposal.staged.json"
@@ -5113,6 +5510,8 @@ def _handle_propose_pipeline_evidence(args, **kw):
         },
         "note": "Present presentation_block to user, then call mark_proposal_confirmed.",
     }
+    if _rationale_warning:
+        _evidence_propose_result["rationale_warning"] = _rationale_warning
     try:
         from easybci_lib.tools.neural_processing.preprocess.scenario import get_scenario
         _sc = get_scenario(args.get("scenario") or "research")
@@ -5120,6 +5519,7 @@ def _handle_propose_pipeline_evidence(args, **kw):
             _evidence_propose_result["scenario_bias"] = _sc.param_bias_notes
     except Exception:
         pass
+    _attach_window_plan(_evidence_propose_result, _wplan)
     _attach_memory_footprint(_evidence_propose_result, args)
     return cap_return(_evidence_propose_result)
 
@@ -5137,6 +5537,13 @@ def _handle_propose_pipeline(args, **kw):
         return json.dumps(err)
 
     raw_steps = args.get("steps") or []
+    # Plan-time runnability gate: never stage a proposal the user would be
+    # asked to confirm when the generated pipeline.py cannot execute a step.
+    _bad = _check_runnable(raw_steps)
+    if _bad:
+        return json.dumps(
+            _non_runnable_envelope(_bad, tool="propose_pipeline"), ensure_ascii=False,
+        )
     if raw_steps and isinstance(raw_steps[0], dict):
         return _handle_propose_pipeline_evidence(args, **kw)
 
@@ -5188,7 +5595,9 @@ def _handle_propose_pipeline(args, **kw):
     except Exception as exc:
         logger.debug("_enforce_clean_output skipped (%s); using raw steps", exc)
         _output_cleanup_applied = False
-    rationale = args.get("rationale", [])
+    rationale, _rationale_warning = _align_rationale(
+        raw_steps, steps, args.get("rationale", []) or [],
+    )
     methods = args.get("methods", []) or []
     output_path = args.get("output_path", "")
     modality = args.get("modality", "auto")
@@ -5327,24 +5736,10 @@ def _handle_propose_pipeline(args, **kw):
     # been cleaned up. Without this, the inspection_report.json sits in
     # middle_process/ and gets archived/removed by Step-14 cleanup before
     # finalize can extract n_channels / sampling_rate / duration.
-    _proposal_data_info: dict = {}
-    _proposal_input_path: str = ""
-    try:
-        _insp_path = args.get("inspection_report_path")
-        if _insp_path and Path(_insp_path).is_file():
-            _insp = json.loads(Path(_insp_path).read_text(encoding="utf-8"))
-            _fp = (_insp or {}).get("fingerprint") or {}
-            _proposal_data_info = {
-                k: v for k, v in {
-                    "n_channels": _fp.get("n_channels"),
-                    "frequency_hz": _fp.get("sampling_freq_hz"),
-                    "duration_seconds": _fp.get("duration_s"),
-                    "format": _fp.get("format"),
-                }.items() if v not in (None, "")
-            }
-            _proposal_input_path = str(_insp.get("data_path") or "")
-    except Exception:
-        pass
+    _proposal_data_info, _proposal_input_path = _proposal_data_info_from_args(args)
+    _wplan = _epoch_window_plan(args, work_dir)
+    _wdec = _wplan["decision"] or {}
+    _epoch_window = _wdec.get("epoch_window", args.get("epoch_window"))
     _proposal_payload = {
         "modality": modality,
         "paradigm": paradigm,
@@ -5354,6 +5749,9 @@ def _handle_propose_pipeline(args, **kw):
         "subject_id": subject_id,
         "segment_duration": segment_duration,
         "stride": stride,
+        "epoch_window": _epoch_window,
+        "epoch_window_source": _wdec.get("source"),
+        "epoch_window_evidence": _wdec.get("evidence"),
         "steps": _proposal_steps,
         "rationale": rationale,
         "output_cleanup_applied": bool(_output_cleanup_applied),
@@ -5387,6 +5785,9 @@ def _handle_propose_pipeline(args, **kw):
         "deliverables": args.get("deliverables") or ["preprocessed"],
         "segment_duration": segment_duration,
         "stride": stride,
+        "epoch_window": _epoch_window,
+        "epoch_window_source": _wdec.get("source"),
+        "epoch_window_evidence": _wdec.get("evidence"),
         "web_evidence": _evidence_payload,
         "root_files": {
             "pipeline.yaml": yaml_str,
@@ -5395,6 +5796,9 @@ def _handle_propose_pipeline(args, **kw):
             "proposal.json": proposal_json_text,
             "goal.json": goal_json_text,
             "web_evidence.json": web_evidence_json_text,
+            **({"dataset_understanding.md": _wplan["sections_md"]} if _wplan["sections_md"] else {}),
+            **({"dataset_understanding.json": json.dumps(_wplan["understanding"], ensure_ascii=False, indent=2)}
+               if _wplan["understanding"] else {}),
         },
     }
     staged_path = middle_dir / "proposal.staged.json"
@@ -5452,6 +5856,7 @@ def _handle_propose_pipeline(args, **kw):
             "type": "pipeline_flow",
             "steps": viz_steps,
         },
+        "epoch_window_section": _wplan["sections_md"],
         "next_action": {
             "next_tool": "mark_proposal_confirmed",
             "hint": (
@@ -5462,6 +5867,8 @@ def _handle_propose_pipeline(args, **kw):
             "must_present": True,
         },
     }
+    if _rationale_warning:
+        _propose_result["rationale_warning"] = _rationale_warning
     try:
         from easybci_lib.tools.neural_processing.preprocess.scenario import get_scenario
         _sc = get_scenario(args.get("scenario") or "research")
@@ -5469,6 +5876,7 @@ def _handle_propose_pipeline(args, **kw):
             _propose_result["scenario_bias"] = _sc.param_bias_notes
     except Exception:
         pass
+    _attach_window_plan(_propose_result, _wplan)
     _attach_memory_footprint(_propose_result, args)
     return cap_return(_propose_result)
 
@@ -6142,7 +6550,8 @@ def _handle_list_data(args, **kw):
             "channel/frequency/duration details."
         )
 
-    return json.dumps(result)
+    _attach_dataset_context(result, str(dir_path), then="inspect_data")
+    return json.dumps(result, ensure_ascii=False)
 
 
 def _recover_steps_from_proposal(work_dir, args):
@@ -6169,17 +6578,7 @@ def _recover_steps_from_proposal(work_dir, args):
     except Exception:
         return []
 
-    def _step_to_str(s):
-        if isinstance(s, dict):
-            op = s.get("operator", "")
-            params = s.get("params", {})
-            if params and isinstance(params, dict):
-                pvals = ",".join(str(v) for v in params.values())
-                return f"{op}:{pvals}" if pvals else op
-            return op
-        return str(s)
-
-    return [_step_to_str(s) for s in _cs]
+    return [_step_to_string(s) for s in _cs]
 
 
 def _handle_generate_code(args, **kw):
@@ -6291,6 +6690,8 @@ def _do_handle_generate_code(args, **kw):
     label_config = args.get("label_config")
     segment_duration = args.get("segment_duration")
     stride = args.get("stride")
+    epoch_window = args.get("epoch_window")
+    _epoch_window_override = None
     work_dir = args.get("work_dir") or args.get("output_dir")
 
     # Parameter propagation from confirmed proposal on disk.
@@ -6360,6 +6761,39 @@ def _do_handle_generate_code(args, **kw):
             except Exception:
                 pass
 
+        # epoch_window: the confirmed plan is the ground truth (same contract as
+        # the B4 step guard). marker → staged envelope → proposal.json; the LLM
+        # arg is used only when none of them carries a window.
+        _arg_window = _normalize_epoch_window(epoch_window)
+        _disk_window = None
+        for _ew_src in (
+            Path(work_dir) / "middle_process" / "proposal.confirmed",
+            Path(work_dir) / "middle_process" / "proposal.staged.json",
+            Path(work_dir) / "plan" / "proposal.json",
+        ):
+            try:
+                if _ew_src.is_file():
+                    _disk_window = _normalize_epoch_window(
+                        json.loads(_ew_src.read_text(encoding="utf-8")).get("epoch_window"))
+                    if _disk_window is not None:
+                        break
+            except Exception:
+                continue
+        if _disk_window is not None:
+            if _arg_window is not None and _arg_window != _disk_window:
+                _epoch_window_override = {
+                    "used": _disk_window,
+                    "ignored_arg": _arg_window,
+                    "hint": (
+                        "generate_code keeps the confirmed epoch_window. To change it, "
+                        "call revise_proposal(work_dir, steps, revision_reason, "
+                        "epoch_window=[tmin, tmax], epoch_window_basis={...})."
+                    ),
+                }
+            epoch_window = _disk_window
+        else:
+            epoch_window = _arg_window
+
     analysis_goal = analysis_goal or "generic"
     segment_duration = float(segment_duration if segment_duration is not None else 2.0)
     stride = float(stride if stride is not None else 1.0)
@@ -6399,18 +6833,8 @@ def _do_handle_generate_code(args, **kw):
             _prop = json.loads(_proposal_path.read_text(encoding="utf-8"))
             _confirmed_steps = _prop.get("steps")
             if isinstance(_confirmed_steps, list) and _confirmed_steps:
-                # Normalize to string form for comparison
-                def _step_to_str(s):
-                    if isinstance(s, dict):
-                        op = s.get("operator", "")
-                        params = s.get("params", {})
-                        if params and isinstance(params, dict):
-                            pvals = ",".join(str(v) for v in params.values())
-                            return f"{op}:{pvals}" if pvals else op
-                        return op
-                    return str(s)
-                _confirmed_str = [_step_to_str(s) for s in _confirmed_steps]
-                _arg_str = [_step_to_str(s) if isinstance(s, dict) else str(s) for s in steps]
+                _confirmed_str = [_step_to_string(s) for s in _confirmed_steps]
+                _arg_str = [_step_to_string(s) for s in steps]
                 # Extract just operators for structural comparison
                 _conf_ops = [s.split(":")[0] if isinstance(s, str) else s for s in _confirmed_str]
                 _arg_ops = [s.split(":")[0] if isinstance(s, str) else s for s in _arg_str]
@@ -6423,6 +6847,12 @@ def _do_handle_generate_code(args, **kw):
                     steps = _confirmed_str
     except Exception:
         pass
+
+    _bad = _check_runnable(steps)
+    if _bad:
+        _env = _non_runnable_envelope(_bad, tool="revise_proposal")
+        _env["error"] = "generate_code: " + _env["error"]
+        return json.dumps(_env, ensure_ascii=False)
 
     from easybci_lib.tools.neural_processing.preprocess.deliverables import (
         normalize_deliverables as _normalize_deliverables,
@@ -6449,6 +6879,21 @@ def _do_handle_generate_code(args, **kw):
                 getattr(e, "events_path", None) for e in _rt.inputs
             ):
                 has_events = True
+            # In-recording events (annotations / trial onsets) counted by
+            # deep_inspect are equally authoritative.
+            if not has_events and _rt is not None:
+                for _e in _rt.inputs:
+                    _irp = getattr(_e, "inspection_report_path", None)
+                    if not _irp:
+                        continue
+                    _irp_path = Path(_irp)
+                    if not _irp_path.is_absolute():
+                        _irp_path = Path(work_dir) / _irp_path
+                    if _irp_path.is_file():
+                        _fp = json.loads(_irp_path.read_text(encoding="utf-8")).get("fingerprint") or {}
+                        if int(_fp.get("n_events") or 0) > 0:
+                            has_events = True
+                            break
         except Exception:  # noqa: BLE001
             pass
     has_labels = bool(label_config)
@@ -6501,6 +6946,8 @@ def _do_handle_generate_code(args, **kw):
             steps=steps, data_info=data_info, modality=modality,
             analysis_goal=analysis_goal,
             inspection_report=inspection_report,
+            epoch_window=epoch_window,
+            fallback_segment_duration=segment_duration,
         ),
         "qc.py": generate_qc_script_v2(
             steps=steps, data_info=data_info, modality=modality,
@@ -6575,10 +7022,19 @@ def _do_handle_generate_code(args, **kw):
     try:
         from easybci_lib.tools.neural_processing.export.repo_builder import (
             _input_is_compumedics,
+            _input_is_mat_struct,
             _input_is_nihon_kohden,
         )
         _input_path = (data_info.get("meta") or {}).get("input_path", "")
         _wd_path = Path(work_dir)
+        if _input_is_mat_struct(_input_path, data_info, _wd_path):
+            from easybci_lib.tools.neural_processing.io.mat_struct_loader_plugin import (
+                ensure_repo_plugin as _ms_ensure_repo,
+            )
+            _ms_ensure_repo(code_dir)
+            _rel = "io_loaders/mat_struct.py"
+            if _rel not in written:
+                written.append(_rel)
         if _input_is_compumedics(_input_path, data_info, _wd_path):
             from easybci_lib.tools.neural_processing.io.compumedics_loader_plugin import (
                 ensure_repo_plugin as _cm_ensure_repo,
@@ -6712,6 +7168,19 @@ def _do_handle_generate_code(args, **kw):
     }
     if ai_ready_skipped_reason is not None:
         payload["ai_ready_skipped_reason"] = ai_ready_skipped_reason
+    if _epoch_window_override is not None:
+        payload["epoch_window_override_warning"] = _epoch_window_override
+    payload["epoch_window"] = epoch_window
+    try:
+        from easybci_lib.tools.neural_processing.codegen.generator import (
+            split_epoch_stage_steps as _split_epoch,
+        )
+        _tr_warn: list = []
+        _split_epoch([_step_to_string(s) for s in steps], _tr_warn)
+        if _tr_warn:
+            payload["step_param_warnings"] = _tr_warn
+    except Exception:  # noqa: BLE001
+        pass
     return json.dumps(payload)
 
 
@@ -6879,6 +7348,7 @@ def _handle_export_repo(args, **kw):
         split_config=args.get("split_config"),
         scenario=_exp_scenario,
         deliverables=_exp_deliverables,
+        epoch_window=args.get("epoch_window"),
     )
 
     # Fix A-2 — Drain any QC payloads still pending for this work_dir and
@@ -7292,6 +7762,7 @@ def _handle_batch_process_adaptive(args, **kw):
             files, work_dir=output_dir, modality=modality, analysis_goal=goal,
             skill=skill, reject_keywords=extra_reject_keywords, adaptive=True,
             paradigm=getattr(skill, "paradigm", ""), preview=True,
+            epoch_window=getattr(skill, "epoch_window", None),
         )
         if not preview.get("success"):
             return json.dumps(preview, default=str)
@@ -7301,6 +7772,8 @@ def _handle_batch_process_adaptive(args, **kw):
         preview["enum_mode"] = coverage.get("enum_mode")
         preview["scan_root"] = coverage.get("anchor")
         preview["excluded_by_user"] = coverage.get("excluded_by_user") or []
+        preview.update({k: v for k, v in _proven_window_fields(skill).items()
+                        if k != "epoch_window" or v})
         preview["presentation_block"] = _render_batch_preview_block(
             preview, dropped_companions, coverage)
         preview["next_action"] = {
@@ -7341,7 +7814,9 @@ def _handle_batch_process_adaptive(args, **kw):
         files, work_dir=output_dir, modality=modality, analysis_goal=goal,
         skill=skill, reject_keywords=extra_reject_keywords, adaptive=True,
         paradigm=getattr(skill, "paradigm", ""),
+        epoch_window=getattr(skill, "epoch_window", None),
     )
+    result.update(_proven_window_fields(skill))
     result["dropped_companions"] = dropped_companions
     result["enum_mode"] = coverage.get("enum_mode")
     result["scan_root"] = coverage.get("anchor")
@@ -7471,6 +7946,16 @@ def _render_batch_completion_block(result):
     return "\n".join(lines)
 
 
+def _proven_window_fields(entry) -> dict:
+    """Epoch-window fields a proven recommendation carries into the plan."""
+    win = getattr(entry, "epoch_window", None)
+    if not win:
+        return {"epoch_window": None, "epoch_window_warning": "proven_skill_has_no_window"}
+    orig = getattr(entry, "epoch_window_source", "") or "unspecified"
+    return {"epoch_window": list(win), "epoch_window_source": "proven_skill",
+            "epoch_window_evidence": f"proven skill (originally {orig})"}
+
+
 def _render_batch_preview_block(preview, dropped_companions, coverage):
     """Human-readable plan the LLM must show the user before confirm=true."""
     lines = ["## Batch preprocessing plan (preview — NOT yet run)", ""]
@@ -7480,6 +7965,14 @@ def _render_batch_preview_block(preview, dropped_companions, coverage):
     for i, s in enumerate(steps, 1):
         lines.append(f"  {i}. {s}")
     lines.append("")
+    _ew = preview.get("epoch_window")
+    if _ew:
+        lines.append(f"**Epoch window:** {list(_ew)} s (from the proven skill)")
+        lines.append("")
+    elif preview.get("epoch_window_warning") == "proven_skill_has_no_window":
+        lines.append("**Epoch window:** ⚠ the proven skill records none — the event "
+                     "duration will be used. Confirm it fits this dataset.")
+        lines.append("")
     anchor = coverage.get("anchor")
     exts = "/".join(coverage.get("extensions") or []) or "signal"
     widened_from = coverage.get("widened_from")

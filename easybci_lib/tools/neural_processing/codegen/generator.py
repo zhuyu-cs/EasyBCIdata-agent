@@ -10,15 +10,24 @@ via an inline lock block placed right after the numpy import. Any operator with
 a random component (ICA, train/test split, sampling) MUST receive EASYBCI_SEED.
 """
 
+import ast
 import logging
+import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from easybci_lib.tools.neural_processing._seed import EASYBCI_SEED
 from easybci_lib.tools.neural_processing.output.format_policy import is_invasive
 from easybci_lib.tools.neural_processing.preprocess.operator_vocab import (
+    canonical_step_key as _canonical_step_key,
+)
+from easybci_lib.tools.neural_processing.preprocess.operator_vocab import (
     normalize_steps as _normalize_steps,
 )
+from easybci_lib.tools.neural_processing.quality import session_consistency as _session_consistency
+from easybci_lib.tools.neural_processing.quality import time_separability as _time_separability
+from easybci_lib.tools.neural_processing.quality import trial_reject as _trial_reject
 
 try:
     from easybci_lib.tools.neural_processing.preprocess.analysis_goals import (
@@ -106,10 +115,11 @@ def _enforce_clean_output(
 
     Rules within an opted-in goal (idempotent):
       1. If the last drop_nondata_channels:data_only step already sits AFTER
-         the last ICA step (or there is no ICA), no-op.
-      2. Otherwise, if any ICA step is present, insert
-         ``drop_nondata_channels:data_only`` immediately after the LAST ICA
-         step. ICA's EOG-aware ability stays intact; the cleanup runs after.
+         the last EOG-consuming step (ica / regression_eog), or there is none,
+         no-op.
+      2. Otherwise, if such a step is present, move (or insert)
+         ``drop_nondata_channels:data_only`` immediately after the LAST one,
+         so the EOG channels it needs are still there when it runs.
       3. Otherwise (no ICA in pipeline): if a
          ``drop_nondata_channels:markers_only`` step exists, replace its
          param with ``data_only``. If neither variant exists, prepend a new
@@ -178,7 +188,9 @@ def _enforce_clean_output(
     data_only_idx = -1
     for i, s in enumerate(out):
         op = _step_op(s)
-        if op == "ica":
+        # EOG-consuming steps (ica / regression_eog) need the EOG channels,
+        # so the cleanup must come after the last of them.
+        if op in ("ica", "regression_eog"):
             ica_idx = i
         if op == _CLEANUP_OP and _step_param(s) == "data_only":
             data_only_idx = i
@@ -187,8 +199,11 @@ def _enforce_clean_output(
     if data_only_idx > ica_idx:
         return out
 
-    # Rule 2 — has ICA, insert data_only right after the LAST ica step.
+    # Rule 2 — has an EOG-consuming step: move/insert data_only right after it.
     if ica_idx >= 0:
+        if data_only_idx >= 0:
+            out.pop(data_only_idx)
+            ica_idx -= 1
         out.insert(ica_idx + 1, _CLEANUP_DATA_ONLY)
         return out
 
@@ -902,6 +917,12 @@ def op_drop_bads(d, param):
     differs from EEG channels.
 
     Unconditional drops (any group): >50% NaN, non-finite std, zero std (flat).
+
+    Recording-declared bad channels (``meta["bad_channels"]``, e.g. open or
+    high-impedance electrodes reported by the acquisition system) are dropped
+    first. ``param`` may append explicit channel names
+    (``drop_bads:auto,Cz`` / ``drop_bads:Cz,Fz``); ``auto`` alone keeps the
+    statistical detector only. Reasons land in ``meta["dropped_channels_reasons"]``.
     """
     data = np.asarray(d["data"], dtype=np.float64)
     channels = list(d["channels"])
@@ -910,35 +931,66 @@ def op_drop_bads(d, param):
     std = np.nanstd(data, axis=1)
     nan_frac = np.isnan(data).mean(axis=1)
 
+    _meta_in = d.get("meta") or {{}}
+    _declared = {{}}
+    _decl_reasons = _meta_in.get("bad_channel_reasons") or {{}}
+    for _ch in _meta_in.get("bad_channels") or []:
+        _declared[str(_ch)] = str(_decl_reasons.get(_ch, "declared_by_recording"))
+    _lower = {{c.strip().lower(): c for c in channels}}
+    _unknown_param = []
+    for _tok in (param or "").split(","):
+        _tok = _tok.strip()
+        if not _tok or _tok.lower() == "auto":
+            continue
+        _hit = _lower.get(_tok.lower())
+        if _hit is None:
+            _unknown_param.append(_tok)
+        else:
+            _declared.setdefault(_hit, "requested_in_step")
+    if _unknown_param:
+        print("[drop_bads] WARNING: requested channel(s) not present: {{}}".format(
+            _unknown_param), file=sys.stderr)
+    reasons = {{}}
+
     ch_types = (d.get("meta") or {{}}).get("ch_types")
     if not isinstance(ch_types, list) or len(ch_types) != len(channels):
         ch_types = None
 
-    # Build per-group median std for variance-outlier thresholds.
+    # Build per-group median std for variance-outlier thresholds. Declared-bad
+    # channels are excluded so an open electrode cannot skew the reference.
+    _ok_ref = [i for i, c in enumerate(channels) if c not in _declared]
     if ch_types is not None:
         groups = {{}}
-        for i, ct in enumerate(ch_types):
-            groups.setdefault(ct, []).append(i)
+        for i in _ok_ref:
+            groups.setdefault(ch_types[i], []).append(i)
         group_median = {{}}
         for ct, indices in groups.items():
             finite = [std[i] for i in indices if np.isfinite(std[i]) and std[i] > 0]
             group_median[ct] = float(np.median(finite)) if finite else 0.0
     else:
         group_median = None
+    _ref_std = std[_ok_ref] if _ok_ref else std
+    _ref_std = _ref_std[np.isfinite(_ref_std) & (_ref_std > 0)]
+    _global_med = float(np.median(_ref_std)) if _ref_std.size else 0.0
 
     keep = []
     dropped = []
     for i, ch in enumerate(channels):
+        if ch in _declared:
+            dropped.append(ch); reasons[ch] = _declared[ch]; continue
         if nan_frac[i] > 0.5 or not np.isfinite(std[i]) or std[i] == 0:
-            dropped.append(ch); continue
+            dropped.append(ch)
+            reasons[ch] = "nan_or_flat"
+            continue
         if group_median is not None:
             ct = ch_types[i]
             med = group_median.get(ct, 0.0)
         else:
-            finite_std = std[np.isfinite(std) & (std > 0)]
-            med = float(np.median(finite_std)) if finite_std.size else 0.0
+            med = _global_med
         if med > 0 and (std[i] < med * 0.1 or std[i] > med * 10):
-            dropped.append(ch); continue
+            dropped.append(ch)
+            reasons[ch] = "variance_outlier:{{:.1f}}x_median".format(std[i] / med)
+            continue
         keep.append(i)
     if not keep:
         return dict(d)
@@ -963,6 +1015,12 @@ def op_drop_bads(d, param):
     out["channels"] = kept_channels
     out["meta"] = dict(d.get("meta", {{}}))
     out["meta"]["dropped_channels"] = list(out["meta"].get("dropped_channels", [])) + dropped
+    _prev_reasons = dict(out["meta"].get("dropped_channels_reasons") or {{}})
+    _prev_reasons.update(reasons)
+    out["meta"]["dropped_channels_reasons"] = _prev_reasons
+    if dropped:
+        print("[drop_bads] dropped {{}}".format(
+            ", ".join("{{}}({{}})".format(c, reasons.get(c, "")) for c in dropped)))
     _ct = out["meta"].get("ch_types")
     if isinstance(_ct, list) and len(_ct) == len(channels):
         out["meta"]["ch_types"] = [_ct[i] for i in keep]
@@ -1048,12 +1106,337 @@ def op_clip(d, param):
 
 
 def op_fill_nan(d, param):
-    """Replace NaN/Inf with 0 (or the value in param)."""
-    fill = float(param) if param else 0.0
+    """Replace NaN/Inf. param: ``linear`` (per-channel linear interpolation,
+    edges held at the nearest finite sample; an all-non-finite channel → 0),
+    a number (constant fill), or empty / ``constant`` (fill with 0)."""
+    p = (param or "").strip().lower()
     data = np.asarray(d["data"], dtype=np.float64)
-    data = np.where(np.isfinite(data), data, fill)
+    bad_all = ~np.isfinite(data)
+    n_bad = int(bad_all.sum())
+    if p in ("linear", "interp", "interpolate"):
+        method = "linear"
+        data = data.copy()
+        for r in range(data.shape[0]):
+            bad = bad_all[r]
+            if not bad.any():
+                continue
+            good = ~bad
+            if good.any():
+                data[r, bad] = np.interp(np.flatnonzero(bad), np.flatnonzero(good), data[r, good])
+            else:
+                data[r, bad] = 0.0
+    else:
+        method = "constant"
+        if p in ("", "constant", "zero"):
+            fill = 0.0
+        else:
+            try:
+                fill = float(p)
+            except ValueError:
+                raise ValueError(
+                    "fill_nan: unknown param {{!r}} — use linear, constant or a number".format(param))
+        data = np.where(bad_all, fill, data)
     out = dict(d)
     out["data"] = data.astype(np.float32)
+    out["meta"] = dict(d.get("meta") or {{}})
+    out["meta"]["fill_nan"] = {{"method": method, "n_replaced": n_bad}}
+    if n_bad:
+        print("[fill_nan] {{}} non-finite samples replaced ({{}})".format(n_bad, method))
+    return out
+
+
+def _warn_meta(meta, msg):
+    """Record a warning that pipeline_status / the QC report surface."""
+    meta["pipeline_warnings"] = list(meta.get("pipeline_warnings") or []) + [msg]
+    print("WARN " + msg, file=sys.stderr)
+
+
+_EOG_NAME_RX = _re.compile(r"eog", _re.IGNORECASE)
+_FRONTAL_PROXY = ("fp1", "fp2", "fpz", "af7", "af8")
+_REGRESS_TARGET_TYPES = {{"eeg", "mag", "grad", "seeg", "ecog"}}
+
+
+def op_regression_eog(d, param):
+    """Least-squares EOG regression (Gratton 1983).
+
+    param: ``auto`` (default) or explicit reference channel names
+    (``regression_eog:VEOG,HEOG``). Reference resolution: explicit names ->
+    EOG-typed / EOG-named channels -> frontal-pole proxy (Fp1/Fp2/Fpz/AF7/AF8,
+    with a warning: real frontal EEG shared with the proxy is removed too).
+    Without any reference the step changes nothing and says so loudly.
+
+    Each target channel loses its least-squares projection on the reference
+    channels (intercept kept); reference channels are left as they are.
+    Normal equations are accumulated chunk-wise in float64, so memory stays
+    bounded; the input array is never modified (Rule 5).
+    """
+    meta = dict(d.get("meta") or {{}})
+    out = dict(d)
+    out["meta"] = meta
+    data = np.asarray(d["data"])
+    channels = [str(c) for c in d.get("channels") or []]
+    if data.ndim != 2 or data.shape[0] < 2 or len(channels) != data.shape[0]:
+        _warn_meta(meta, "[regression_eog] not applied: data is not (n_channels, n_samples)")
+        meta["regression_eog"] = {{"applied": False, "reason": "bad_shape"}}
+        return out
+    ch_types = meta.get("ch_types")
+    if not isinstance(ch_types, list) or len(ch_types) != len(channels):
+        ch_types = None
+    lower = {{c.strip().lower(): i for i, c in enumerate(channels)}}
+
+    refs, source, missing = [], "", []
+    for tok in (param or "").split(","):
+        tok = tok.strip()
+        if not tok or tok.lower() == "auto":
+            continue
+        if tok.lower() in lower:
+            refs.append(lower[tok.lower()])
+        else:
+            missing.append(tok)
+    if missing:
+        _warn_meta(meta, "[regression_eog] requested reference channel(s) not present: {{}}".format(missing))
+    if refs:
+        source = "explicit"
+    if not refs:
+        refs = [i for i, c in enumerate(channels)
+                if (ch_types is not None and str(ch_types[i]).lower() == "eog")
+                or _EOG_NAME_RX.search(c)]
+        source = "eog_channel" if refs else ""
+    if not refs:
+        refs = [lower[n] for n in _FRONTAL_PROXY if n in lower]
+        if refs:
+            source = "frontal_proxy"
+            _warn_meta(meta, "[regression_eog] no EOG channel; using frontal proxy {{}} — "
+                       "frontal EEG shared with these channels is removed as well".format(
+                           [channels[i] for i in refs]))
+    if not refs:
+        _warn_meta(meta, "[regression_eog] NOT applied: no EOG channel and no frontal-pole "
+                   "proxy (Fp1/Fp2/Fpz/AF7/AF8) — ocular artifacts remain; use ica or "
+                   "name reference channels explicitly")
+        meta["regression_eog"] = {{"applied": False, "reason": "no_reference_channel"}}
+        return out
+
+    ref_set = set(refs)
+    targets = [i for i in range(len(channels)) if i not in ref_set
+               and (ch_types is None or str(ch_types[i]).lower() in _REGRESS_TARGET_TYPES)]
+    if not targets:
+        _warn_meta(meta, "[regression_eog] not applied: no target channels besides the references")
+        meta["regression_eog"] = {{"applied": False, "reason": "no_target_channel"}}
+        return out
+
+    n = int(data.shape[1])
+    step = max(1, int(2e7 // max(len(channels), 1)))
+    k = len(refs)
+    sx = np.zeros(k)
+    sy = np.zeros(len(targets))
+    sxx = np.zeros((k, k))
+    sxy = np.zeros((k, len(targets)))
+    cnt = 0
+    for s in range(0, n, step):
+        x = np.asarray(data[refs, s:s + step], dtype=np.float64)
+        y = np.asarray(data[targets, s:s + step], dtype=np.float64)
+        ok = np.isfinite(x).all(axis=0) & np.isfinite(y).all(axis=0)
+        if not ok.any():
+            continue
+        x, y = x[:, ok], y[:, ok]
+        sx += x.sum(axis=1)
+        sy += y.sum(axis=1)
+        sxx += x @ x.T
+        sxy += x @ y.T
+        cnt += int(ok.sum())
+    if cnt <= k + 1:
+        _warn_meta(meta, "[regression_eog] not applied: too few finite samples")
+        meta["regression_eog"] = {{"applied": False, "reason": "too_few_samples"}}
+        return out
+    mx = sx / cnt
+    my = sy / cnt
+    cxx = sxx / cnt - np.outer(mx, mx)
+    cxy = sxy / cnt - np.outer(mx, my)
+    ridge = 1e-9 * max(float(np.trace(cxx)) / k, 1e-30)
+    beta = np.linalg.solve(cxx + ridge * np.eye(k), cxy)
+
+    new = np.array(data, dtype=np.float32, copy=True)
+    for s in range(0, n, step):
+        x = np.asarray(data[refs, s:s + step], dtype=np.float64) - mx[:, None]
+        x = np.where(np.isfinite(x), x, 0.0)
+        new[targets, s:s + step] = (
+            np.asarray(data[targets, s:s + step], dtype=np.float64) - beta.T @ x
+        ).astype(np.float32)
+    out["data"] = new
+    meta["regression_eog"] = {{
+        "applied": True,
+        "reference_source": source,
+        "reference_channels": [channels[i] for i in refs],
+        "n_targets": len(targets),
+        "max_abs_beta": round(float(np.max(np.abs(beta))), 4),
+    }}
+    print("[regression_eog] regressed {{}} ({{}}) out of {{}} channel(s)".format(
+        [channels[i] for i in refs], source, len(targets)))
+    return out
+
+
+_BAD_SEG_METHODS = {{"auto", "amplitude", "amplitude_threshold", "threshold",
+                    "clean_windows", "osl_default", "annotation", "manual_visual"}}
+
+
+def _parse_bad_segments_param(param):
+    cfg = {{"thr": None, "k": 10.0, "pad": 0.25, "action": "mark", "method": "auto"}}
+    positional = []
+    for tok in (param or "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if "=" in tok:
+            key, val = [t.strip().lower() for t in tok.split("=", 1)]
+            key = {{"threshold": "thr", "amp": "thr", "mad": "k", "z": "k",
+                    "pad_s": "pad", "padding": "pad"}}.get(key, key)
+            if key == "action":
+                cfg["action"] = "drop" if val in ("drop", "remove", "excise") else "mark"
+            elif key == "window_ms":
+                try:
+                    cfg["pad"] = float(val) / 2000.0
+                except ValueError:
+                    pass
+            elif key in ("thr", "k", "pad"):
+                try:
+                    cfg[key] = float(val)
+                except ValueError:
+                    print("[reject_bad_segments] WARNING: bad value for {{}}: {{!r}}".format(key, val),
+                          file=sys.stderr)
+            else:
+                print("[reject_bad_segments] WARNING: unknown parameter {{!r}} ignored".format(key),
+                      file=sys.stderr)
+        elif tok.lower() in _BAD_SEG_METHODS:
+            cfg["method"] = tok.lower()
+        elif tok.lower() in ("mark", "drop", "omit_from_fit"):
+            cfg["action"] = "drop" if tok.lower() == "drop" else "mark"
+        else:
+            positional.append(tok)
+    # Legacy positional form: <method>,<threshold>,<window_ms>
+    try:
+        if positional and cfg["thr"] is None:
+            cfg["thr"] = float(positional[0])
+        if len(positional) > 1:
+            cfg["pad"] = float(positional[1]) / 2000.0
+    except ValueError:
+        print("[reject_bad_segments] WARNING: unparsed positional params {{}}".format(positional),
+              file=sys.stderr)
+    return cfg
+
+
+def _to_original_seconds(t, prior):
+    """Map a time on the current (excised) timeline back to the original one."""
+    for a, b in prior:
+        if a <= t:
+            t += b - a
+        else:
+            break
+    return t
+
+
+def op_reject_bad_segments(d, param):
+    """Detect gross-artifact spans of the continuous signal.
+
+    param: ``auto`` | ``thr=<amp>,pad=<s>,k=<mad>,action=mark|drop`` (legacy
+    positional ``amplitude_threshold,<thr>,<window_ms>`` also accepted).
+    A sample is bad when any data channel deviates from its median by more
+    than ``thr`` (absolute, in the data's units at this point of the chain)
+    or, in ``auto`` mode, by more than ``k`` robust SDs (median / MAD); bad
+    samples are padded by ``pad`` seconds on each side.
+
+    ``mark`` (default) keeps the signal intact and records the spans in
+    ``meta["bad_spans"]`` (seconds): overlapping trials are hard-rejected
+    (``bad_segment``), the spans land in the NWB ``invalid_times`` table and
+    are excluded from the cross-session PSD. ``drop`` excises the spans like
+    ``reject_by_labels`` (events are remapped across the gaps).
+    """
+    cfg = _parse_bad_segments_param(param)
+    meta = dict(d.get("meta") or {{}})
+    out = dict(d)
+    out["meta"] = meta
+    data = np.asarray(d["data"])
+    fs = float(d.get("frequency") or 0.0)
+    if data.ndim != 2 or data.shape[0] == 0 or fs <= 0:
+        _warn_meta(meta, "[reject_bad_segments] not applied: no (n_channels, n_samples) data / sampling rate")
+        return out
+    n_ch, n = int(data.shape[0]), int(data.shape[1])
+    ch_types = meta.get("ch_types")
+    rows = list(range(n_ch))
+    if isinstance(ch_types, list) and len(ch_types) == n_ch:
+        sel = [i for i in rows if str(ch_types[i]).lower() in _REGRESS_TARGET_TYPES]
+        rows = sel or rows
+    # Per-channel centre / scale from a strided subsample (memory bounded).
+    sub_step = max(1, n // 200000)
+    sub = np.asarray(data[rows, ::sub_step], dtype=np.float64)
+    med = np.nanmedian(sub, axis=1)
+    if cfg["thr"] is not None:
+        lim = np.full(len(rows), abs(float(cfg["thr"])))
+        method = "absolute"
+    else:
+        mad = 1.4826 * np.nanmedian(np.abs(sub - med[:, None]), axis=1)
+        mad = np.where(np.isfinite(mad) & (mad > 0), mad, np.inf)
+        lim = float(cfg["k"]) * mad
+        method = "robust_k{{:g}}".format(cfg["k"])
+    del sub
+    bad = np.zeros(n, dtype=bool)
+    step = max(1, int(2e7 // max(len(rows), 1)))
+    for s in range(0, n, step):
+        seg = np.asarray(data[rows, s:s + step], dtype=np.float64)
+        dev = np.abs(seg - med[:, None])
+        bad[s:s + step] = (dev > lim[:, None]).any(axis=0)
+    pad = max(int(round(float(cfg["pad"]) * fs)), 0)
+    spans = []
+    if bad.any():
+        flip = np.diff(np.concatenate(([0], bad.astype(np.int8), [0])))
+        starts = np.flatnonzero(flip == 1)
+        stops = np.flatnonzero(flip == -1)
+        for a, b in zip(starts, stops):
+            a, b = max(0, int(a) - pad), min(n, int(b) + pad)
+            if spans and a <= spans[-1][1]:
+                spans[-1][1] = max(spans[-1][1], b)
+            else:
+                spans.append([a, b])
+    n_bad = int(sum(b - a for a, b in spans))
+    frac = n_bad / float(n) if n else 0.0
+    summary = {{
+        "action": cfg["action"], "method": method,
+        "threshold": None if cfg["thr"] is None else float(cfg["thr"]),
+        "pad_s": float(cfg["pad"]), "n_spans": len(spans),
+        "bad_seconds": round(n_bad / fs, 3), "bad_fraction": round(frac, 4),
+    }}
+    meta["bad_segments"] = summary
+    if frac > 0.3:
+        _warn_meta(meta, "[reject_bad_segments] {{:.0%}} of the recording flagged — the "
+                   "threshold is likely too strict for this data (see bad_segments)".format(frac))
+    print("[reject_bad_segments] {{}} span(s), {{:.1f}} s ({{:.1%}}) flagged, action={{}}".format(
+        len(spans), n_bad / fs, frac, cfg["action"]))
+    if not spans:
+        return out
+    prior = sorted((float(a), float(b)) for a, b in (meta.get("rejected_intervals") or []))
+    if cfg["action"] == "mark":
+        # Original-timeline seconds (like rejected_intervals) so a later
+        # excision step never invalidates them; consumers map to the
+        # current timeline with spans_to_current().
+        meta["bad_spans"] = list(meta.get("bad_spans") or []) + [
+            [round(_to_original_seconds(a / fs, prior), 6),
+             round(_to_original_seconds(b / fs, prior), 6)] for a, b in spans]
+        return out
+    keep = np.ones(n, dtype=bool)
+    for a, b in spans:
+        keep[a:b] = False
+    new_ivs = [[round(_to_original_seconds(a / fs, prior), 6),
+                round(_to_original_seconds(b / fs, prior), 6)] for a, b in spans]
+    merged = []
+    for a, b in sorted([list(iv) for iv in prior] + new_ivs):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    out["data"] = data[:, keep]
+    meta["rejected_intervals"] = merged
+    meta["rejected_samples"] = int(meta.get("rejected_samples") or 0) + n_bad
+    meta["rejected_seconds"] = round(float(meta.get("rejected_seconds") or 0.0) + n_bad / fs, 3)
+    out.pop("_mne_info", None)  # sample count changed; rebuild on next op
     return out
 
 
@@ -1249,6 +1632,8 @@ _OPS = {{
     "scale": op_scale,
     "clip": op_clip,
     "fill_nan": op_fill_nan,
+    "regression_eog": op_regression_eog,
+    "reject_bad_segments": op_reject_bad_segments,
     "reject_by_labels": op_reject_by_labels,
     "threshold_spike": op_threshold_spike,
     "mua_binning": op_mua_binning,
@@ -1533,6 +1918,151 @@ def _gate_release(token):
         pass
 
 
+{trial_reject_block}
+
+TRIAL_REJECT = {trial_reject_repr}
+EPOCH_WINDOW = {epoch_window_repr}
+FALLBACK_EPOCH_WINDOW = {fallback_epoch_window_repr}
+
+
+def _read_sidecar_events(path):
+    """Sidecar events (BIDS events.tsv or legacy csv) -> annotations dict."""
+    import csv as _csv
+    delim = "\\t" if str(path).lower().endswith((".tsv", ".tab")) else ","
+    onset, duration, desc = [], [], []
+    with open(path, "r", encoding="utf-8") as f:
+        for row in _csv.DictReader(f, delimiter=delim):
+            t = row.get("onset") or row.get("time_s")
+            if t in (None, "", "n/a"):
+                continue
+            try:
+                onset.append(float(t))
+            except ValueError:
+                continue
+            try:
+                duration.append(float(row.get("duration") or 0.0))
+            except ValueError:
+                duration.append(0.0)
+            lab = row.get("trial_type")
+            if lab in (None, "", "n/a"):
+                lab = row.get("value") or row.get("event_code") or "event"
+            desc.append(str(lab).strip())
+    return {{"onset": onset, "duration": duration, "description": desc}}
+
+
+def _trial_qc(d, inp):
+    """Resolve trial events + epoch window, reject low-quality trials.
+
+    Returns the full decision dict, or None when the recording has no trial
+    events (continuous data is left untouched).
+    """
+    meta = d.get("meta") or {{}}
+    fs = float(d.get("frequency") or 0.0)
+    data = d.get("data")
+    if fs <= 0 or data is None or getattr(data, "ndim", 0) != 2:
+        return None
+    n_samples = int(data.shape[1])
+    source = "recording"
+    annotations = meta.get("annotations")
+    ev_path = inp.get("events_path")
+    if ev_path and Path(ev_path).is_file():
+        try:
+            annotations = _read_sidecar_events(ev_path)
+            source = "sidecar:" + Path(ev_path).name
+        except Exception as exc:
+            print("[trials] sidecar events unreadable ({{}}); using recording annotations".format(exc),
+                  file=sys.stderr)
+    events, n_excluded = collect_trial_events(annotations, fs, n_samples)
+    if not events:
+        return None
+    events, n_in_excised = remap_after_excision(events, meta.get("rejected_intervals"))
+    window, window_source = resolve_epoch_window(events, EPOCH_WINDOW, FALLBACK_EPOCH_WINDOW)
+    bounds, oob = epoch_bounds(events, fs, window, n_samples)
+    result = {{
+        "events_source": source,
+        "n_events_total": len(events) + n_in_excised,
+        "n_events_excluded_markers": n_excluded,
+        "n_events_in_excised_spans": n_in_excised,
+        "epoch_window": list(window),
+        "epoch_window_source": window_source,
+        "n_out_of_bounds": len(oob),
+        "out_of_bounds_trial_index": oob,
+        "frequency": fs,
+        "channels": list(d.get("channels") or []),
+    }}
+    if oob:
+        print("[trials] WARNING: {{}} trial(s) fall outside the recording for window {{}}: {{}}".format(
+            len(oob), window, oob[:20]), file=sys.stderr)
+    kept_idx = [b[0]["trial_index"] for b in bounds]
+    labels = [b[0]["label"] for b in bounds]
+    flags = [b[0].get("source_flag") or "" for b in bounds]
+    # reject_bad_segments (mark mode): trials overlapping a flagged span are
+    # hard-rejected; spans are mapped onto the current (post-excision) timeline.
+    bad_spans = spans_to_current(meta.get("bad_spans"), meta.get("rejected_intervals"))
+    in_bad = trials_in_spans(bounds, bad_spans, fs)
+    if bad_spans:
+        result["bad_spans_s"] = bad_spans
+    if TRIAL_REJECT is not None and bounds:
+        ptp, logvar, hard = trial_features(data, bounds)
+        hard = [h or ("bad_segment" if b else "") for h, b in zip(hard, in_bad)]
+        keep, report = reject_trials(
+            ptp, logvar, hard, channels=result["channels"], labels=labels,
+            source_flags=flags,
+            z_single=TRIAL_REJECT["z_single"], z_multi=TRIAL_REJECT["z_multi"],
+            min_channels=TRIAL_REJECT["min_channels"], max_frac=TRIAL_REJECT["max_frac"],
+            min_trials=TRIAL_REJECT["min_trials"],
+        )
+        # report indices are positions in `bounds`; translate to trial_index.
+        report["reasons"] = {{str(kept_idx[int(k)]): v for k, v in report["reasons"].items()}}
+        report["score_max_z"] = {{str(kept_idx[i]): s for i, s in enumerate(report["score_max_z"])}}
+        result["rejection"] = report
+        result["rejection_enabled"] = True
+    else:
+        # Statistical rejection off: an explicit reject_bad_segments step still
+        # removes the trials it flagged.
+        keep = np.asarray([not b for b in in_bad], dtype=bool)
+        result["rejection_enabled"] = False
+        if not keep.all():
+            result["rejection"] = {{"reasons": {{
+                str(kept_idx[i]): "bad_segment" for i, b in enumerate(in_bad) if b}}}}
+    result["kept"] = [
+        {{"trial_index": int(ev["trial_index"]), "onset_s": float(ev["onset_s"]),
+          "start": int(s), "stop": int(e), "label": ev["label"]}}
+        for (ev, s, e), k in zip(bounds, keep) if k
+    ]
+    result["rejected"] = [
+        {{"trial_index": int(ev["trial_index"]), "onset_s": float(ev["onset_s"]),
+          "start": int(s), "stop": int(e), "label": ev["label"],
+          "reason": result.get("rejection", {{}}).get("reasons", {{}}).get(str(ev["trial_index"]), "")}}
+        for (ev, s, e), k in zip(bounds, keep) if not k
+    ]
+    print("[trials] window={{}} ({{}}), kept {{}}/{{}} trials, rejected {{}}{{}}".format(
+        window, window_source, len(result["kept"]), len(bounds), len(result["rejected"]),
+        " (cap hit)" if result.get("rejection", {{}}).get("cap_hit") else ""))
+    return result
+
+
+def _trial_summary(res):
+    """Compact per-file summary for status sidecars / tool returns."""
+    rej = res.get("rejection") or {{}}
+    return {{
+        "events_source": res.get("events_source"),
+        "epoch_window": res.get("epoch_window"),
+        "epoch_window_source": res.get("epoch_window_source"),
+        "n_events_total": res.get("n_events_total"),
+        "n_out_of_bounds": res.get("n_out_of_bounds"),
+        "n_kept": len(res.get("kept") or []),
+        "n_rejected": len(res.get("rejected") or []),
+        "rejected_trial_index": [r["trial_index"] for r in res.get("rejected") or []],
+        "rejection_enabled": res.get("rejection_enabled"),
+        "cap_hit": rej.get("cap_hit", False),
+        "skipped_reason": rej.get("skipped_reason"),
+        "per_class": rej.get("per_class"),
+        "class_imbalance_warning": rej.get("class_imbalance_warning") or [],
+        "hard_reject_warning": rej.get("hard_reject_warning"),
+    }}
+
+
 def _process_one(work_dir, inp, steps):
     """Process a single input, writing all artefacts under its (sub, ses) bucket."""
     data_path = inp["data_path"]
@@ -1668,6 +2198,14 @@ def _process_one(work_dir, inp, steps):
         for step in steps:
             data_dict = _apply_step(data_dict, step)
 
+        # Trial-level QC: decide the epoch window and drop low-quality trials.
+        # The continuous signal stays intact; the decision is written into the
+        # NWB (trials table = kept trials, invalid_times = rejected spans) and
+        # build_ai_ready.py epochs exactly the kept trials.
+        trial_result = _trial_qc(data_dict, inp)
+        if trial_result is not None:
+            data_dict.setdefault("meta", {{}})["easybci_trials"] = trial_result
+
         n_ch_out = len(data_dict.get("channels", []))
         fs_out = float(data_dict.get("frequency", 0.0))
         print("  Channels out: {{}}, fs: {{}} Hz".format(n_ch_out, fs_out))
@@ -1699,11 +2237,23 @@ def _process_one(work_dir, inp, steps):
             "frequency_hz": fs_out,
             "n_samples": int(data_dict["data"].shape[-1]) if data_dict["data"].ndim else 0,
             "dropped_channels": list(data_dict.get("meta", {{}}).get("dropped_channels", [])),
+            "dropped_channels_reasons": dict(data_dict.get("meta", {{}}).get("dropped_channels_reasons") or {{}}),
             "rejected_seconds": data_dict.get("meta", {{}}).get("rejected_seconds"),
             "unmatched_labels": list(data_dict.get("meta", {{}}).get("unmatched_labels", [])),
             "output_file": str(out_file),
             "success": True,
         }}
+        _m_out = data_dict.get("meta", {{}})
+        for _k in ("regression_eog", "bad_segments", "pipeline_warnings"):
+            if _m_out.get(_k):
+                status[_k] = _m_out[_k]
+        if trial_result is not None:
+            status["trial_rejection"] = _trial_summary(trial_result)
+            mp_tr = work_dir / "middle_process"
+            mp_tr.mkdir(parents=True, exist_ok=True)
+            (mp_tr / "trial_rejection__{{}}.json".format(file_id)).write_text(
+                json.dumps(trial_result, indent=2, default=str), encoding="utf-8"
+            )
         if _decimation_note is not None:
             status["decimated_at_load"] = _decimation_note
         mp = work_dir / "middle_process"
@@ -1757,7 +2307,9 @@ def main():
             print("[pipeline] EASYBCI_FILE_IDS filter matched 0 inputs; nothing to do",
                   file=sys.stderr)
             sys.exit(0)
-    steps = {steps_repr}
+    # Continuous-signal steps only; epoch-stage operators (reject_epochs) are
+    # configured via TRIAL_REJECT above.
+    steps = {run_steps_repr}
 
     aggregate = {{"inputs": [], "n_success": 0, "n_failed": 0}}
     for inp in inputs:
@@ -2130,6 +2682,53 @@ def _save_nwb_inline(*, data_dict, subject_id, out_path,
                 )
         except Exception:
             pass
+    # Trial decision: kept trials -> NWB trials table, rejected trials ->
+    # invalid_times (with reason), full decision -> easybci_trials scratch
+    # (JSON) so build_ai_ready epochs exactly the kept trials.
+    _trials = meta_d.get("easybci_trials") if isinstance(meta_d, _Mapping_nwb) else None
+    _bad_spans_s = (_trials or {}).get("bad_spans_s") if _trials else None
+    if not _bad_spans_s and isinstance(meta_d, _Mapping_nwb) and meta_d.get("bad_spans"):
+        _bad_spans_s = spans_to_current(meta_d.get("bad_spans"), meta_d.get("rejected_intervals"))
+    if _trials or _bad_spans_s:
+        try:
+            _tw = (_trials or {}).get("epoch_window") or [0.0, 0.0]
+            if _trials and _trials.get("kept"):
+                nwb.add_trial_column(name="label", description="trial label / condition")
+                nwb.add_trial_column(name="trial_index", description="index of the trial in the source recording")
+                for _t in _trials["kept"]:
+                    _t0 = float(_t["start"]) / sfreq
+                    nwb.add_trial(start_time=_t0, stop_time=_t0 + (float(_tw[1]) - float(_tw[0])),
+                                  label=str(_t["label"]), trial_index=int(_t["trial_index"]))
+            _rej_trials = (_trials or {}).get("rejected") or []
+            if _rej_trials or _bad_spans_s:
+                nwb.add_invalid_times_column(name="reason", description="why the interval is invalid")
+                nwb.add_invalid_times_column(name="trial_index", description="index of the rejected trial (-1 = continuous bad segment)")
+                for _t in _rej_trials:
+                    _t0 = float(_t["start"]) / sfreq
+                    nwb.add_invalid_time_interval(
+                        start_time=_t0, stop_time=_t0 + (float(_tw[1]) - float(_tw[0])),
+                        reason=str(_t.get("reason") or "rejected"), trial_index=int(_t["trial_index"]))
+                for _a, _b in _bad_spans_s or []:
+                    nwb.add_invalid_time_interval(
+                        start_time=float(_a), stop_time=float(_b),
+                        reason="bad_segment", trial_index=-1)
+            if _trials:
+                nwb.add_scratch(
+                    json.dumps(_trials, ensure_ascii=False, default=str),
+                    name="easybci_trials",
+                    description="EasyBCIdata trial decision (JSON): epoch window, kept/rejected trials, rejection report",
+                )
+        except Exception as _tr_exc:
+            print("[nwb] WARNING: trial table not written: {}".format(_tr_exc), file=sys.stderr)
+    if _bad_spans_s:
+        try:
+            nwb.add_scratch(
+                np.asarray(_bad_spans_s, dtype=np.float64),
+                name="easybci_bad_spans",
+                description="reject_bad_segments flagged [start,stop] spans in seconds (signal kept intact)",
+            )
+        except Exception:
+            pass
     _mod_l = (modality or "").strip().lower()
     # Self-contained provenance: the processing chain, modality and dropped
     # channels are NOT otherwise recoverable from the NWB (channels/rate/shape
@@ -2222,6 +2821,20 @@ def _load_preprocessed_nwb(pre_nwb):
             _rej_iv = np.asarray(_sc).tolist()
         except Exception:
             _rej_iv = None
+        # Trial decision written by pipeline.py (kept/rejected trials + epoch
+        # window). Absent for continuous recordings.
+        _trials_d = None
+        try:
+            import json as _json_nwb
+            _trials_d = _json_nwb.loads(str(_nwb.get_scratch("easybci_trials")))
+        except Exception:
+            _trials_d = None
+        # reject_bad_segments flagged spans (seconds, signal kept intact).
+        _bad_sp = None
+        try:
+            _bad_sp = np.asarray(_nwb.get_scratch("easybci_bad_spans")).tolist()
+        except Exception:
+            _bad_sp = None
         # Zero-copy memmap onto the contiguous HDF5 data region. get_offset()
         # returns None for chunked/compressed datasets → fall back to full read.
         try:
@@ -2244,6 +2857,10 @@ def _load_preprocessed_nwb(pre_nwb):
     _meta = {"format": "nwb", "source_file": _pre}
     if _rej_iv:
         _meta["rejected_intervals"] = _rej_iv
+    if _trials_d:
+        _meta["easybci_trials"] = _trials_d
+    if _bad_sp:
+        _meta["bad_spans_s"] = _bad_sp
     return _data, _fs, _meta, _channels
 # --- end Preprocessed NWB loader ---
 '''
@@ -2283,6 +2900,120 @@ def canonicalize_steps_for_header(
     return out
 
 
+def script_has_version_marker(script_path: Path) -> bool:
+    """True iff the script carries an EASYBCI_VERSION header — ie. was emitted
+    by this generator. Hand-written / user-provided scripts (no marker) are
+    preserved as-is by the handlers, never regenerated."""
+    try:
+        head = Path(script_path).read_text(encoding="utf-8")[:1024]
+    except OSError:
+        return False
+    return "EASYBCI_VERSION" in head
+
+
+def script_header_matches(script_path: Path, *, steps: List[Any], analysis_goal: str) -> bool:
+    """True iff the script's EASYBCI_STEPS / EASYBCI_GOAL header matches.
+
+    The header records the canonicalized step list codegen embedded
+    (:func:`canonicalize_steps_for_header`), so a match means the confirmed
+    plan is unchanged and any repair edits in the body must be preserved; a
+    mismatch means the plan changed. Steps compare by
+    :func:`operator_vocab.canonical_step_key`, so ``8.0`` and ``8`` are the
+    same value. The inspection report next to the script
+    (``<work_dir>/middle_process/inspection_report.json``) feeds the same
+    notch override codegen used.
+    """
+    script_path = Path(script_path)
+    try:
+        head = script_path.read_text(encoding="utf-8")[:1024]
+    except OSError:
+        return False
+    inspection_report = None
+    try:
+        # body import: io → codegen cycle
+        from easybci_lib.tools.neural_processing.io.inspection_report import (
+            load_inspection_report,
+        )
+        _insp = script_path.parent.parent / "middle_process" / "inspection_report.json"
+        if _insp.is_file():
+            inspection_report = load_inspection_report(_insp).to_dict()
+    except Exception:  # noqa: BLE001 — absent/unreadable report = no notch override
+        inspection_report = None
+    try:
+        canonical = canonicalize_steps_for_header(list(steps), inspection_report=inspection_report)
+    except Exception:  # noqa: BLE001
+        return False
+    if f"EASYBCI_GOAL: {analysis_goal}" not in head:
+        return False
+    m = re.search(r"^EASYBCI_STEPS: (\[.*\])$", head, re.MULTILINE)
+    if not m:
+        return False
+    try:
+        embedded = ast.literal_eval(m.group(1))
+    except (ValueError, SyntaxError):
+        return False
+    if not isinstance(embedded, list):
+        return False
+    return ([_canonical_step_key(s) for s in embedded]
+            == [_canonical_step_key(s) for s in canonical])
+
+
+_EPOCH_WINDOW_LINE = re.compile(r"^EPOCH_WINDOW = (.*)$", re.MULTILINE)
+
+
+def sync_script_epoch_window(script_path: Path, window: Optional[List[float]]) -> Optional[Dict[str, Any]]:
+    """Rewrite only the ``EPOCH_WINDOW = ...`` line of a generated pipeline.py.
+
+    The window is not part of the EASYBCI_STEPS header, so a script kept for
+    its repair edits can still carry a window older than the confirmed one.
+    Returns ``{"from": old, "to": new}`` when the line changed, else ``None``
+    (no window decision, no version marker, line absent or already equal).
+    """
+    if window is None or not script_has_version_marker(script_path):
+        return None
+    script_path = Path(script_path)
+    try:
+        text = script_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = _EPOCH_WINDOW_LINE.search(text)
+    if not m:
+        return None
+    new = [float(window[0]), float(window[1])]
+    try:
+        old = ast.literal_eval(m.group(1).split("#", 1)[0].strip())
+        old = [float(old[0]), float(old[1])] if old is not None else None
+    except (ValueError, SyntaxError, TypeError, IndexError):
+        old = m.group(1).strip()
+    if old == new:
+        return None
+    line = f"EPOCH_WINDOW = {repr((new[0], new[1]))}"
+    script_path.write_text(text[:m.start()] + line + text[m.end():], encoding="utf-8")
+    return {"from": old, "to": new}
+
+
+def split_epoch_stage_steps(
+    steps: List[Any], warnings: Optional[List[str]] = None,
+) -> tuple[List[Any], Optional[Dict[str, Any]]]:
+    """Separate epoch-stage operators from the continuous step chain.
+
+    ``reject_epochs[:param]`` acts on trials, not on the continuous signal, so
+    it never reaches pipeline.py's ``_apply_step``. Returns
+    ``(continuous_steps, trial_reject_config)``; the config is the default
+    (enabled) when no ``reject_epochs`` step is present and ``None`` when the
+    step says ``reject_epochs:off``. A ``window=a~b`` param lands in
+    ``config["epoch_window"]``; parse problems are appended to ``warnings``.
+    """
+    cont: List[Any] = []
+    cfg: Optional[Dict[str, Any]] = dict(_trial_reject.TRIAL_REJECT_DEFAULTS)
+    for s in steps:
+        if isinstance(s, str) and _step_op(s) == "reject_epochs":
+            cfg = _trial_reject.parse_trial_reject_param(_step_param(s), warnings)
+            continue
+        cont.append(s)
+    return cont, cfg
+
+
 def generate_pipeline_script(
     *,
     steps: List[str],
@@ -2290,6 +3021,8 @@ def generate_pipeline_script(
     modality: str = "eeg",
     analysis_goal: str = "generic",
     inspection_report: Dict[str, Any] | None = None,
+    epoch_window: Optional[List[float]] = None,
+    fallback_segment_duration: float = 2.0,
 ) -> str:
     """Generate the canonical pipeline.py script.
 
@@ -2318,12 +3051,30 @@ def generate_pipeline_script(
     steps_list = canonicalize_steps_for_header(
         list(steps), inspection_report=inspection_report
     )
+    run_steps, trial_reject_cfg = split_epoch_stage_steps(steps_list)
+    # Epoch window precedence: explicit argument > reject_epochs window= >
+    # shared event duration (resolved at runtime) > fallback.
+    _step_window = (trial_reject_cfg or {}).pop("epoch_window", None)
+    _ew = None
+    for _cand in (epoch_window, _step_window):
+        if _cand is None:
+            continue
+        try:
+            _ew = (float(_cand[0]), float(_cand[1]))
+            break
+        except (TypeError, ValueError, IndexError):
+            _ew = None
     body = _PIPELINE_SCRIPT_TEMPLATE.format(
         steps_repr=repr(steps_list),
+        run_steps_repr=repr(run_steps),
         analysis_goal=analysis_goal,
         modality=modality,
         nwb_helpers_block=_NWB_HELPERS_BLOCK,
         already_done_helper=_ALREADY_DONE_HELPER_SRC,
+        trial_reject_block=_trial_reject.inline_source(),
+        trial_reject_repr=repr(trial_reject_cfg),
+        epoch_window_repr=repr(_ew),
+        fallback_epoch_window_repr=repr((-0.2, float(fallback_segment_duration))),
     )
     hints = _format_inspection_hints(inspection_report)
     if hints:
@@ -2673,7 +3424,9 @@ def _compute_metrics(raw_d, proc):
     }}
 
 
-def _write_report(qc_dir, session_id, subject_id, data_path, steps, metrics, stem=""):
+def _write_report(qc_dir, session_id, subject_id, data_path, steps, metrics, stem="",
+                  trials=None, bad_spans=None, status=None, time_sep=None):
+    status = status or {{}}
     payload = {{
         "session_id": session_id,
         "subject_id": subject_id,
@@ -2681,6 +3434,16 @@ def _write_report(qc_dir, session_id, subject_id, data_path, steps, metrics, ste
         "steps": list(steps),
         "metrics": metrics,
     }}
+    if trials:
+        payload["trial_rejection"] = trials
+    if time_sep:
+        payload["time_separability"] = time_sep
+    _notes = {{k: status[k] for k in ("regression_eog", "bad_segments", "pipeline_warnings")
+              if status.get(k)}}
+    if _notes:
+        payload["pipeline_notes"] = _notes
+    if bad_spans:
+        payload["bad_spans_s"] = bad_spans
     prefix = "{{}}_".format(stem) if stem else ""
     (qc_dir / "{{}}qc_report.json".format(prefix)).write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     md = [
@@ -2703,6 +3466,48 @@ def _write_report(qc_dir, session_id, subject_id, data_path, steps, metrics, ste
         "```",
         "",
     ]
+    if trials:
+        rej = trials.get("rejection") or {{}}
+        md += [
+            "## Trial rejection",
+            "",
+            "- Events: {{}} ({{}})".format(trials.get("n_events_total"), trials.get("events_source")),
+            "- Epoch window: {{}} s ({{}})".format(trials.get("epoch_window"), trials.get("epoch_window_source")),
+            "- Kept / rejected: {{}} / {{}}".format(len(trials.get("kept") or []), len(trials.get("rejected") or [])),
+        ]
+        if trials.get("n_out_of_bounds"):
+            md.append("- Outside recording: {{}}".format(trials.get("out_of_bounds_trial_index")))
+        if rej.get("cap_hit"):
+            md.append("- **Rejection cap hit** ({{}} candidates) — data quality is poor overall".format(
+                rej.get("n_candidates")))
+        for c, d in (rej.get("per_class") or {{}}).items():
+            md.append("- class `{{}}`: {{}} -> {{}}".format(c, d.get("before"), d.get("after")))
+        for r in trials.get("rejected") or []:
+            md.append("  - trial {{}} ({{}}): {{}}".format(r.get("trial_index"), r.get("label"), r.get("reason")))
+        md.append("")
+    if _notes:
+        md += ["## Pipeline notes", ""]
+        _re_eog = _notes.get("regression_eog")
+        if _re_eog:
+            if _re_eog.get("applied"):
+                md.append("- regression_eog: reference {{}} ({{}}), {{}} target channel(s)".format(
+                    _re_eog.get("reference_channels"), _re_eog.get("reference_source"),
+                    _re_eog.get("n_targets")))
+                if _re_eog.get("reference_source") == "frontal_proxy":
+                    md.append("  - **No EOG channel: frontal channels used as proxy** — frontal EEG "
+                              "shared with them was removed as well")
+            else:
+                md.append("- regression_eog: **not applied** ({{}})".format(_re_eog.get("reason")))
+        _bs = _notes.get("bad_segments")
+        if _bs:
+            md.append("- reject_bad_segments ({{}}, {{}}): {{}} span(s), {{}} s ({{:.1%}})".format(
+                _bs.get("action"), _bs.get("method"), _bs.get("n_spans"),
+                _bs.get("bad_seconds"), float(_bs.get("bad_fraction") or 0.0)))
+        for w in _notes.get("pipeline_warnings") or []:
+            md.append("- WARN: {{}}".format(w))
+        md.append("")
+    if time_sep:
+        md += [separability_markdown(time_sep)]
     (qc_dir / "{{}}qc_report.md".format(prefix)).write_text("\\n".join(md), encoding="utf-8")
 
 
@@ -2808,7 +3613,31 @@ def _qc_one(work_dir, inp, steps):
     qc_dir.mkdir(parents=True, exist_ok=True)
 
     metrics = _compute_metrics(raw_d, proc)
-    _write_report(qc_dir, "ses-" + ses, sub_id, raw_path, steps, metrics, stem)
+    trials = (_proc_meta or {{}}).get("easybci_trials") if isinstance(_proc_meta, dict) else None
+    _bad_s = (_proc_meta or {{}}).get("bad_spans_s") if isinstance(_proc_meta, dict) else None
+    _status = {{}}
+    try:
+        _sp = work_dir / "middle_process" / "pipeline_status__{{}}.json".format(file_id)
+        if _sp.is_file():
+            _status = json.loads(_sp.read_text(encoding="utf-8"))
+    except Exception:
+        _status = {{}}
+    _ts = None
+    try:
+        if trials and trials.get("kept") and trials.get("epoch_window"):
+            _ts = assess_time_separability(_proc_data, _proc_fs, trials["kept"], trials["epoch_window"])
+            _ts["subject_id"], _ts["session_id"] = sub_id, ses
+            _mp = work_dir / "middle_process"
+            _mp.mkdir(parents=True, exist_ok=True)
+            (_mp / "time_separability__{{}}.json".format(file_id)).write_text(
+                json.dumps(_ts, indent=2, default=str), encoding="utf-8")
+            print("[qc] time separability {{}}: {{}}".format(file_id, _ts.get("status")))
+    except Exception as exc:
+        print("[qc] time separability skipped for {{}}: {{}}".format(file_id, exc), file=sys.stderr)
+        _ts = None
+    _write_report(qc_dir, "ses-" + ses, sub_id, raw_path, steps, metrics, stem, trials=trials,
+                  bad_spans=_bad_s, status=_status, time_sep=_ts)
+    _cache_session_psd(work_dir, inp, _proc_data, _proc_fs, _proc_channels, trials, _bad_s)
 
     return {{
         "file_id": file_id,
@@ -2817,6 +3646,69 @@ def _qc_one(work_dir, inp, steps):
         "grade": metrics["overall"]["grade"],
         "score": None,
     }}
+
+
+def _cache_session_psd(work_dir, inp, data, fs, channels, trials, bad_spans_s=None):
+    """Per-session log-PSD of the curated signal (rejected trials and flagged
+    bad segments excluded), cached under middle_process so skipped / chunked
+    qc runs still feed the cross-session comparison."""
+    try:
+        spans = [(r["start"], r["stop"]) for r in (trials or {{}}).get("rejected") or []]
+        spans += [(int(float(a) * fs), int(np.ceil(float(b) * fs))) for a, b in bad_spans_s or []]
+        freqs, logpsd = session_psd(
+            data, fs, fmin=CONSISTENCY_BAND[0], fmax=CONSISTENCY_BAND[1],
+            notch_hz=NOTCH_HZ, invalid_spans=spans,
+        )
+        if freqs is None:
+            return
+        d = work_dir / "middle_process" / "session_psd"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "{{}}.json".format(inp.get("file_id") or "legacy")).write_text(json.dumps({{
+            "subject_id": inp["subject_id"], "session_id": inp["session_id"],
+            "channels": list(channels), "freqs": freqs.tolist(), "logpsd": logpsd.tolist(),
+        }}), encoding="utf-8")
+    except Exception as exc:
+        print("[qc] session PSD skipped for {{}}: {{}}".format(inp.get("file_id"), exc), file=sys.stderr)
+
+
+def _session_consistency(work_dir, inputs):
+    """Group cached PSDs by subject and compare sessions (WARN only)."""
+    out = {{}}
+    d = work_dir / "middle_process" / "session_psd"
+    by_sub = {{}}
+    for inp in inputs:
+        p = d / "{{}}.json".format(inp.get("file_id") or "legacy")
+        if not p.is_file():
+            continue
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        by_sub.setdefault(rec["subject_id"], {{}})[rec["session_id"]] = (
+            list(rec["channels"]), np.asarray(rec["freqs"]), np.asarray(rec["logpsd"]))
+    for sub_id, sessions in sorted(by_sub.items()):
+        try:
+            rep = assess_consistency(sessions)
+        except Exception as exc:
+            rep = {{"status": "ERROR", "error": "{{}}: {{}}".format(type(exc).__name__, exc), "flags": []}}
+        qc_sub = work_dir / "preprocessed_output" / "QC_out" / "sub-{{}}".format(sub_id)
+        qc_sub.mkdir(parents=True, exist_ok=True)
+        (qc_sub / "session_consistency.json").write_text(json.dumps(rep, indent=2, default=str), encoding="utf-8")
+        if rep.get("status") != "ERROR":
+            (qc_sub / "session_consistency.md").write_text(consistency_markdown(sub_id, rep), encoding="utf-8")
+        out["sub-" + str(sub_id)] = {{
+            "status": rep.get("status"), "n_sessions": rep.get("n_sessions"),
+            "n_flags": len(rep.get("flags") or []), "reason": rep.get("reason"),
+        }}
+        print("[qc] session consistency sub-{{}}: {{}} ({{}} flag(s))".format(
+            sub_id, rep.get("status"), len(rep.get("flags") or [])))
+    return out
+
+
+{session_consistency_block}
+{time_separability_block}
+CONSISTENCY_BAND = {consistency_band_repr}
+NOTCH_HZ = {notch_hz_repr}
 
 
 def main():
@@ -2857,6 +3749,13 @@ def main():
             aggregate["n_failed"] += 1
             print("[qc] FAILED for file_id={{}}: {{}}".format(file_id, exc), file=sys.stderr)
 
+    # Cross-session spectral consistency (per subject, >= 2 sessions).
+    # Never changes the per-file grades; failures are recorded, not raised.
+    try:
+        aggregate["session_consistency"] = _session_consistency(work_dir, inputs)
+    except Exception as exc:
+        aggregate["session_consistency"] = {{"error": "{{}}: {{}}".format(type(exc).__name__, exc)}}
+
     mp = work_dir / "middle_process"
     mp.mkdir(parents=True, exist_ok=True)
     (mp / "qc_status.json").write_text(json.dumps(aggregate, indent=2), encoding="utf-8")
@@ -2870,6 +3769,35 @@ def main():
 if __name__ == "__main__":
     main()
 '''
+
+
+def _consistency_band_from_steps(steps: List[Any]) -> tuple[tuple[float, float], List[float]]:
+    """Spectral band for the cross-session comparison: the pipeline's own
+    bandpass (so filtered-out bands are not compared), default 1-40 Hz; plus
+    the notch frequencies to mask."""
+    lo, hi, notch = 1.0, 40.0, []
+    for s in steps:
+        if not isinstance(s, str):
+            continue
+        op, param = _step_op(s), _step_param(s)
+        parts = [p.strip() for p in param.split(",")]
+        if op == "bandpass" and (len(parts) < 3 or not parts[2]):
+            try:
+                if parts and parts[0]:
+                    lo = max(lo, float(parts[0]))
+                if len(parts) > 1 and parts[1]:
+                    hi = min(float(parts[1]), 200.0)
+            except ValueError:
+                pass
+        elif op == "notch":
+            for p in parts:
+                try:
+                    notch.append(float(p))
+                except ValueError:
+                    continue
+    if hi <= lo + 2:
+        lo, hi = 1.0, 40.0
+    return (lo, hi), notch
 
 
 def generate_qc_script_v2(
@@ -2894,6 +3822,7 @@ def generate_qc_script_v2(
         line_freq = (inspection_report.get("psd_summary") or {}).get("power_line_peak_hz")
         if line_freq:
             steps_list = _override_notch_freq(steps_list, line_freq)
+    band, notch = _consistency_band_from_steps(steps_list)
     body = _QC_SCRIPT_TEMPLATE.format(
         steps_repr=repr(steps_list),
         analysis_goal=analysis_goal,
@@ -2901,6 +3830,10 @@ def generate_qc_script_v2(
         scenario=scenario,
         nwb_loader_block=_NWB_PREPROCESSED_LOADER_BLOCK,
         already_done_helper=_ALREADY_DONE_HELPER_SRC,
+        session_consistency_block=_session_consistency.inline_source(),
+        time_separability_block=_time_separability.inline_source(),
+        consistency_band_repr=repr(band),
+        notch_hz_repr=repr(notch),
     )
     hints = _format_inspection_hints(inspection_report)
     if hints:
@@ -3257,11 +4190,13 @@ def main():
     mp.mkdir(parents=True, exist_ok=True)
     aggregate = {{"stage": "vis", "results": statuses,
                   "any_ok": any(s.get("ok") for s in statuses)}}
+    aggregate["session_consistency_figures"] = _session_consistency_figures(work_dir)
     (mp / "vis_status.json").write_text(
         json.dumps(aggregate, indent=2, default=str), encoding="utf-8")
     sys.exit(0)
 
 
+{session_consistency_fig_block}
 {nwb_loader_block}
 {already_done_helper}
 if __name__ == "__main__":
@@ -3691,15 +4626,71 @@ def main():
     mp.mkdir(parents=True, exist_ok=True)
     aggregate = {{"stage": "vis", "results": statuses,
                   "any_ok": any(s.get("ok") for s in statuses)}}
+    aggregate["session_consistency_figures"] = _session_consistency_figures(work_dir)
     (mp / "vis_status.json").write_text(
         json.dumps(aggregate, indent=2, default=str), encoding="utf-8")
     sys.exit(0)
 
 
+{session_consistency_fig_block}
 {nwb_loader_block}
 {already_done_helper}
 if __name__ == "__main__":
     main()
+'''
+
+
+# Subject-level cross-session figure, shared by both vis templates. Inserted
+# as a format VALUE, so braces here are literal Python.
+_SESSION_CONSISTENCY_FIG_BLOCK = '''
+def _session_consistency_figures(work_dir):
+    """figures/sub-<id>/session_consistency_psd.png from qc.py's report."""
+    out = []
+    qc_root = work_dir / "preprocessed_output" / "QC_out"
+    for rp in sorted(qc_root.glob("sub-*/session_consistency.json")):
+        try:
+            rep = json.loads(rp.read_text(encoding="utf-8"))
+            if rep.get("status") not in ("PASS", "WARN"):
+                continue
+            freqs = np.asarray(rep["freqs"])
+            sess = rep["sessions"]
+            chans = rep["channels"]
+            corr = np.asarray(rep["corr_matrix"])
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4.8),
+                                           gridspec_kw={"width_ratios": [1.1, 1.4]})
+            for s in sess:
+                ax1.plot(freqs, rep["mean_logpsd"][s], label="ses-" + str(s), lw=1.3)
+            ax1.set_xlabel("Frequency (Hz)")
+            ax1.set_ylabel("log10 power (channel mean)")
+            ax1.set_title("Per-session spectrum")
+            ax1.legend(fontsize=8)
+            im = ax2.imshow(corr, aspect="auto", cmap="viridis",
+                            vmin=min(0.8, float(corr.min())), vmax=1.0)
+            ax2.set_yticks(range(len(sess)))
+            ax2.set_yticklabels(["ses-" + str(s) for s in sess], fontsize=8)
+            ax2.set_xticks(range(len(chans)))
+            ax2.set_xticklabels(chans, rotation=90, fontsize=7)
+            thr = (rep.get("params") or {}).get("corr_warn", 0.95)
+            for i in range(corr.shape[0]):
+                for j in range(corr.shape[1]):
+                    if corr[i, j] < thr:
+                        ax2.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False,
+                                                    ec="red", lw=1.6))
+            ax2.set_title("Spectral-shape correlation vs subject median "
+                          "(red: < {:.2f})".format(thr))
+            fig.colorbar(im, ax=ax2, fraction=0.03)
+            fig.suptitle("{} cross-session consistency: {}".format(rp.parent.name, rep["status"]))
+            fig.tight_layout()
+            out_dir = work_dir / "preprocessed_output" / "figures" / rp.parent.name
+            out_dir.mkdir(parents=True, exist_ok=True)
+            fp = out_dir / "session_consistency_psd.png"
+            fig.savefig(fp, dpi=110)
+            plt.close(fig)
+            out.append(str(fp))
+        except Exception as exc:
+            print("[vis] session consistency figure failed for {}: {}".format(rp, exc),
+                  file=sys.stderr)
+    return out
 '''
 
 
@@ -3727,6 +4718,7 @@ def generate_vis_script(
         modality=modality,
         nwb_loader_block=_NWB_PREPROCESSED_LOADER_BLOCK,
         already_done_helper=_ALREADY_DONE_HELPER_SRC,
+        session_consistency_fig_block=_SESSION_CONSISTENCY_FIG_BLOCK,
     )
     hints = _format_inspection_hints(inspection_report) if inspection_report else ""
     if hints:
@@ -3998,6 +4990,46 @@ def _ai_ready_one(work_dir, inp):
 
     data, fs, meta, channels = _load_preprocessed(pre_nwb)
 
+    # pipeline.py already resolved the trials (epoch window + low-quality
+    # trial rejection) and stored the decision in the NWB — epoch exactly the
+    # kept trials so AI_ready and the curated NWB always agree.
+    trials_d = meta.get("easybci_trials") if isinstance(meta, dict) else None
+    if trials_d and trials_d.get("kept") is not None:
+        kept = trials_d.get("kept") or []
+        win = [int(t["stop"]) - int(t["start"]) for t in kept]
+        n_win = min(win) if win else 0
+        epochs = np.asarray(
+            [np.asarray(data[:, int(t["start"]):int(t["start"]) + n_win], dtype=np.float32) for t in kept],
+            dtype=np.float32,
+        ).reshape(len(kept), data.shape[0], n_win)
+        labels = np.asarray([t["label"] for t in kept])
+        trial_index = np.asarray([int(t["trial_index"]) for t in kept], dtype=np.int64)
+        out_dir = work_dir / "preprocessed_output" / "AI_ready" / sub_id / "ses-{{}}".format(ses)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / "{{}}_epochs.pkl".format(stem)
+        payload = {{
+            "epochs": epochs,
+            "labels": labels,
+            "frequency": fs,
+            "channels": channels,
+            "trial_index": trial_index,
+            "epoch_window": trials_d.get("epoch_window"),
+        }}
+        with open(out_file, "wb") as f:
+            pickle.dump(payload, f)
+        rej = trials_d.get("rejection") or {{}}
+        return {{
+            "file_id": file_id,
+            "subject_id": sub_id,
+            "session_id": ses,
+            "n_epochs": int(epochs.shape[0]),
+            "n_classes": int(len(set(labels.tolist()))) if labels.size else 0,
+            "epoch_window": trials_d.get("epoch_window"),
+            "n_trials_rejected": len(trials_d.get("rejected") or []),
+            "reject_cap_hit": bool(rej.get("cap_hit")),
+            "output_file": str(out_file),
+        }}
+
     # Events: prefer routing entry's events_path, fall back to meta.events.
     events = None
     events_path = inp.get("events_path")
@@ -4038,6 +5070,21 @@ def _ai_ready_one(work_dir, inp):
                 labels = _align_continuous_labels(
                     raw_labels, data.shape[1], fs, SEGMENT_DURATION, STRIDE
                 )
+        # reject_bad_segments (mark mode) flagged spans: drop overlapping windows.
+        _bs = meta.get("bad_spans_s") if isinstance(meta, dict) else None
+        if _bs and epochs.shape[0] > 1:
+            _win = int(SEGMENT_DURATION * fs)
+            _st = max(int(STRIDE * fs), 1)
+            _ok = np.asarray([
+                not any(float(b) * fs > k * _st and float(a) * fs < k * _st + _win for a, b in _bs)
+                for k in range(epochs.shape[0])
+            ], dtype=bool)
+            if _ok.any() and not _ok.all():
+                print("[ai_ready] dropped {{}} window(s) overlapping bad segments".format(
+                    int((~_ok).sum())))
+                epochs = epochs[_ok]
+                if labels is not None and len(labels) == len(_ok):
+                    labels = np.asarray(labels)[_ok]
 
     # AI_ready uses bare subject_id (no "sub-" prefix) — ML convention.
     out_dir = work_dir / "preprocessed_output" / "AI_ready" / sub_id / "ses-{{}}".format(ses)

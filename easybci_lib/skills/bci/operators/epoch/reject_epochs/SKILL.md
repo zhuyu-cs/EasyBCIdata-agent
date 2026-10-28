@@ -1,63 +1,80 @@
 ---
 name: reject_epochs
-description: "Criterion-based epoch rejection"
+description: "Adaptive low-quality trial rejection (robust z per channel, capped)"
 layer: L3
 group: epoch
 metadata:
-  tags: [operator, epoching, reject_epochs]
+  tags: [operator, epoching, reject_epochs, trial_qc]
   modalities: [eeg, seeg, ecog, meg]
   step_string: "reject_epochs"
   analysis_goal_allowed: [classification, source_localization, feature_extraction, clinical_screening, exploratory, generic, connectivity, phase_amplitude_coupling]
   analysis_goal_forbidden: [online_inference]
 ---
-# Criterion-based epoch rejection
+# Adaptive low-quality trial rejection
 
 ## Function
 
-Drop epochs that violate explicit, user-supplied criteria: absolute amplitude, peak-to-peak within a moving window, per-channel-type thresholds, robust outlier statistics, monitor-channel steps, or an explicit index list.
+Delete trials whose signal is an outlier **for their own channels**. Runs by
+default whenever the recording has trial events — no step needed. The step
+only exists to tune or disable it.
+
+It is an epoch-stage operator: codegen strips it from the continuous step
+chain and configures the trial-QC block of `pipeline.py`, which runs after all
+continuous steps (filters, re-reference, channel drops).
 
 ## Parameter Format
 
-`reject_epochs:{criteria},{method},{indices}`
+| Step | Meaning |
+|------|---------|
+| *(absent)* / `reject_epochs` / `reject_epochs:auto` | defaults below |
+| `reject_epochs:off` | keep every trial (epoch window still resolved) |
+| `reject_epochs:z=5,multi=3.5,min_ch=2,max_frac=0.2,min_trials=10` | tuned |
+| `reject_epochs:window=3.5~7.0` (also `window=3.5,7.0`) | set the epoch window here (overrides event duration; an explicit plan_pipeline `epoch_window` still wins) |
 
-## Parameters
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `z` | 5.0 | one channel above this robust z rejects the trial |
+| `multi` | 3.5 | ... or at least `min_ch` channels above this |
+| `min_ch` | 2 | channel count for the `multi` rule |
+| `max_frac` | 0.2 | cap on statistically rejected trials; worst-first when exceeded (`cap_hit`) |
+| `min_trials` | 10 | below this only hard checks run |
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `criteria` | varies | — | list of {type, threshold, window_ms, channels/ch_type} |
-| `method` | varies | — | fixed_threshold | peak_to_peak | esd_outlier | manual_visual | manual_index |
-| `indices` | varies | — | explicit epochs to drop when method = manual_index |
-| `individualized` | varies | — | whether the thresholds were tuned per subject rather than fixed across the dataset |
-| `monitor_channels` | varies | — | the channels the criterion is evaluated on, when it is a subset of the recording rather than all of it |
+## Algorithm
 
-## When to Use
+1. **Hard rejections** (uncapped): non-finite samples in the window; a channel
+   flat in this trial but live in most trials; per-trial artifact / invalid /
+   missing flags shipped with the recording.
+2. **Features** per trial × channel: peak-to-peak and log-variance.
+3. **Robust z** per channel across trials: `(x − median) / (1.4826·MAD)`,
+   one-sided. Each channel is normalised by its own distribution, so a channel
+   noisy in every trial (e.g. frontal blinks) raises its own baseline instead
+   of condemning all trials — fixed µV thresholds fail exactly there.
+4. Reject when `max z > z` or `#channels(z > multi) ≥ min_ch`.
+5. Cap at `floor(max_frac · n)`; report `cap_hit` + candidate count instead of
+   silently deleting more.
 
-Refer to the reference pipelines that use this operator — it fills a gap that no existing registry operator covers.
+## Epoch window
 
-## Ordering
+Resolved in the same block: explicit `epoch_window` (plan_pipeline arg, or
+the label-dependent span of `dataset_understanding.trial_timeline`) →
+`reject_epochs:window=` → shared trial duration (`[0, duration]`) → fallback
+`[-0.2, segment_duration]`. Trials falling outside the recording are counted
+(`n_out_of_bounds`), never dropped silently. A recording without trial
+events (any modality) is left continuous — no window, no trial QC.
 
-- Apply AFTER: `epoch`, `baseline_correct`
+## Outputs
 
-## Relationship to Existing Operators
+- Curated NWB: `trials` table = kept trials (`label`, `trial_index`);
+  `invalid_times` = rejected trials with `reason`; scratch `easybci_trials`
+  holds the full decision. The continuous signal is not cut.
+- `AI_ready/*_epochs.pkl`: kept trials only, plus `trial_index` and
+  `epoch_window`.
+- `middle_process/trial_rejection__<file_id>.json`, a "Trial rejection"
+  section in each QC report, and a `trial_rejection` block in the tool return.
 
-**Nearest:** `adaptive_cleaning/autoreject`
+## When to tune
 
-autoreject chooses its thresholds itself by cross-validated grid search and interpolates up to n_interpolate channels per epoch; it cannot be given the paper's threshold, cannot express a peak-to-peak-in-200-ms or an EOG-step criterion, and cannot drop a named trial index. It is used in these files only where the paper actually ran AutoReject.
-
-## Reference Code
-
-```python
-def reject_epochs(d, criteria=None, method="fixed_threshold", indices=None, **_):
-    x = np.asarray(d["data"]); bad = set(int(i) for i in (indices or []))
-    if method != "manual_index":
-        criteria = criteria or []
-        for i, ep in enumerate(x):
-            for c in criteria:
-                z = ep
-                if c.get("channels"):
-                    names = _names(d, ep.shape[0]); z = ep[[names.index(k) for k in c["channels"] if k in names]]
-                val = np.ptp(z, axis=-1).max() if c.get("type") in ("peak_to_peak", "ptp") else np.abs(z).max()
-                if val > float(c.get("threshold", np.inf)): bad.add(i); break
-    keep = [i for i in range(len(x)) if i not in bad]
-    return _out(d, x[keep], "reject_epochs", dropped_epochs=sorted(bad), kept_indices=keep)
-```
+- `cap_hit` → the whole recording is noisy or a bad channel survived: fix
+  channels first (`drop_bads:auto,<name>`), then reconsider `max_frac`.
+- `class_imbalance_warning` → one condition lost > 50 % of trials; tell the user.
+- Very short recordings (< `min_trials`) → only hard checks apply.

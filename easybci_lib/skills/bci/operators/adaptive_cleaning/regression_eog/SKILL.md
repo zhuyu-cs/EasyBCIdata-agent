@@ -6,7 +6,7 @@ group: adaptive_cleaning
 metadata:
   tags: [operator, adaptive_cleaning, regression, eog, gratton, fast, online]
   modalities: [eeg, meg]
-  step_string: "regression_eog"
+  step_string: "regression_eog:auto"
   analysis_goal_allowed: [classification, source_localization, feature_extraction, clinical_screening, exploratory, generic, connectivity, online_inference]
   analysis_goal_forbidden: []
 ---
@@ -33,12 +33,22 @@ per band.
 
 ## Parameter Format & Defaults
 
-`regression_eog:{eog_ch}`
+`regression_eog[:auto|<ch1>,<ch2>,...]` — runs in the generated `pipeline.py`.
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `eog_ch` | str | "EOG" | EOG channel substring. |
-| `band` (kw) | tuple | None | Optional per-band regression. |
+| Parameter | Default | Description |
+|---|---|---|
+| reference channels | `auto` | Explicit names (`regression_eog:VEOG,HEOG`), or `auto`. |
+
+Reference resolution (`auto`): EOG-typed / EOG-named channels → frontal-pole
+proxy (Fp1/Fp2/Fpz/AF7/AF8, with a warning in `pipeline_status` and the QC
+report: frontal EEG shared with the proxy is removed too) → none: the step
+changes nothing and warns loudly (never silent).
+
+Least-squares with intercept; normal equations accumulated chunk-wise in
+float64 (bounded memory). Reference channels are left unchanged; drop them
+afterwards with `drop_nondata_channels:data_only` when they are EOG.
+Result in `pipeline_status.regression_eog`
+(`applied`, `reference_source`, `reference_channels`, `n_targets`).
 
 ## Modality-Specific Considerations
 

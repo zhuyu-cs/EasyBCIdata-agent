@@ -1839,10 +1839,19 @@ def terminal_tool(
                     except ValueError:
                         _rel = _Path(_script).name
                     return json.dumps({
+                        "output": "",
+                        "exit_code": -1,
+                        "status": "blocked",
                         "error": (
                             f"workflow_compliance: refusing to execute '{_rel}' "
                             f"inside work_dir '{_wd}' — script lacks EASYBCI_STEPS "
                             "marker (not produced by the tool chain)."
+                        ),
+                        "next_action": (
+                            "invoke the tool that renders this work_dir's code "
+                            "(e.g. assemble_and_train_decoder) so scripts carry "
+                            "the EASYBCI_STEPS header, or Edit an existing "
+                            "tool-generated script in place (its header is preserved)."
                         ),
                         "work_dir": str(_wd),
                         "target": _rel,
@@ -1865,10 +1874,19 @@ def terminal_tool(
         # a timeout above FOREGROUND_MAX_TIMEOUT — nudge it toward background.
         if not background and timeout and timeout > FOREGROUND_MAX_TIMEOUT:
             return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "status": "blocked",
                 "error": (
                     f"Foreground timeout {timeout}s exceeds the maximum of "
                     f"{FOREGROUND_MAX_TIMEOUT}s. Use background=true with "
                     f"notify_on_complete=true for long-running commands."
+                ),
+                "next_action": (
+                    "re-invoke terminal with background=true and "
+                    "notify_on_complete=true, or use the tool designed for "
+                    "long-running training (assemble_and_train_decoder) which "
+                    "sets its own subprocess timeout + heartbeat."
                 ),
             }, ensure_ascii=False)
 

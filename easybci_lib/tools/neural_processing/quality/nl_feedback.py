@@ -367,9 +367,9 @@ def _analyze_artifacts(
                 ),
                 RemediationOption(
                     id=_next_id(counter),
-                    label="Reject bad epochs",
-                    description="Mark and exclude contaminated time windows from analysis",
-                    steps_to_add=["reject_epochs:amplitude"],
+                    label="Reject bad trials",
+                    description="Drop trials whose amplitude/variance is an outlier for their channels (adaptive robust z)",
+                    steps_to_add=["reject_epochs:auto"],
                 ),
             ],
         ))

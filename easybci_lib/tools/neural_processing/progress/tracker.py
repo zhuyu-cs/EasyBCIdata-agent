@@ -11,10 +11,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-StageName = Literal["plan", "codegen", "preprocess", "qc"]
+StageName = Literal["plan", "codegen", "preprocess", "qc", "train", "evaluate"]
 ConfidenceLevel = Literal["high", "medium", "low", "unknown"]
 
-_VALID_STAGES: tuple[str, ...] = ("plan", "codegen", "preprocess", "qc")
+_VALID_STAGES: tuple[str, ...] = ("plan", "codegen", "preprocess", "qc", "train", "evaluate")
 _VALID_CONFIDENCE: tuple[str, ...] = ("high", "medium", "low", "unknown")
 
 
@@ -67,11 +67,11 @@ class StageProgress:
         }
 
 
-_STAGE_ORDER: Sequence[StageName] = ("plan", "codegen", "preprocess", "qc")
+_STAGE_ORDER: Sequence[StageName] = ("plan", "codegen", "preprocess", "qc", "train", "evaluate")
 
 
 class StagedProgressTracker:
-    """Owns the four-stage progress lifecycle for one session.
+    """Owns the staged progress lifecycle for one session.
 
     Construction-time invariants:
     - exactly one `on_progress` callback; called synchronously on every emit

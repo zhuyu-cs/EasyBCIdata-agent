@@ -2,7 +2,8 @@
 
 Used by source_data_guard / approval to identify which paths a shell command
 would write to. Supports the standard write commands (rm/mv/cp/sed -i/tee/
-mkdir/touch/chmod/chown/tar -x/unzip) plus > / >> redirects.
+mkdir/touch/chmod/chown/tar -x/unzip) plus > / >> redirects, per simple command
+of a compound command line (&&, ||, ;, |, &, newline).
 
 For non-recognized commands or shell features (eval, $(...) substitution,
 pipelines that embed writes), returns an empty list — the caller should apply
@@ -143,8 +144,62 @@ def _split_redirects(tokens: list[str]) -> tuple[list[str], list[str]]:
     return cleaned, redirects
 
 
+_CONTROL_OPERATORS: frozenset[str] = frozenset({"&&", "||", ";", "|", "&", "\n", ";;", "|&"})
+
+
+def _tokenize(cmd: str) -> list[str]:
+    """POSIX tokens with control operators split out as their own tokens.
+
+    Newline is a command separator, so it is a punctuation char rather than
+    whitespace. Quoted operators stay inside their word.
+    """
+    lexer = shlex.shlex(cmd, posix=True, punctuation_chars="();<>|&\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    return list(lexer)
+
+
+def _split_simple_commands(tokens: list[str]) -> list[list[str]]:
+    """Split a token stream into simple commands at control operators."""
+    out: list[list[str]] = [[]]
+    for tok in tokens:
+        if tok in _CONTROL_OPERATORS:
+            if out[-1]:
+                out.append([])
+            continue
+        out[-1].append(tok)
+    return [c for c in out if c]
+
+
+def _drop_fd_redirects(tokens: list[str]) -> list[str]:
+    """Remove fd-duplication forms (``2>&1``, ``>&2``) and bare fd digits
+    that precede a redirect operator; ``2>`` / ``&>`` keep their target."""
+    cleaned: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.isdigit() and i + 1 < len(tokens) and tokens[i + 1] in (">", ">>", ">&", "<"):
+            i += 1
+            continue
+        if t == ">&" and i + 1 < len(tokens) and tokens[i + 1].isdigit():
+            i += 2
+            continue
+        if t in ("&>", "&>>", ">&"):
+            cleaned.append(">")
+            i += 1
+            continue
+        cleaned.append(t)
+        i += 1
+    return cleaned
+
+
 def extract_write_targets(cmd: str, cwd: str | None = None) -> list[str]:
     """Return resolved write-target paths the shell command would touch.
+
+    Compound commands (``&&``, ``||``, ``;``, ``|``, ``&``, newline) are split
+    into simple commands and each is analysed on its own, so a read command
+    chained after a write (``mkdir -p A && ls B``) does not turn ``B`` into a
+    write target.
 
     Empty list when no recognized write happens, when parsing fails, or when
     the command uses shell features that defeat static analysis (subshells,
@@ -154,17 +209,18 @@ def extract_write_targets(cmd: str, cwd: str | None = None) -> list[str]:
         return []
 
     try:
-        tokens = shlex.split(cmd, posix=True)
+        tokens = _tokenize(cmd)
     except ValueError:
         return []
     if not tokens:
         return []
 
-    cleaned, redirects = _split_redirects(tokens)
-    targets: list[str] = [_resolve(r, cwd) for r in redirects if _is_path_like(r)]
-
-    if cleaned:
-        targets.extend(_extract_from_simple_cmd(cleaned, cwd))
+    targets: list[str] = []
+    for simple in _split_simple_commands(tokens):
+        cleaned, redirects = _split_redirects(_drop_fd_redirects(simple))
+        targets.extend(_resolve(r, cwd) for r in redirects if _is_path_like(r))
+        if cleaned:
+            targets.extend(_extract_from_simple_cmd(cleaned, cwd))
 
     seen: set[str] = set()
     deduped: list[str] = []

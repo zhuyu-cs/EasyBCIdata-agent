@@ -60,6 +60,10 @@ Paste `completion_block` **VERBATIM** — including Storage Footprint (raw → p
 
 If `label_diagnostics.suspicious_count > 0`: surface suspicious labels, suggest `extra_reject_keywords` for re-run.
 
+If the return carries `trial_rejection` / `session_consistency`: present kept vs
+rejected trials per session and the cross-session status; on `WARN` name the
+flagged session/channel and the likely cause, and let the user decide.
+
 ## Step 6 — EXPERIENCE (Reuse Mode)
 
 `skill_manage(action="patch", name=<existing proven name>, ...)` — append ONE row to Reuse History table.
@@ -76,3 +80,4 @@ If `label_diagnostics.suspicious_count > 0`: surface suspicious labels, suggest 
 - **Adaptation is per-file** — bad channels, notch frequencies, resample targets, reject segments recomputed from each file's inspection. Only step skeleton (operators + order) is locked.
 - **`research_preprocessing`/`research_parameter` auto-suppressed** under Reuse Mode (returns `suppressed=true`). Not an error.
 - **Per-Step Rationale from proven skill must be copied verbatim** — do NOT paraphrase. They pass unchanged to `export_repo`.
+- **Epoch window travels with the proven skill** (`metadata.epoch_window`). If this dataset's `dataset_context` docs / timing_hints describe a different trial timeline, say so in the preview and ask the user before running. A skill without `epoch_window` (`epoch_window_warning: proven_skill_has_no_window`) falls back to the event duration — tell the user.

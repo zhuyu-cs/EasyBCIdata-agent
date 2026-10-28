@@ -301,8 +301,12 @@ steps:
   - "scale:robust"
 segment:
   method: "event"
-  pre_event_s: 1.0
-  post_event_s: 5.0
+  # Window rule (not a fixed contract):
+  #   events mark the imagery cue      -> default [0.5, 4.0] s after the cue
+  #   events mark the trial START      -> take the imagery/task phase from the
+  #                                       dataset's timeline (docs / metadata)
+  #   pre-cue fixation / cue phases    -> never in the feature window; use them
+  #                                       only as an ERD baseline
   baseline_window_s: [-1.0, 0.0]
 features:
   type: "csp+log_bandpower"
@@ -313,10 +317,11 @@ classifier:
   shrinkage: "auto"
 ```
 
-LLM rendering: when the user says "preprocess this MI EEG with subject A",
-the LLM should produce *exactly* the steps + segmentation contract above
-(modulo subject-specific cohort tag) — the operator selection is the
-recommendation, the segmentation is the contract.
+LLM rendering: the operator list is the recommendation; the epoch window
+follows the rule above and must state its basis in
+plan_pipeline(epoch_window_basis=...). A window that includes fixation/cue
+phases dilutes ERD features (seen in practice: 7 s trial-start window vs the
+3.5 s task window cost ~10 accuracy points with the same CSP+LDA).
 
 ## References
 

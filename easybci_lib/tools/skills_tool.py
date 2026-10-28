@@ -622,6 +622,35 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     return skills
 
 
+def _operator_runnability(step_string: str) -> Dict[str, Any]:
+    """Whether the generated pipeline.py can execute this operator.
+
+    Computed from the operator vocabulary (not the SKILL.md) so a documented
+    but unimplemented operator is flagged before it reaches a proposal.
+    """
+    try:
+        from easybci_lib.tools.neural_processing.preprocess.operator_vocab import (
+            check_runnable,
+        )
+    except Exception:  # noqa: BLE001 — neural stack absent in light installs
+        return {}
+    op = (step_string or "").split(":", 1)[0].strip()
+    if not op:
+        return {}
+    problems = check_runnable([op])
+    if not problems:
+        return {"runnable": True}
+    p = problems[0]
+    info: Dict[str, Any] = {
+        "runnable": False,
+        "runnable_reason": p["reason"],
+        "substitutes": p.get("substitutes") or [],
+    }
+    if p.get("note"):
+        info["runnable_note"] = p["note"]
+    return info
+
+
 def _extract_operator_signature(content: str, frontmatter: Dict[str, Any]) -> str:
     """Extract a compact parameter table from an L3 operator SKILL.md.
 
@@ -1503,15 +1532,18 @@ def skill_view(
         )
         if _is_l3_operator and not file_path:
             sig = _extract_operator_signature(rendered_content, frontmatter)
+            _step_string = (frontmatter.get("metadata") or {}).get("step_string", "")
+            _runnable_info = _operator_runnability(_step_string or skill_name)
             return json.dumps({
                 "success": True,
                 "name": skill_name,
                 "description": frontmatter.get("description", ""),
                 "mode": "signature",
-                "step_string": (frontmatter.get("metadata") or {}).get("step_string", ""),
+                "step_string": _step_string,
                 "modalities": (frontmatter.get("metadata") or {}).get("modalities", []),
                 "tags": tags,
                 "parameters": sig,
+                **_runnable_info,
                 "full_available": True,
                 "hint": "Pass file_path='SKILL.md' to skill_view for the full operator documentation.",
             }, ensure_ascii=False)

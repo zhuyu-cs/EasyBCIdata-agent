@@ -8,7 +8,7 @@ import os
 import threading
 from pathlib import Path
 
-from easybci_agent.file_safety import get_read_block_error
+from easybci_agent.file_safety import get_read_allowlist_error, get_read_block_error
 from easybci_lib.tools.binary_extensions import has_binary_extension
 from easybci_lib.tools.file_operations import (
     ShellFileOperations,
@@ -479,6 +479,19 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         if block_error:
             return json.dumps({"error": block_error})
 
+        # ── Persona-scoped read allowlist ──────────────────────────────
+        # Optional hook installed by a toolset (e.g. the algorithm agent's
+        # skill_compliance_guard) to constrain reads to a per-persona set of
+        # paths — its own work_dirs, user-declared data paths, and a small
+        # hardcoded allowlist. Absent a hook this is a no-op.
+        allowlist_error = get_read_allowlist_error(path)
+        if allowlist_error:
+            return json.dumps({
+                "error": allowlist_error,
+                "path": path,
+                "blocked_by": "read_allowlist_hook",
+            }, ensure_ascii=False)
+
         # ── Source data read barrier ──────────────────────────────────
         # Raw data files (registered via inspect_data / deep_inspect) must
         # never enter LLM context. The LLM sees only structured fingerprints.
@@ -496,15 +509,23 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         # well-known no-extension doc filenames) and does NOT cover
         # `.txt` / `.csv` / `.tsv` / `.json` etc., which are the formats
         # events / labels / manifests are typically exported to.
+        # Documentation files registered by the dataset survey (any text
+        # format, incl. .txt / .html) are also exempt and marked as read.
         try:
-            from easybci_agent.source_data_guard import is_source_data, is_inside_protected_dir
+            from easybci_agent.source_data_guard import (
+                is_inside_protected_dir,
+                is_readable_doc,
+                is_source_data,
+                mark_doc_read,
+            )
             _resolved_str_guard = str(_resolved)
             _docs_exts = {".md", ".rst", ".markdown"}
             _docs_stems = {"readme", "license", "licence", "changelog",
                            "contributing", "authors", "notice"}
             _ext_lc = _resolved.suffix.lower()
             _stem_lc = _resolved.stem.lower()
-            _is_doc_file = _ext_lc in _docs_exts or _stem_lc in _docs_stems
+            _is_registered_doc = is_readable_doc(_resolved_str_guard)
+            _is_doc_file = _ext_lc in _docs_exts or _stem_lc in _docs_stems or _is_registered_doc
             if not _is_doc_file and (
                 is_source_data(_resolved_str_guard)
                 or is_inside_protected_dir(_resolved_str_guard)
@@ -520,6 +541,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                     "path": path,
                     "blocked_by": "source_data_read_barrier",
                 }, ensure_ascii=False)
+            if _is_registered_doc:
+                mark_doc_read(_resolved_str_guard)
         except ImportError:
             pass
 
@@ -839,6 +862,16 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
         return tool_error(sensitive_err)
+    try:
+        from easybci_agent.file_safety import get_write_allowlist_error
+        allow_err = get_write_allowlist_error(path)
+    except Exception:
+        allow_err = None
+    if allow_err:
+        return json.dumps(
+            {"error": allow_err, "blocked_by": "write_allowlist_hook"},
+            ensure_ascii=False,
+        )
     if _is_internal_file_status_text(content):
         return tool_error(
             "Refusing to write internal read_file status text as file content. "
@@ -907,6 +940,17 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
         sensitive_err = _check_sensitive_path(_p, task_id)
         if sensitive_err:
             return tool_error(sensitive_err)
+    try:
+        from easybci_agent.file_safety import get_write_allowlist_error
+        for _p in _paths_to_check:
+            allow_err = get_write_allowlist_error(_p)
+            if allow_err:
+                return json.dumps(
+                    {"error": allow_err, "blocked_by": "write_allowlist_hook"},
+                    ensure_ascii=False,
+                )
+    except Exception:
+        pass
     try:
         # Resolve paths for locking.  Ordered + deduplicated so concurrent
         # callers lock in the same order — prevents deadlock on overlapping
@@ -1029,11 +1073,36 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
                 "already_searched": count,
             }, ensure_ascii=False)
 
+        # ── Persona-scoped read allowlist — search-root gate ──────────
+        # Refuse the search entirely if the requested root is outside the
+        # active persona's allowlist. Prevents grep recursion into paths the
+        # persona is not allowed to read (e.g. algorithm-agent recursing into
+        # its own tool source tree via a broad path=".").
+        root_allowlist_error = get_read_allowlist_error(path)
+        if root_allowlist_error:
+            return json.dumps({
+                "error": root_allowlist_error,
+                "path": path,
+                "blocked_by": "read_allowlist_hook",
+            }, ensure_ascii=False)
+
         file_ops = _get_file_ops(task_id)
         result = file_ops.search(
             pattern=pattern, path=path, target=target, file_glob=file_glob,
             limit=limit, offset=offset, output_mode=output_mode, context=context
         )
+        # ── Persona-scoped read allowlist — per-match filtering ───────
+        # Even when the search root is allowed, individual hits (through
+        # symlinks or wide file_glob) may resolve into refused paths. Drop
+        # those matches before they reach the LLM.
+        if hasattr(result, 'matches'):
+            _filtered = []
+            for m in result.matches:
+                fp = getattr(m, 'file', None) or getattr(m, 'path', None) or ""
+                if fp and get_read_allowlist_error(str(fp)):
+                    continue
+                _filtered.append(m)
+            result.matches = _filtered
         # ── Source data content redaction ─────────────────────────────
         # Strip match content from source data files so raw data never
         # enters LLM context via grep results.

@@ -468,14 +468,31 @@ def _step_clip(d: Dict, param: str) -> Dict:
 
 
 def _step_fill_nan(d: Dict, param: str) -> Dict:
-    """Replace non-finite values."""
-    fill_val = float(param) if param else 0.0
+    """Replace non-finite values: ``linear`` interpolates per channel (edges
+    held, all-non-finite channel → 0); a number or empty fills a constant."""
+    p = (param or "").strip().lower()
     data = d["data"]
     mask = ~np.isfinite(data)
     n_bad = np.count_nonzero(mask)
-    if n_bad > 0:
-        logger.warning("Replacing %d non-finite values with %s", n_bad, fill_val)
-        d["data"] = np.nan_to_num(data, nan=fill_val, posinf=fill_val, neginf=fill_val)
+    if n_bad == 0:
+        return d
+    if p in ("linear", "interp", "interpolate"):
+        logger.warning("Interpolating %d non-finite values (linear)", n_bad)
+        out = np.array(data, dtype=np.float64)
+        for r in range(out.shape[0]):
+            bad = mask[r]
+            if not bad.any():
+                continue
+            good = ~bad
+            if good.any():
+                out[r, bad] = np.interp(np.flatnonzero(bad), np.flatnonzero(good), out[r, good])
+            else:
+                out[r, bad] = 0.0
+        d["data"] = out.astype(np.asarray(data).dtype, copy=False)
+        return d
+    fill_val = 0.0 if p in ("", "constant", "zero") else float(p)
+    logger.warning("Replacing %d non-finite values with %s", n_bad, fill_val)
+    d["data"] = np.nan_to_num(data, nan=fill_val, posinf=fill_val, neginf=fill_val)
     return d
 
 

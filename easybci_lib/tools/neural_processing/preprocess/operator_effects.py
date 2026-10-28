@@ -56,6 +56,14 @@ OPERATOR_EFFECTS: dict[str, str] = {
         "automatically remove typical artifact components (EOG / EMG / ECG), "
         "preserving the neural source contributions."
     ),
+    "regression_eog": (
+        "Regress the EOG reference channel(s) out of every data channel by "
+        "least squares, removing blink / saccade leakage without ICA."
+    ),
+    "reject_bad_segments": (
+        "Flag gross-artifact spans of the continuous signal; overlapping "
+        "trials are rejected and the spans are recorded as invalid times."
+    ),
     "drop_bads": (
         "Drop electrodes marked as bad channels to prevent localized noise "
         "from polluting downstream steps."

@@ -86,3 +86,13 @@ plan:
 
 resume:
   phase_hint_line: "恢复阶段：{facts}"
+
+epoch_window:
+  section_understanding: "数据集理解"
+  section_window: "Epoch 时间窗"
+  no_understanding: "未提供数据集理解。"
+  unread_docs: "规划前未读的数据文档：{paths}"
+  runtime_resolved: "未设置——运行时按事件时长确定（兜底 [-0.2, segment_duration]）"
+  not_applicable: "不适用——连续记录，无试次事件，不做 epoch 切窗"
+  warn_no_data_basis: "时间窗没有数据文档或元数据依据——请确认。"
+  warn_label_independent: "时间窗包含各类别相同的阶段：{phases}"

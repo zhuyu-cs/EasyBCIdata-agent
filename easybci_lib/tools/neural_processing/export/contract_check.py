@@ -32,6 +32,7 @@ except Exception:  # noqa: BLE001
 logger = logging.getLogger(__name__)
 
 from easybci_lib.tools.neural_processing.export.layout_spec import CANONICAL as _LAYOUT
+from easybci_lib.tools.neural_processing.quality.trial_reject import normalize_epoch_window
 
 # Preserved public names for legacy readers; both consumers already grep
 # by these identifiers. New code must import from layout_spec directly.
@@ -740,6 +741,8 @@ def _gather_profile(work_dir: Path) -> Dict[str, Any]:
         "web_evidence_used": False,
         "web_evidence_refs": [],
         "source_run_path": str(work_dir),
+        "epoch_window": None,
+        "epoch_window_source": None,
     }
     cfg = _load_yaml(work_dir / "plan" / "config.yaml")
     if cfg:
@@ -776,6 +779,10 @@ def _gather_profile(work_dir: Path) -> Dict[str, Any]:
         refs = pr.get("web_evidence_refs") or pr.get("web_evidence", {}).get("refs")
         if isinstance(refs, list):
             profile["web_evidence_refs"] = refs
+        _ew = normalize_epoch_window(pr.get("epoch_window"))
+        if _ew is not None:
+            profile["epoch_window"] = _ew
+            profile["epoch_window_source"] = pr.get("epoch_window_source") or None
         if not _src_path:
             _src_path = (
                 (pr.get("input_path") or "").strip()
@@ -827,6 +834,14 @@ def _gather_profile(work_dir: Path) -> Dict[str, Any]:
         profile["step_params"] = _extract_step_params(
             work_dir / "plan" / "proposal.json", profile["steps"]
         )
+    if profile["epoch_window"] is None:
+        for _src in (work_dir / "middle_process" / "proposal.confirmed", work_dir / "plan" / "proposal.json"):
+            _obj = _load_json(_src)
+            _ew = normalize_epoch_window((_obj or {}).get("epoch_window"))
+            if _ew is not None:
+                profile["epoch_window"] = _ew
+                profile["epoch_window_source"] = (_obj or {}).get("epoch_window_source") or None
+                break
     return profile
 
 
@@ -921,6 +936,16 @@ def _render_skill_md(name: str, profile: Dict[str, Any], grade: str, date_str: s
 
     step_string = "→".join(steps) if steps else ""
 
+    _ew = profile.get("epoch_window")
+    _ew_meta = ""
+    _ew_body = ""
+    if _ew:
+        _ew_meta = f"\n  epoch_window: [{float(_ew[0])}, {float(_ew[1])}]"
+        if profile.get("epoch_window_source"):
+            _ew_meta += f"\n  epoch_window_source: {profile['epoch_window_source']}"
+        _ew_body = (f"\n\nEpoch window: `[{float(_ew[0])}, {float(_ew[1])}]` s "
+                    f"({profile.get('epoch_window_source') or 'unspecified'})")
+
     # Reference-import extension (optional; absent for auto-crystallized skills).
     _source_kind = profile.get("source_kind")
     _extra_meta = ""
@@ -986,7 +1011,7 @@ metadata:
   web_evidence_used: {str(web_used).lower()}
   version: 1
   auto_crystallized: {("false" if _source_kind else "true")}
-  proven_date: "{date_str}"{_extra_meta}
+  proven_date: "{date_str}"{_ew_meta}{_extra_meta}
 ---
 
 # Proven Pipeline: {mod} {par} ({nch}ch @ {freq}Hz)
@@ -1012,7 +1037,7 @@ metadata:
 ## Pipeline Steps
 ```
 {chain}
-```
+```{_ew_body}
 
 ### Per-Step Rationale
 {rationale_block}

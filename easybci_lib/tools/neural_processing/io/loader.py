@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
+from easybci_lib.tools.neural_processing.io import mat_struct_loader as _mat_struct_loader
 from easybci_lib.tools.neural_processing.io.validators import validate_loaded_data
 
 logger = logging.getLogger(__name__)
@@ -1239,8 +1240,16 @@ def _build_nwb_content_index(f) -> Dict[str, Any]:
 
 
 def _load_mat(filepath: str, inspect_only: bool = False) -> Dict[str, Any]:
-    """Load from MATLAB .mat file (FieldTrip or EEGLAB structure)."""
+    """Load from MATLAB .mat file (struct container, FieldTrip or EEGLAB structure)."""
     import scipy.io
+
+    # Vendor exports that bundle signal + metadata in one top-level struct.
+    # The struct loader excludes EEGLAB/FieldTrip layouts, so it runs first.
+    try:
+        if _mat_struct_loader.matches(filepath):
+            return _mat_struct_loader.load(filepath, inspect_only=inspect_only)
+    except Exception as exc:  # noqa: BLE001 — fall through to the legacy readers
+        logger.warning("struct .mat reader failed for %s: %s", filepath, exc)
 
     try:
         mat = scipy.io.loadmat(filepath, squeeze_me=True)
@@ -1330,6 +1339,7 @@ def _load_mat(filepath: str, inspect_only: bool = False) -> Dict[str, Any]:
         if key.lower() in ("srate", "fs", "fsample", "frequency", "sfreq", "sampling_rate"):
             frequency = float(val)
 
+    degraded_reasons: List[str] = []
     if data_arr is None:
         # Try any array (1D, 3D) as a last resort
         for key, val in mat.items():
@@ -1344,6 +1354,7 @@ def _load_mat(filepath: str, inspect_only: bool = False) -> Dict[str, Any]:
         if data_arr is None:
             logger.warning("No suitable data array found in %s — returning empty.", filepath)
             data_arr = np.zeros((1, 0), dtype=np.float32)
+            degraded_reasons.append("no_signal_array")
     if frequency is None:
         logger.warning(
             "No sampling rate found in %s (expected key: srate/fs/fsample/frequency). "
@@ -1351,17 +1362,28 @@ def _load_mat(filepath: str, inspect_only: bool = False) -> Dict[str, Any]:
             filepath,
         )
         frequency = 1.0
+        degraded_reasons.append("sampling_rate_not_found")
 
     if data_arr.shape[0] > data_arr.shape[1]:
         data_arr = data_arr.T
 
     channels = [f"Ch{i}" for i in range(data_arr.shape[0])]
+    meta: Dict[str, Any] = {"format": "generic_mat"}
+    if degraded_reasons:
+        # Surfaced by deep_inspect as a register_io_loader next_action — a
+        # guessed layout must never pass silently as a valid recording.
+        meta["load_degraded"] = True
+        meta["load_degraded_reasons"] = degraded_reasons
+        meta["mat_top_level"] = {
+            k: (f"{type(v).__name__}{list(getattr(v, 'shape', []))}")
+            for k, v in list(mat.items())[:40] if not k.startswith("__")
+        }
     return {
         "data": data_arr.astype(np.float32),
         "frequency": frequency,
         "channels": channels,
         "duration": float(data_arr.shape[-1] / frequency),
-        "meta": {"format": "generic_mat"},
+        "meta": meta,
     }
 
 

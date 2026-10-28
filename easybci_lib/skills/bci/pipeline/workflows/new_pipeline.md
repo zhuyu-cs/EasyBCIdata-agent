@@ -58,7 +58,9 @@ Call `plan_pipeline(mode=suggest, ...)` first if not already done by the router.
 
 1. Map each recommended step to the evidence-driven `steps` form
 2. Fill `param_evidence` from: inspection_report (measured values), paradigm skill (domain knowledge), web_evidence (research backing), or `empirical_default`
-3. Call `propose_pipeline(data_path=..., analysis_goal=..., scenario=..., deliverables=..., steps=[...], rationale=[...], modality=..., paradigm=..., output_path=<work_dir>, inspection_report_path=<from router>)`
+3. Call `propose_pipeline(data_path=..., analysis_goal=..., scenario=..., deliverables=..., steps=[...], rationale=[...], modality=..., paradigm=..., output_path=<work_dir>, inspection_report_path=<from router>, dataset_understanding=..., epoch_window=[tmin, tmax], epoch_window_basis={source, evidence})`
+
+**Epoch window = a decision with a basis.** For event-locked classification the window covers the label-dependent phase(s) of `dataset_understanding.trial_timeline`; phases identical for all classes (fixation, cue, rest) stay out. `epoch_window_basis.source`: `dataset_doc` / `metadata` (cite file + key) / `paradigm_default` / `event_duration` / `user`. The return's `epoch_window_decision.warnings` (`no_data_basis`, `includes_label_independent_phase`) and `dataset_understanding_hint` / `unread_dataset_docs` MUST be shown to the user at Step 4; the `## Epoch window` section of `presentation_block` is part of what the user confirms. A continuous recording without trial events (any modality) gets `source: not_applicable` — omit `epoch_window`, no warning. To change the window after confirm use `revise_proposal(..., epoch_window=..., epoch_window_basis=...)`.
 
 **`inspection_report_path` is REQUIRED.**
 
@@ -87,6 +89,10 @@ steps = [
 ```
 
 **Do NOT call `skill_view` on individual L3 operators (bandpass, notch, resample, etc.) at planning time.** The suggest return + paradigm skill already contain all information needed. Operator skill docs are available during codegen (Step 5) if the code generator needs them.
+
+**Only operators in `runnable_operators` (suggest return) execute.** Many operators have a SKILL.md but no executor; `propose_pipeline` / `revise_proposal` reject them with `guard: non_runnable_steps` + per-step `substitutes`. Swap in a substitute, re-propose, and say in the rationale which step was replaced and why.
+
+**One rationale per step, same order.** `rationale[i]` describes `steps[i]`; a step injected by the system (e.g. `drop_nondata_channels`) gets its own entry — check `rationale_warning` in the return.
 
 **Rationale: 3+ complete sentences, 80+ words per step. MUST reference real numbers from inspection_report** — "Channel P7 variance 8× higher than median" beats "remove noisy channels".
 
@@ -162,6 +168,11 @@ On vis-only failure: repair `code/vis.py`, re-invoke `quality_check`.
 
 **Multi-input:** call ONCE — scripts loop over routing table.
 
+**Must present when returned:** `trial_rejection` (kept / rejected trials per
+session + reasons; any `warnings`) and, for subjects with ≥ 2 sessions,
+`session_consistency` (status, flagged session/channel). On `WARN` explain the
+likely cause and let the user decide — never drop a session yourself.
+
 ### Step 9 — EXPORT MINI-REPO
 
 1. `repair_layout(work_dir=<work_dir>, dry_run=false)` — if `unrepairable` non-empty, surface and STOP.
@@ -179,7 +190,7 @@ On vis-only failure: repair `code/vis.py`, re-invoke `quality_check`.
 - Missing `data_profile.channels` or `sfreq_hz`
 
 **Required skill content (matches `_render_skill_md` format):**
-- Frontmatter: `name`, `description`, `layer: L1`, `group: proven-pipelines`, `metadata.analysis_goal`, `metadata.data_profile`, `metadata.qc_grade`, `metadata.version`, `metadata.proven_date`
+- Frontmatter: `name`, `description`, `layer: L1`, `group: proven-pipelines`, `metadata.analysis_goal`, `metadata.data_profile`, `metadata.qc_grade`, `metadata.version`, `metadata.proven_date`, **`metadata.epoch_window`** ([tmin, tmax] used; omit for continuous recordings), **`metadata.epoch_window_source`** (from proposal.json)
 - Body sections: When to Reuse / Data Profile / Pipeline Steps / Per-Step Rationale / Parameters Used / QC Result / When NOT to Reuse / References
 
 ---

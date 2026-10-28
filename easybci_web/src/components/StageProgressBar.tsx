@@ -1,5 +1,5 @@
 export type StageProgress = {
-  stage: "plan" | "codegen" | "preprocess" | "qc";
+  stage: "plan" | "codegen" | "preprocess" | "qc" | "train" | "evaluate";
   stage_index: number;
   stage_total: number;
   sub_step: string;
@@ -19,6 +19,8 @@ const STAGE_LABELS: Record<StageProgress["stage"], string> = {
   codegen: "Codegen",
   preprocess: "Preprocess",
   qc: "QC",
+  train: "Train",
+  evaluate: "Evaluate",
 };
 
 export function StageProgressBar({ progress }: { progress: StageProgress | null }) {

@@ -50,6 +50,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from easybci_lib.tools.neural_processing._seed import EASYBCI_SEED
 from easybci_lib.tools.neural_processing.export._lint import ruff_fix
+from easybci_lib.tools.neural_processing.quality.trial_reject import normalize_epoch_window
 from easybci_lib.tools.neural_processing.export._size_utils import (
     dir_size_bytes, format_size, paths_size_bytes,
 )
@@ -335,6 +336,38 @@ def _input_is_nihon_kohden(
     return False
 
 
+def _input_is_mat_struct(
+    input_path: str,
+    data_info: Dict[str, Any],
+    work_dir: Path,
+) -> bool:
+    """Return True when any input is a struct-container ``.mat`` export.
+
+    The generated pipeline's built-in reader has no ``.mat`` branch, so these
+    inputs need the ``mat_struct`` io_loader plugin bundled into code/.
+    """
+    from easybci_lib.tools.neural_processing.io import mat_struct_loader
+
+    fmt = (data_info.get("meta") or {}).get("format", "")
+    if fmt == mat_struct_loader.FORMAT_NAME:
+        return True
+    paths = [input_path] if input_path else []
+    try:
+        from easybci_lib.tools.neural_processing.io.routing_table import load_routing_table
+        table = load_routing_table(work_dir)
+        if table:
+            paths.extend(entry.data_path for entry in table.inputs)
+    except Exception:
+        pass
+    for raw in paths:
+        try:
+            if Path(raw).suffix.lower() == ".mat" and mat_struct_loader.matches(raw):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _input_is_compumedics(
     input_path: str,
     data_info: Dict[str, Any],
@@ -370,6 +403,49 @@ def _input_is_compumedics(
     return False
 
 
+def _resolve_epoch_window_for_repo(
+    out: Path, explicit: Any, pipeline_record: Optional[Dict[str, Any]],
+) -> Optional[List[float]]:
+    """Window for code/pipeline.py: explicit → confirm marker → proposal.json
+    → pipeline_record. ``None`` keeps the runtime resolution (event duration →
+    fallback)."""
+    win = normalize_epoch_window(explicit)
+    if win is not None:
+        return win
+    for src in (out / "middle_process" / "proposal.confirmed", out / "plan" / "proposal.json"):
+        try:
+            if src.is_file():
+                win = normalize_epoch_window(
+                    json.loads(src.read_text(encoding="utf-8")).get("epoch_window"))
+                if win is not None:
+                    return win
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue
+    return normalize_epoch_window((pipeline_record or {}).get("epoch_window"))
+
+
+def _resolve_epoch_window_meta(
+    out: Path, pipeline_record: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Where the window came from: first ``epoch_window_source`` found in
+    confirm marker → proposal.json → pipeline_record (``{}`` when none)."""
+    sources: List[Dict[str, Any]] = []
+    for src in (out / "middle_process" / "proposal.confirmed", out / "plan" / "proposal.json"):
+        try:
+            if src.is_file():
+                obj = json.loads(src.read_text(encoding="utf-8"))
+                if isinstance(obj, dict):
+                    sources.append(obj)
+        except (OSError, json.JSONDecodeError):
+            continue
+    sources.append(pipeline_record or {})
+    for obj in sources:
+        if obj.get("epoch_window_source"):
+            return {"epoch_window_source": obj.get("epoch_window_source"),
+                    "epoch_window_evidence": obj.get("epoch_window_evidence")}
+    return {}
+
+
 def build_mini_repo(
     output_dir: str,
     steps: List[str],
@@ -391,6 +467,7 @@ def build_mini_repo(
     analysis_goal: Optional[str] = None,
     scenario: Optional[str] = None,
     deliverables: Optional[list] = None,
+    epoch_window: Optional[List[float]] = None,
 ) -> Dict[str, Any]:
     """Build a reproducible mini-repo from pipeline execution results.
 
@@ -415,6 +492,13 @@ def build_mini_repo(
     partial_reason : str, optional
         Human-readable reason recorded alongside ``status`` when not ``ok``
         (e.g. ``"keyboard_interrupt"``, ``"failed: TimeoutError: ..."``).
+    epoch_window : [tmin, tmax], optional
+        Trial window for the generated pipeline.py. When omitted it is read
+        from ``middle_process/proposal.confirmed`` → ``plan/proposal.json`` →
+        ``pipeline_record``. An existing EasyBCI ``code/pipeline.py`` whose
+        EASYBCI_STEPS / EASYBCI_GOAL header matches ``steps`` is kept as-is
+        (it may carry repair edits); scripts without a version marker are
+        never overwritten.
     """
     from easybci_lib.tools.neural_processing.codegen.generator import (
         generate_config_yaml,
@@ -422,6 +506,9 @@ def build_mini_repo(
         generate_requirements,
         generate_run_script_v2,
         generate_split_code,
+        script_has_version_marker,
+        script_header_matches,
+        sync_script_epoch_window,
     )
 
     out = Path(output_dir)
@@ -441,6 +528,7 @@ def build_mini_repo(
             except (OSError, json.JSONDecodeError):
                 _goal = None
     analysis_goal = (str(_goal).strip() if _goal else "") or "generic"
+    _epoch_window = _resolve_epoch_window_for_repo(out, epoch_window, pipeline_record)
 
     # Resolve scenario/deliverables with the same priority as analysis_goal:
     #   explicit param > pipeline_record > plan/goal.json side file > default.
@@ -716,6 +804,9 @@ def build_mini_repo(
         pipeline_record["web_evidence_provider"] = (
             web_evidence.get("provider") if isinstance(web_evidence, dict) else None
         )
+        if _epoch_window is not None:
+            pipeline_record["epoch_window"] = _epoch_window
+        pipeline_record.update(_resolve_epoch_window_meta(out, pipeline_record))
         # Stamp lifecycle status so downstream tooling (CLI listings, validators,
         # the proven-pipeline flywheel) can distinguish partial vs. ok builds.
         pipeline_record["status"] = status
@@ -850,14 +941,31 @@ def build_mini_repo(
     code_dir = out / "code"
     code_dir.mkdir(parents=True, exist_ok=True)
 
-    code = generate_pipeline_script(
-        steps=steps,
-        data_info=data_info,
-        modality=modality,
-        analysis_goal=analysis_goal,
-    )
-    _write(code_dir / "pipeline.py", code)
-    created_files.append("code/pipeline.py")
+    # Keep an existing EasyBCI pipeline.py whose header still matches the
+    # confirmed steps: it may carry repair edits made after generate_code and
+    # is the script that actually produced the outputs. Its EPOCH_WINDOW line
+    # is brought in line with the confirmed window (the header does not cover
+    # the window). User scripts without a version marker are never touched.
+    _pipe_path = code_dir / "pipeline.py"
+    _pipeline_preserved = False
+    _window_synced = None
+    if _pipe_path.is_file() and (
+        not script_has_version_marker(_pipe_path)
+        or script_header_matches(_pipe_path, steps=list(steps), analysis_goal=analysis_goal)
+    ):
+        _pipeline_preserved = True
+        _window_synced = sync_script_epoch_window(_pipe_path, _epoch_window)
+    else:
+        code = generate_pipeline_script(
+            steps=steps,
+            data_info=data_info,
+            modality=modality,
+            analysis_goal=analysis_goal,
+            epoch_window=_epoch_window,
+            fallback_segment_duration=float(segment_duration or 2.0),
+        )
+        _write(_pipe_path, code)
+        created_files.append("code/pipeline.py")
 
     # Bundle the standalone Nihon Kohden io_loader plugin ONLY when the input
     # is actually NK format. Previously provisioned unconditionally, which
@@ -886,14 +994,25 @@ def build_mini_repo(
         except Exception as _cm_err:  # noqa: BLE001
             logger.warning("Compumedics io_loader provisioning failed: %s", _cm_err)
 
+    if _input_is_mat_struct(input_path, data_info, out):
+        try:
+            from easybci_lib.tools.neural_processing.io.mat_struct_loader_plugin import (
+                ensure_repo_plugin as _ms_ensure_repo,
+            )
+            _ms_ensure_repo(code_dir)
+            created_files.append("code/io_loaders/mat_struct.py")
+        except Exception as _ms_err:  # noqa: BLE001
+            logger.warning("mat_struct io_loader provisioning failed: %s", _ms_err)
+
     # Best-effort lint pass on the generated pipeline (auto-fix import order
     # and explicit text-mode encoding). Never blocks export — see
     # tools/neural_processing/export/_lint.py for the rationale and the
     # ruff-absent / failure paths.
-    _lint_remaining = ruff_fix(code_dir / "pipeline.py")
-    if _lint_remaining:
-        _write(code_dir / "pipeline.lint.txt", _lint_remaining + "\n")
-        created_files.append("code/pipeline.lint.txt")
+    if not _pipeline_preserved:
+        _lint_remaining = ruff_fix(code_dir / "pipeline.py")
+        if _lint_remaining:
+            _write(code_dir / "pipeline.lint.txt", _lint_remaining + "\n")
+            created_files.append("code/pipeline.lint.txt")
 
     # run.py: multi-input-aware wrapper. has_build_ai_ready is True when the
     # caller already wrote build_ai_ready.py (or expects to in this batch).
@@ -1013,6 +1132,11 @@ def build_mini_repo(
         "reproducibility": {"seed": EASYBCI_SEED, "locked": True},
         "status": status,
     }
+    result["pipeline_preserved"] = _pipeline_preserved
+    if _window_synced is not None:
+        result["epoch_window_synced"] = _window_synced
+    if _epoch_window is not None:
+        result["epoch_window"] = _epoch_window
     if partial_reason is not None:
         result["partial_reason"] = partial_reason
     if pending_consolidations:
@@ -1724,6 +1848,15 @@ def _write_readme(
 
     qc = pipeline_record.get("qc_result") or pipeline_record.get("qc")
     qc_passed = qc and qc.get("passed", qc.get("status") == "pass") if qc else False
+    # qc_grade (per-file QC grades rolled up by the QC stage) is the current
+    # source; the qc / qc_result dicts are only present on legacy records.
+    qc_grade = str(pipeline_record.get("qc_grade") or "").strip()
+    if qc_grade:
+        _g = qc_grade.lower()
+        qc_status_txt = ("PASS ✓" if _g in ("pass", "ok", "good", "excellent")
+                         else f"{qc_grade.upper()}")
+    else:
+        qc_status_txt = "PASS ✓" if qc_passed else "PENDING / WARNING"
 
     # preprocessed/ is NWB-only.
     _preproc_ext = ".nwb"
@@ -1795,6 +1928,12 @@ def _write_readme(
         f"| Modality | {modality} |",
         f"| Paradigm | {paradigm or 'unspecified'} |",
     ])
+    _ew = (pipeline_record or {}).get("epoch_window")
+    _ews = (pipeline_record or {}).get("epoch_window_source")
+    if _ew:
+        lines.append(f"| Epoch window | {list(_ew)} s ({_ews or 'unspecified'}) |")
+    elif _ews == "not_applicable":
+        lines.append("| Epoch window | not applicable (continuous recording) |")
     n_subjects = len(output_hierarchy)
     n_sessions = sum(len(ses) for ses in output_hierarchy.values())
     if n_subjects > 0:
@@ -1828,6 +1967,11 @@ def _write_readme(
         "interpolate_bads": "Reconstructs bad channels from spatial neighbors (spline)",
         "bipolar_ref": "Computes bipolar derivations between adjacent depth contacts",
         "hilbert": "Extracts instantaneous envelope (analytic signal amplitude)",
+        "drop_nondata_channels": "Drops marker / trigger / physiological (non-neural) channels",
+        "regression_eog": "Regresses EOG (or frontal proxy) channels out of the data channels",
+        "reject_bad_segments": "Flags gross-artifact spans; overlapping trials are rejected",
+        "reject_by_labels": "Excises annotated seizure / stimulation windows",
+        "reject_epochs": "Epoch-stage trial QC: rejects low-quality trials ({param})",
     }
 
     step_states = pipeline_record.get("step_states") or []
@@ -1894,9 +2038,26 @@ def _write_readme(
     lines.extend([
         "## 5. Quality Check",
         "",
-        f"**Status: {'PASS ✓' if qc_passed else 'PENDING / WARNING'}**",
+        f"**Status: {qc_status_txt}**",
         "",
     ])
+    _tr = pipeline_record.get("trial_rejection")
+    if isinstance(_tr, dict) and _tr.get("n_trials_before"):
+        lines.append(
+            f"- Trial rejection: kept {_tr.get('n_trials_kept')} / "
+            f"{_tr.get('n_trials_before')} trials ({_tr.get('n_trials_rejected')} "
+            "rejected; per-trial reasons in the QC reports, rejected spans in the "
+            "NWB `invalid_times` table)"
+        )
+    _sc = pipeline_record.get("session_consistency")
+    _sc_status = _sc.get("status") if isinstance(_sc, dict) else _sc
+    if _sc_status:
+        lines.append(
+            f"- Cross-session consistency: **{_sc_status}** "
+            "(`QC_out/sub-*/session_consistency.md`)"
+        )
+    if (isinstance(_tr, dict) and _tr.get("n_trials_before")) or _sc_status:
+        lines.append("")
     if qc:
         issues = qc.get("issues") or []
         if issues:

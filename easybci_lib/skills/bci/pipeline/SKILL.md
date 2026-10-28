@@ -19,7 +19,9 @@ You MUST complete steps 1–3 below BEFORE calling `skill_view` on any workflow.
 
 **Step 1 — LIGHT INSPECT:** `inspect_data(data_path=<path>)` — confirm the file is readable, get modality/channels/fs.
 
-**Step 2 — DEEP INSPECT + WORK DIR:** `mkdir -p "<work_dir>"` then `deep_inspect(data_path=<path>, work_dir=<work_dir>)` — writes inspection_report + routing entry.
+**Step 2 — DEEP INSPECT + WORK DIR:** `terminal(command='mkdir -p "<work_dir>"')` (its own command — do not chain with `&&`), then `deep_inspect(data_path=<path>, work_dir=<work_dir>)` — writes inspection_report + routing entry + `middle_process/dataset_survey.json`.
+
+**Step 2.5 — UNDERSTAND THE DATASET (before any planning):** `inspect_data` / `deep_inspect` return `dataset_context` (docs, timing_hints, derived_files, other_files). If `next_action.next_tool == "read_file"`, read EVERY listed doc first (PDF: run its `extract_cmd`). Extract: the trial timeline (phases + start/end seconds relative to the event + which phases differ between classes), bad/open channels, units, reference, files not to use (`derived_files`). No docs → read `timing_hints`. Neither → the window will be a paradigm default; say so. A continuous recording without trial events (any modality — sleep, resting state, connectivity) has no epoch window. Carry the result into `plan_pipeline(dataset_understanding=..., epoch_window_basis=...)`.
 
 **Step 3 — ROUTE:**
 
@@ -33,7 +35,7 @@ You MUST complete steps 1–3 below BEFORE calling `skill_view` on any workflow.
 
 ## ABSOLUTE PROHIBITIONS (both workflows)
 
-1. **Source data is READ-ONLY** — never write/modify/move/rename input files. `source_data_guard.py` enforces 4 layers.
+1. **Source data is READ-ONLY** — never write/modify/move/rename input files (`source_data_guard.py` enforces 4 layers). Reading the dataset's documentation is required, not forbidden.
 2. **work_dir is sealed** — only tool-chain writes allowed inside `*_preprocess_work_dir/`. `skill_compliance_guard.py` default-deny.
 3. **`middle_process/` lives at `<work_dir>/middle_process/`, NEVER under `<work_dir>/code/`** — Step 14 cleanup depends on this.
 4. **Identity from routing table, NEVER from `Path(raw).stem`** — `identity_resolver` runs once in `deep_inspect`; downstream MUST read `inputs_routing.json`.
