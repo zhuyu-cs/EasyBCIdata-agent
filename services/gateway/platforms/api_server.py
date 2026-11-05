@@ -3090,6 +3090,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     "tool": tool_name,
                     "preview": preview,
                 }
+                if kwargs.get("tool_call_id"):
+                    event["tool_call_id"] = kwargs["tool_call_id"]
                 # Forward structured path-like args so the workspace panel can
                 # locate files reliably instead of regex-scraping message text
                 # (B8). Only whitelisted string fields are passed through.
@@ -3106,8 +3108,10 @@ class APIServerAdapter(BasePlatformAdapter):
                     # one from data_path via _derive_work_dir convention:
                     # {data_parent_parent}/{data_parent_name}_preprocess_work_dir/
                     # Mirror that here so the WebUI workspace panel can show the
-                    # output column even when the LLM omits the arg.
-                    data_path = paths.get("data_path") or paths.get("path") or paths.get("file_path")
+                    # output column even when the LLM omits the arg. Only
+                    # `data_path` (the neural tools' input arg) qualifies —
+                    # generic file tools' `path` never produces a work_dir.
+                    data_path = paths.get("data_path")
                     has_output = bool(
                         paths.get("output_path") or paths.get("work_dir")
                         or paths.get("output_dir") or paths.get("directory")
@@ -3125,14 +3129,20 @@ class APIServerAdapter(BasePlatformAdapter):
                         event["paths"] = paths
                 _push(event)
             elif event_type == "tool.completed":
-                _push({
+                event = {
                     "event": "tool.completed",
                     "run_id": run_id,
                     "timestamp": ts,
                     "tool": tool_name,
                     "duration": round(kwargs.get("duration", 0), 3),
                     "error": kwargs.get("is_error", False),
-                })
+                }
+                # Live step details: which call finished and the head of its
+                # result (the full text lands in the transcript).
+                for key in ("tool_call_id", "result_preview", "result_chars"):
+                    if kwargs.get(key) is not None:
+                        event[key] = kwargs[key]
+                _push(event)
             elif event_type == "reasoning.available":
                 _push({
                     "event": "reasoning.available",
@@ -3221,6 +3231,22 @@ class APIServerAdapter(BasePlatformAdapter):
                             if isinstance(part, dict) and part.get("type") == "text"
                         )
                     conversation_history.append({"role": msg["role"], "content": str(content)})
+
+        # Continuing a stored session without an explicit history (the WebUI
+        # path): restore the full transcript from the session DB so the agent
+        # keeps earlier tool calls / results, not just the visible text. Same
+        # resolution the CLI uses on resume. Restricted to authenticated or
+        # loopback callers, mirroring the session-continuation gate above.
+        if not conversation_history and body.get("session_id"):
+            is_loopback = (request.remote or "") in ("127.0.0.1", "::1", "localhost")
+            if self._api_key or is_loopback:
+                try:
+                    db = self._ensure_session_db()
+                    if db is not None:
+                        resume_sid = db.resolve_resume_session_id(str(body["session_id"]))
+                        conversation_history = db.get_messages_as_conversation(resume_sid)
+                except Exception:
+                    logger.debug("run history restore from session DB skipped", exc_info=True)
 
         run_id = f"run_{uuid.uuid4().hex}"
         session_id = body.get("session_id") or stored_session_id or run_id

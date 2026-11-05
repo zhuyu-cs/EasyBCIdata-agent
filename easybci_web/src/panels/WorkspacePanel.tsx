@@ -1,6 +1,10 @@
-import { useState, useMemo, useCallback, lazy, Suspense } from "react";
+import { useState, useMemo, useCallback, lazy, Suspense, memo } from "react";
 import type { FileNode, TreeTruncation } from "@/hooks/useWorkspace";
+import { useActiveSlot } from "@/hooks/useConversation";
+import type { SessionArtifacts } from "@/lib/api";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
+import { RunSummaryCard } from "@/components/RunSummaryCard";
+import { t } from "@/lib/i18n";
 
 const FilePreview = lazy(() => import("@/components/FilePreview").then(m => ({ default: m.FilePreview })));
 
@@ -12,6 +16,7 @@ interface WorkspaceData {
   outputFiles: FileNode[];
   outputTrunc?: TreeTruncation | null;
   loading: boolean;
+  artifacts?: SessionArtifacts | null;
   loadDeeper?: (which: "source" | "output") => void;
   deleteFile?: (path: string) => Promise<boolean>;
   refreshSource?: () => Promise<void>;
@@ -27,16 +32,16 @@ interface Props {
 function FileIcon({ type, name }: { type: "file" | "folder"; name: string }) {
   if (type === "folder") {
     return (
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="shrink-0 text-[#c4a44e]">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="shrink-0 text-[var(--accent-yellow)]">
         <path d="M1.5 3.5a1 1 0 011-1h3l1 1h5a1 1 0 011 1v6a1 1 0 01-1 1h-9a1 1 0 01-1-1v-7z" fill="currentColor" opacity="0.2" stroke="currentColor" strokeWidth="1" />
       </svg>
     );
   }
   const ext = name.split(".").pop() ?? "";
   const color: Record<string, string> = {
-    py: "#3572a5", yaml: "#cb171e", yml: "#cb171e", md: "#083fa1",
-    log: "#6b7280", edf: "#059669", fif: "#059669", csv: "#16a34a",
-    json: "#f59e0b", txt: "#6b7280", h5: "#7c3aed", hdf5: "#7c3aed",
+    py: "var(--accent-blue)", md: "var(--accent-blue)", yaml: "var(--accent-red)", yml: "var(--accent-red)",
+    edf: "var(--accent-green)", fif: "var(--accent-green)", csv: "var(--accent-green)",
+    json: "var(--accent-yellow)", h5: "var(--accent-purple)", hdf5: "var(--accent-purple)",
   };
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="shrink-0" style={{ color: color[ext] ?? "var(--text-muted)" }}>
@@ -69,7 +74,7 @@ function computeStats(nodes: FileNode[]): { count: number; totalSize: number } {
   return { count, totalSize };
 }
 
-const PREVIEWABLE_EXTS = new Set(["py", "yaml", "yml", "json", "md", "txt", "log", "csv", "toml", "sh", "bash", "cfg"]);
+const PREVIEWABLE_EXTS = new Set(["py", "yaml", "yml", "json", "md", "txt", "log", "csv", "toml", "sh", "bash", "cfg", "html", "htm", "pdf"]);
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "svg", "webp"]);
 
 function isPreviewable(name: string): boolean {
@@ -146,7 +151,7 @@ function FileTree({ nodes, depth = 0, onFileClick, autoCollapse = false, onConte
               </svg>
             )}
             {node.size != null && node.type === "file" && (
-              <span className="ml-auto text-[10px] text-[var(--text-faint)] shrink-0">{formatSize(node.size)}</span>
+              <span className="ml-auto text-[11px] text-[var(--text-faint)] shrink-0">{formatSize(node.size)}</span>
             )}
           </button>
           {node.type === "folder" && node.children && (
@@ -171,6 +176,7 @@ function DirectorySection({
   trunc,
   onLoadDeeper,
   loading,
+  emptyText,
   onContext,
 }: {
   /** Stable key for the per-section sessionStorage entry. "source" / "output". */
@@ -182,6 +188,8 @@ function DirectorySection({
   trunc?: TreeTruncation | null;
   onLoadDeeper?: () => void;
   loading?: boolean;
+  /** Shown when the directory has no files. */
+  emptyText: string;
   onContext?: (e: React.MouseEvent, node: FileNode) => void;
 }) {
   const stats = useMemo(() => computeStats(files), [files]);
@@ -213,7 +221,7 @@ function DirectorySection({
       <button
         onClick={toggle}
         className="w-full flex items-center gap-1.5 mb-1.5 text-left rounded hover:bg-[var(--bg-hover)] px-1 py-0.5 transition-colors"
-        title={expanded ? "Collapse section" : "Expand section"}
+        title={expanded ? t("Collapse section") : t("Expand section")}
       >
         <svg
           width="10" height="10" viewBox="0 0 10 10"
@@ -221,11 +229,11 @@ function DirectorySection({
         >
           <path d="M3 1.5l4 3.5-4 3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
-        <span className="text-[11px] font-medium text-[var(--text-muted)] uppercase tracking-wide">{label}</span>
-        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--bg-tertiary)] text-[var(--text-muted)] tabular-nums">
-          {isEmpty ? "empty" : (
+        <span className="text-[11px] font-medium text-[var(--text-muted)] uppercase tracking-wide">{t(label)}</span>
+        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-[var(--bg-tertiary)] text-[var(--text-muted)] tabular-nums">
+          {isEmpty ? t("empty") : (
             <>
-              {stats.count} file{stats.count !== 1 ? "s" : ""}
+              {t(stats.count === 1 ? "{n} file" : "{n} files", { n: stats.count })}
               {stats.totalSize > 0 && ` · ${formatSize(stats.totalSize)}`}
             </>
           )}
@@ -244,18 +252,18 @@ function DirectorySection({
           </div>
           {isEmpty ? (
             <div className="px-2 py-1.5 text-[11px] text-[var(--text-faint)] italic">
-              {loading ? "Reading directory…" : "Waiting for files — output will appear here as the pipeline writes results."}
+              {loading ? t("Reading directory…") : emptyText}
             </div>
           ) : (
             <FileTree nodes={files} onFileClick={onFileClick} autoCollapse={shouldAutoCollapse} onContext={onContext} />
           )}
           {showTrunc && (
-            <div className="flex items-center gap-2 px-2 mt-1.5 text-[10px] text-[var(--text-faint)]">
+            <div className="flex items-center gap-2 px-2 mt-1.5 text-[11px] text-[var(--text-faint)]">
               <svg width="11" height="11" viewBox="0 0 12 12" fill="none" className="shrink-0">
                 <path d="M6 3.5v3M6 8.5h.01M1.5 6a4.5 4.5 0 119 0 4.5 4.5 0 01-9 0z" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
               </svg>
               <span>
-                {trunc!.count > 0 && `+${trunc!.count} more not shown`}
+                {trunc!.count > 0 && t("+{n} more not shown", { n: trunc!.count })}
                 {trunc!.count > 0 && trunc!.depth && " · "}
                 {trunc!.depth && "some folders are deeper than shown"}
               </span>
@@ -264,7 +272,7 @@ function DirectorySection({
                   onClick={onLoadDeeper}
                   className="ml-auto text-[var(--accent-blue)] hover:underline shrink-0"
                 >
-                  Load deeper
+                  {t("Load deeper")}
                 </button>
               )}
             </div>
@@ -277,9 +285,9 @@ function DirectorySection({
 
 // ─── Main Component ────────────────────────────────────────────────────
 
-export function WorkspacePanel({ workspace }: Props) {
-  const { sourceDir, sourceFiles, sourceTrunc, outputDir, outputFiles, outputTrunc, loading, loadDeeper, deleteFile, refreshSource, refreshOutput } = workspace;
-  const hasContent = sourceDir || outputDir;
+export const WorkspacePanel = memo(function WorkspacePanel({ workspace }: Props) {
+  const { sourceDir, sourceFiles, sourceTrunc, outputDir, outputFiles, outputTrunc, loading, artifacts, loadDeeper, deleteFile, refreshSource, refreshOutput } = workspace;
+  const running = !!useActiveSlot("run");
   const [previewPath, setPreviewPath] = useState<string | null>(null);
 
   // Right-click context menu — used both by file-tree nodes (Copy / Preview /
@@ -290,11 +298,11 @@ export function WorkspacePanel({ workspace }: Props) {
   // (Source is read-only, honoring source_data_guard's spirit).
   const openFileMenu = (side: "source" | "output") => (e: React.MouseEvent, node: FileNode) => {
     const items: ContextMenuItem[] = [
-      { label: "Copy path", action: () => navigator.clipboard.writeText(node.path) },
-      { label: "Open in preview", action: () => setPreviewPath(node.path) },
+      { label: t("Copy path"), action: () => navigator.clipboard.writeText(node.path) },
+      { label: t("Open in preview"), action: () => setPreviewPath(node.path) },
     ];
     if (side === "output" && deleteFile) {
-      items.push({ label: "Delete", danger: true, action: () => { void deleteFile(node.path); } });
+      items.push({ label: t("Delete"), danger: true, action: () => { void deleteFile(node.path); } });
     }
     setMenu({ x: e.clientX, y: e.clientY, items });
   };
@@ -306,7 +314,7 @@ export function WorkspacePanel({ workspace }: Props) {
     e.preventDefault();
     const items: ContextMenuItem[] = [
       {
-        label: "Refresh",
+        label: t("Refresh"),
         action: () => {
           if (refreshSource) void refreshSource();
           if (refreshOutput) void refreshOutput();
@@ -319,30 +327,14 @@ export function WorkspacePanel({ workspace }: Props) {
   return (
     <>
       <div className="flex items-center px-4 py-3 border-b border-[var(--border-primary)]">
-        <h2 className="text-heading-sm text-[var(--text-primary)]">Workspace</h2>
+        <h2 className="text-heading-sm text-[var(--text-primary)]">{t("Workspace")}</h2>
         {loading && (
           <span className="ml-2 w-3 h-3 border-2 border-[var(--text-muted)] border-t-transparent rounded-full animate-spin" />
         )}
       </div>
 
       <div className="flex-1 overflow-y-auto py-2" onContextMenu={openEmptyMenu}>
-        {!hasContent && (
-          <div className="flex flex-col items-center justify-center h-full px-4 text-center animate-fade-in">
-            <div className="text-[var(--text-faint)] mb-3">
-              <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
-                <path d="M6 10a2 2 0 012-2h10l2 2h14a2 2 0 012 2v22a2 2 0 01-2 2H8a2 2 0 01-2-2V10z" stroke="currentColor" strokeWidth="1.5" fill="currentColor" fillOpacity="0.03" />
-                <path d="M11 24h3l1.5-4 2.5 8 2-5 1.5 3 1.5-2.5 1 2H30" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" opacity="0.6" />
-                <circle cx="13" cy="16" r="1" fill="currentColor" opacity="0.4" />
-                <circle cx="18" cy="16" r="1" fill="currentColor" opacity="0.4" />
-                <circle cx="23" cy="16" r="1" fill="currentColor" opacity="0.4" />
-              </svg>
-            </div>
-            <p className="text-[12px] text-[var(--text-muted)] mb-1">No workspace files</p>
-            <p className="text-[11px] text-[var(--text-faint)] max-w-[200px]">
-              Run a processing pipeline to see source data and output files here
-            </p>
-          </div>
-        )}
+        {artifacts && <RunSummaryCard artifacts={artifacts} onOpenFile={setPreviewPath} />}
 
         {sourceDir && (
           <DirectorySection
@@ -354,6 +346,7 @@ export function WorkspacePanel({ workspace }: Props) {
             trunc={sourceTrunc}
             onLoadDeeper={loadDeeper ? () => loadDeeper("source") : undefined}
             loading={loading && sourceFiles.length === 0}
+            emptyText="This folder is empty."
             onContext={openFileMenu("source")}
           />
         )}
@@ -372,6 +365,7 @@ export function WorkspacePanel({ workspace }: Props) {
             trunc={outputTrunc}
             onLoadDeeper={loadDeeper ? () => loadDeeper("output") : undefined}
             loading={loading && outputFiles.length === 0}
+            emptyText={running ? t("Waiting for files — output will appear here as the pipeline writes results.") : t("This session has no output files.")}
             onContext={openFileMenu("output")}
           />
         )}
@@ -388,4 +382,4 @@ export function WorkspacePanel({ workspace }: Props) {
       )}
     </>
   );
-}
+});

@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { Collapse } from "./Collapse";
+import { t } from "@/lib/i18n";
 
 interface Props {
   thinking: string;
@@ -19,13 +21,13 @@ export function ThinkingBlock({ thinking }: Props) {
         >
           <path d="M4 2l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
-        Thinking
+        {t("Thinking")}
       </button>
-      {expanded && (
+      <Collapse open={expanded}>
         <div className="mt-1.5 px-3 py-2 rounded-md bg-[var(--bg-input)] border border-[var(--border-primary)] text-caption text-[var(--text-secondary)] whitespace-pre-wrap overflow-y-auto" style={{ maxHeight: 280 }}>
           {thinking}
         </div>
-      )}
+      </Collapse>
     </div>
   );
 }

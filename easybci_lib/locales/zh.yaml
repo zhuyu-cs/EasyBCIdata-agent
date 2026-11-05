@@ -96,3 +96,16 @@ epoch_window:
   not_applicable: "不适用——连续记录，无试次事件，不做 epoch 切窗"
   warn_no_data_basis: "时间窗没有数据文档或元数据依据——请确认。"
   warn_label_independent: "时间窗包含各类别相同的阶段：{phases}"
+
+ocular:
+  section: "眼电伪迹"
+  evidence: "依据"
+  reference: "眨眼参考通道"
+  none: "无（没有 EOG 通道和额极通道）"
+  handled_by: "处理步骤"
+  not_handled: "本方案没有去除眼电的步骤"
+  not_counted: "{steps} 不算眼电处理——它们只削峰、缩放或剔除 trial，保留下来的 trial 里仍有眨眼"
+  recommended: "推荐"
+  no_method: "无法去除眼电（没有 EOG 通道和额极通道），只能靠 trial 剔除兜底"
+  exempt: "本次运行不强制（{reason}）"
+  order_warning: "去眼电步骤排在 car 之后——平均参考已把眨眼扩散到全部通道，应移到 car 之前"

@@ -19,12 +19,15 @@ from typing import Any, Dict, List, Optional
 
 from easybci_lib.tools.neural_processing._seed import EASYBCI_SEED
 from easybci_lib.tools.neural_processing.output.format_policy import is_invasive
+from easybci_lib.tools.neural_processing.preprocess import amplitude_units as _amplitude_units
+from easybci_lib.tools.neural_processing.preprocess import eog_reference as _eog_reference
 from easybci_lib.tools.neural_processing.preprocess.operator_vocab import (
     canonical_step_key as _canonical_step_key,
 )
 from easybci_lib.tools.neural_processing.preprocess.operator_vocab import (
     normalize_steps as _normalize_steps,
 )
+from easybci_lib.tools.neural_processing.quality import data_rank as _data_rank
 from easybci_lib.tools.neural_processing.quality import session_consistency as _session_consistency
 from easybci_lib.tools.neural_processing.quality import time_separability as _time_separability
 from easybci_lib.tools.neural_processing.quality import trial_reject as _trial_reject
@@ -415,6 +418,15 @@ def _load_input(path, target_hz=None):
             _meta["ch_types"] = list(raw.get_channel_types())
         except Exception:
             pass
+        # MNE gives SI base units: V for electrical, T for magnetic channels
+        # (amplitude thresholds with a unit suffix are converted to these).
+        _ct_set = {{str(t).lower() for t in _meta.get("ch_types") or []}}
+        if _ct_set & {{"eeg", "eog", "ecg", "seeg", "ecog", "emg", "bio", "stim", "misc", "dbs"}}:
+            _meta["data_unit"] = "V"
+        elif _ct_set & {{"mag", "grad"}}:
+            _meta["data_unit"] = "T"
+        else:
+            _meta["data_unit"] = "unknown"
         if raw.annotations is not None and len(raw.annotations) > 0:
             _meta["annotations"] = {{
                 "onset": raw.annotations.onset.tolist(),
@@ -873,37 +885,117 @@ def op_resample(d, param):
 def op_car(d):
     raw = _to_mne_raw(d)
     raw.set_eeg_reference(ref_channels="average", projection=False, verbose="ERROR")
-    return _from_mne_raw(raw, d.get("meta", {{}}))
+    _eeg = [raw.ch_names[i] for i, t in enumerate(raw.get_channel_types()) if t == "eeg"]
+    out = _from_mne_raw(raw, d.get("meta", {{}}))
+    # Average reference removes one dimension: the EEG channels now sum to zero.
+    return note_rank_reducer(out, "car", 1, channels=_eeg or None)
 
 
 def op_ica(d, param):
+    """FastICA artifact removal (``ica`` / ``ica:eog`` / ``ica:eog,ecg`` /
+    ``ica:eog,<ch>,...``).
+
+    Tokens other than ``eog`` / ``ecg`` name the ocular reference channels
+    explicitly. n_components is bounded by the effective data rank (car /
+    earlier ICA remove dimensions). The EOG reference is resolved by
+    ``resolve_eog_reference``: explicit names → EOG channels → frontal-pole
+    / AF proxy (correlation ≥ ``_ICA_PROXY_CORR``; frontal EEG shared with
+    blinks goes too, warned) → none: nothing is removed and the step says so
+    loudly. The decision lands in ``meta["ica"]``; removed components are
+    recorded as a rank reducer.
+    """
     import mne
-    target_labels = [s.strip().lower() for s in (param or "").split(",") if s.strip()]
-    if not target_labels:
-        target_labels = ["eog", "ecg"]
+    tokens = [s.strip() for s in (param or "").split(",") if s.strip()]
+    target_labels = [t.lower() for t in tokens if t.lower() in ("eog", "ecg")] or ["eog"]
+    explicit_refs = [t for t in tokens if t.lower() not in ("eog", "ecg")]
+    meta_in = d.get("meta") or {{}}
+    channels = [str(c) for c in d.get("channels") or []]
+    ch_types = meta_in.get("ch_types")
+    if not isinstance(ch_types, list) or len(ch_types) != len(channels):
+        ch_types = None
     raw = _to_mne_raw(d)
-    n_components = min(raw.info["nchan"], 20)
+    # ICA fits the data-type channels only (misc / EOG / stim stay out), so
+    # the component bound is the rank of those rows.
+    _fit = [i for i, t in enumerate(raw.get_channel_types())
+            if t in ("eeg", "mag", "grad", "seeg", "ecog", "dbs")] or list(range(len(channels)))
+    rk = estimate_rank(np.asarray(d["data"])[_fit], channels=[channels[i] for i in _fit],
+                       reducers=meta_in.get("rank_reducers"))
+    rank = int(rk["rank"]) if rk.get("status") == "ok" else len(_fit)
+    n_components = max(1, min(rank, 20))
     ica = mne.preprocessing.ICA(
-        n_components=n_components, method="fastica", random_state=EASYBCI_SEED, verbose="ERROR",
+        n_components=n_components, method="fastica", random_state=EASYBCI_SEED,
+        max_iter=500, verbose="ERROR",
     )
     ica.fit(raw, verbose="ERROR")
+    info = {{"applied": False, "n_components": int(n_components), "rank_before": rank,
+             "targets": target_labels, "excluded": [], "eog_reference": None,
+             "eog_reference_source": None}}
+    warn_meta = dict(meta_in)
     bad = []
     if "eog" in target_labels:
+        _ref = resolve_eog_reference(channels, ch_types, explicit=explicit_refs)
+        if _ref["missing"]:
+            _warn_meta(warn_meta, "[ica] requested reference channel(s) not present: {{}}".format(
+                _ref["missing"]))
+        info["eog_reference"] = _ref["names"] or None
+        info["eog_reference_source"] = _ref["source"]
+        idx = []
         try:
-            eog_idx, _ = ica.find_bads_eog(raw, verbose="ERROR")
-            bad.extend(eog_idx)
-        except (ValueError, RuntimeError):
-            pass
+            if _ref["source"] == "eog_channel":
+                idx, _ = ica.find_bads_eog(raw, ch_name=_ref["names"], verbose="ERROR")
+                if not idx:
+                    # An EOG channel no component follows does not see the eyes
+                    # (detached / mis-wired); fall back to the frontal proxy.
+                    _keep = [i for i in range(len(channels)) if i not in set(_ref["indices"])]
+                    _fb = resolve_eog_reference(
+                        [channels[i] for i in _keep],
+                        [ch_types[i] for i in _keep] if ch_types else None)
+                    if _fb["source"] == "frontal_proxy":
+                        idx, _ = ica.find_bads_eog(raw, ch_name=_fb["names"], measure="correlation",
+                                                   threshold=_ICA_PROXY_CORR, verbose="ERROR")
+                        info["eog_channel_unmatched"] = list(_ref["names"])
+                        info["eog_reference"] = list(_fb["names"])
+                        info["eog_reference_source"] = "frontal_proxy"
+                        _warn_meta(warn_meta, "[ica] EOG channel(s) {{}} matched no component — the "
+                                   "channel may not see the eyes; frontal proxy {{}} used instead "
+                                   "(frontal EEG shared with blinks is removed as well)".format(
+                                       _ref["names"], _fb["names"]))
+            elif _ref["source"] in ("frontal_proxy", "explicit"):
+                idx, _ = ica.find_bads_eog(raw, ch_name=_ref["names"], measure="correlation",
+                                           threshold=_ICA_PROXY_CORR, verbose="ERROR")
+                if _ref["source"] == "frontal_proxy":
+                    _warn_meta(warn_meta, "[ica] no EOG channel; frontal proxy {{}} used as the "
+                               "blink reference — frontal EEG shared with blinks is removed as "
+                               "well".format(_ref["names"]))
+            else:
+                _warn_meta(warn_meta, "[ica] ocular artifacts NOT removed: no EOG channel and no "
+                           "frontal-pole / AF channel{{}} — name the reference explicitly: "
+                           "ica:eog,<ch>,...".format(
+                               "" if _ref["montage_recognized"]
+                               else " (channel names not recognised as 10-20 / 10-10)"))
+        except (ValueError, RuntimeError) as exc:
+            _warn_meta(warn_meta, "[ica] EOG component search failed: {{}}".format(exc))
+        bad.extend(int(i) for i in idx)
+        if info["eog_reference_source"] and not idx:
+            _warn_meta(warn_meta, "[ica] no component matched the blink reference {{}} — ocular "
+                       "artifacts may remain".format(info["eog_reference"]))
     if "ecg" in target_labels:
         try:
             ecg_idx, _ = ica.find_bads_ecg(raw, verbose="ERROR")
-            bad.extend(ecg_idx)
-        except (ValueError, RuntimeError):
-            pass
+            bad.extend(int(i) for i in ecg_idx)
+        except (ValueError, RuntimeError) as exc:
+            _warn_meta(warn_meta, "[ica] ECG component search skipped: {{}}".format(exc))
     ica.exclude = sorted(set(bad))
     raw_clean = ica.apply(raw.copy(), verbose="ERROR")
-    out = _from_mne_raw(raw_clean, d.get("meta", {{}}))
-    out["meta"]["ica_excluded"] = ica.exclude
+    out = _from_mne_raw(raw_clean, warn_meta)
+    info["excluded"] = list(ica.exclude)
+    info["applied"] = bool(ica.exclude)
+    out["meta"]["ica"] = info
+    out["meta"]["ica_excluded"] = list(ica.exclude)
+    if ica.exclude:
+        note_rank_reducer(out, "ica", len(ica.exclude), channels=[channels[i] for i in _fit])
+    print("[ica] {{}} component(s), excluded {{}} (reference: {{}})".format(
+        n_components, ica.exclude, info["eog_reference_source"]))
     return out
 
 
@@ -1033,23 +1125,36 @@ def op_drop_bads(d, param):
 
 
 def op_drop_nondata_channels(d, param):
-    """Drop marker/physio channels by name pattern.
+    """Drop marker/physio channels by name pattern and channel type.
 
     param=markers_only → drop trigger/marker/status/stim channels only.
-    param=data_only    → also drop EOG/ECG/EMG/temp/resp/physio.
+    param=data_only    → also drop EOG/ECG/EMG/temp/resp/physio: by name,
+    by the shared EOG resolver (``VEO``/``HEO``, ``LOC``/``ROC``, AASM
+    ``E1``/``E2`` …) and by the loader's channel type. Each dropped channel's
+    reason is recorded in ``meta["dropped_channels_reasons"]``.
     """
     mode = (param or "data_only").strip().lower()
     channels = list(d["channels"])
     data = np.asarray(d["data"])
     marker_pat = _re.compile(r"^(trig|trigger|marker|markers|status|stim|stimulus|event|events)$", _re.IGNORECASE)
     physio_pat = _re.compile(r"^(eog|veog|heog|ecg|ekg|emg|emg\\d*|gsr|edr|temp|temperature|resp|respiration|pulse|spo2)\\b", _re.IGNORECASE)
+    _ct_in = (d.get("meta") or {{}}).get("ch_types")
+    types = ([str(t).lower() for t in _ct_in]
+             if isinstance(_ct_in, list) and len(_ct_in) == len(channels) else [None] * len(channels))
+    e_num = _er_e_numbered([electrode_label(c) for c in channels])
     keep = []
     dropped = []
+    reasons = {{}}
     for i, ch in enumerate(channels):
         if marker_pat.match(ch):
-            dropped.append(ch); continue
-        if mode == "data_only" and physio_pat.match(ch):
-            dropped.append(ch); continue
+            dropped.append(ch); reasons[ch] = "marker_channel"; continue
+        if mode == "data_only":
+            if physio_pat.match(ch):
+                dropped.append(ch); reasons[ch] = "physio_name"; continue
+            if is_eog_channel(ch, types[i], e_num):
+                dropped.append(ch); reasons[ch] = "eog_channel"; continue
+            if types[i] in ("eog", "ecg", "emg", "stim", "resp"):
+                dropped.append(ch); reasons[ch] = "channel_type:" + types[i]; continue
         keep.append(i)
     if not keep:
         return dict(d)
@@ -1058,6 +1163,9 @@ def op_drop_nondata_channels(d, param):
     out["channels"] = [channels[i] for i in keep]
     out["meta"] = dict(d.get("meta", {{}}))
     out["meta"]["dropped_channels"] = list(out["meta"].get("dropped_channels", [])) + dropped
+    if reasons:
+        out["meta"]["dropped_channels_reasons"] = dict(
+            out["meta"].get("dropped_channels_reasons") or {{}}, **reasons)
     _ct = out["meta"].get("ch_types")
     if isinstance(_ct, list) and len(_ct) == len(channels):
         out["meta"]["ch_types"] = [_ct[i] for i in keep]
@@ -1089,19 +1197,78 @@ def op_scale(d, param):
         scaled = (data - med) / iqr
     out = dict(d)
     out["data"] = scaled.astype(np.float32)
+    # Normalised data no longer carries a physical unit.
+    out["meta"] = dict(d.get("meta") or {{}}, data_unit="unitless")
     return out
 
 
+def _parse_clip_param(param):
+    """``clip:<max_abs>`` (data units, or with a unit suffix such as ``500uV``)
+    or ``clip:sd=<k>`` (per channel). Returns ``(mode, value, unit)``."""
+    p = (param or "").strip().lower()
+    if not p:
+        raise ValueError("clip: a threshold is required — clip:<max_abs>[unit] (e.g. clip:500uV) or clip:sd=<k>")
+    if p.startswith("sd="):
+        mode, unit = "sd", None
+        try:
+            v = float(p[3:])
+        except ValueError:
+            raise ValueError("clip: cannot parse {{!r}} — use clip:<max_abs>[unit] or clip:sd=<k>".format(param))
+    else:
+        mode = "abs"
+        try:
+            v, unit = split_amplitude(p)
+        except ValueError as exc:
+            raise ValueError("clip: {{}} — use clip:<max_abs>[unit] or clip:sd=<k>".format(exc))
+    if not v > 0:
+        raise ValueError("clip: threshold must be > 0, got {{!r}}".format(param))
+    return mode, v, unit
+
+
 def op_clip(d, param):
-    """Clip amplitudes to +/- N standard deviations. param defaults to 5."""
-    n_std = float(param) if param else 5.0
+    """Clamp amplitudes. ``clip:500uV`` → ±500 µV converted to the data's unit
+    (``meta["data_unit"]``); a bare ``clip:500`` is in data units;
+    ``clip:sd=5`` → per-channel mean ± 5·SD. Records how much was clipped in
+    ``meta["clip"]``: nothing clipped (``no_effect``) or more than 1 % of the
+    samples (``heavy_clipping``) is a warning, as is a unit that cannot be
+    converted. Clipping suppresses peaks; it does not remove ocular or muscle
+    artifacts."""
+    mode, thr, unit = _parse_clip_param(param)
+    meta = dict(d.get("meta") or {{}})
+    data_unit = meta.get("data_unit")
+    unit_status = None
     data = np.asarray(d["data"], dtype=np.float64)
-    sd = np.nanstd(data, axis=1, keepdims=True)
-    mu = np.nanmean(data, axis=1, keepdims=True)
-    lo = mu - n_std * sd
-    hi = mu + n_std * sd
+    if mode == "sd":
+        mu = np.nanmean(data, axis=1, keepdims=True)
+        sd = np.nanstd(data, axis=1, keepdims=True)
+        lo, hi = mu - thr * sd, mu + thr * sd
+        thr_data = None
+    else:
+        thr_data, unit_status = to_data_units(thr, unit, data_unit)
+        lo, hi = -thr_data, thr_data
+        if unit_status in ("unit_unknown", "unit_mismatch"):
+            _warn_meta(meta, "[clip] clip:{{}} — {{}}: data unit is {{!r}}, the threshold was applied "
+                       "unconverted as {{}} data units".format(param, unit_status, data_unit, thr))
+    fin = np.isfinite(data)
+    n_fin = int(fin.sum())
+    n_clip = int(((data < lo) | (data > hi))[fin].sum())
+    frac = n_clip / n_fin if n_fin else 0.0
     out = dict(d)
+    out["meta"] = meta
     out["data"] = np.clip(data, lo, hi).astype(np.float32)
+    warning = None
+    if n_clip == 0:
+        warning = "no_effect"
+        _warn_meta(meta, "[clip] clip:{{}} clipped no sample — the step had no effect "
+                   "(data unit {{!r}})".format(param, data_unit))
+    elif frac > 0.01:
+        warning = "heavy_clipping"
+        _warn_meta(meta, "[clip] {{:.2%}} of samples clipped by clip:{{}} — threshold too low, "
+                   "the signal is being distorted".format(frac, param))
+    meta["clip"] = {{"mode": mode, "threshold": thr, "unit": unit, "data_unit": data_unit,
+                    "threshold_data_units": thr_data, "unit_status": unit_status,
+                    "clipped_frac": round(frac, 6), "warning": warning}}
+    print("[clip] {{}} {{}}{{}}: {{:.4%}} of samples clipped".format(mode, thr, unit or "", frac))
     return out
 
 
@@ -1151,9 +1318,12 @@ def _warn_meta(meta, msg):
     print("WARN " + msg, file=sys.stderr)
 
 
-_EOG_NAME_RX = _re.compile(r"eog", _re.IGNORECASE)
-_FRONTAL_PROXY = ("fp1", "fp2", "fpz", "af7", "af8")
 _REGRESS_TARGET_TYPES = {{"eeg", "mag", "grad", "seeg", "ecog"}}
+# EOG detection against a frontal proxy or explicitly named scalp channels:
+# correlation with the reference, not the default z-score — such channels
+# carry real EEG, so the z criterion is unstable (0 or 2 components on the
+# same recording).
+_ICA_PROXY_CORR = 0.6
 
 
 def op_regression_eog(d, param):
@@ -1161,8 +1331,10 @@ def op_regression_eog(d, param):
 
     param: ``auto`` (default) or explicit reference channel names
     (``regression_eog:VEOG,HEOG``). Reference resolution: explicit names ->
-    EOG-typed / EOG-named channels -> frontal-pole proxy (Fp1/Fp2/Fpz/AF7/AF8,
-    with a warning: real frontal EEG shared with the proxy is removed too).
+    EOG-typed / EOG-named channels -> frontal-pole proxy (Fp1/Fp2/Fpz, else
+    AF7/AF8/AF3/AF4/AFz; vendor-decorated names such as ``EEG Fp1-REF``
+    included — see ``resolve_eog_reference``), with a warning: real frontal
+    EEG shared with the proxy is removed too.
     Without any reference the step changes nothing and says so loudly.
 
     Each target channel loses its least-squares projection on the reference
@@ -1182,37 +1354,22 @@ def op_regression_eog(d, param):
     ch_types = meta.get("ch_types")
     if not isinstance(ch_types, list) or len(ch_types) != len(channels):
         ch_types = None
-    lower = {{c.strip().lower(): i for i, c in enumerate(channels)}}
-
-    refs, source, missing = [], "", []
-    for tok in (param or "").split(","):
-        tok = tok.strip()
-        if not tok or tok.lower() == "auto":
-            continue
-        if tok.lower() in lower:
-            refs.append(lower[tok.lower()])
-        else:
-            missing.append(tok)
-    if missing:
-        _warn_meta(meta, "[regression_eog] requested reference channel(s) not present: {{}}".format(missing))
-    if refs:
-        source = "explicit"
+    _explicit = [t.strip() for t in (param or "").split(",")
+                 if t.strip() and t.strip().lower() != "auto"]
+    _ref = resolve_eog_reference(channels, ch_types, explicit=_explicit)
+    if _ref["missing"]:
+        _warn_meta(meta, "[regression_eog] requested reference channel(s) not present: {{}}".format(
+            _ref["missing"]))
+    refs, source = list(_ref["indices"]), _ref["source"] or ""
+    if source == "frontal_proxy":
+        _warn_meta(meta, "[regression_eog] no EOG channel; using frontal proxy {{}} — "
+                   "frontal EEG shared with these channels is removed as well".format(_ref["names"]))
     if not refs:
-        refs = [i for i, c in enumerate(channels)
-                if (ch_types is not None and str(ch_types[i]).lower() == "eog")
-                or _EOG_NAME_RX.search(c)]
-        source = "eog_channel" if refs else ""
-    if not refs:
-        refs = [lower[n] for n in _FRONTAL_PROXY if n in lower]
-        if refs:
-            source = "frontal_proxy"
-            _warn_meta(meta, "[regression_eog] no EOG channel; using frontal proxy {{}} — "
-                       "frontal EEG shared with these channels is removed as well".format(
-                           [channels[i] for i in refs]))
-    if not refs:
-        _warn_meta(meta, "[regression_eog] NOT applied: no EOG channel and no frontal-pole "
-                   "proxy (Fp1/Fp2/Fpz/AF7/AF8) — ocular artifacts remain; use ica or "
-                   "name reference channels explicitly")
+        _warn_meta(meta, "[regression_eog] NOT applied: no EOG channel and no frontal-pole / AF "
+                   "channel{{}} — ocular artifacts remain; name reference channels explicitly "
+                   "(regression_eog:<ch>,...)".format(
+                       "" if _ref["montage_recognized"]
+                       else " (channel names not recognised as 10-20 / 10-10)"))
         meta["regression_eog"] = {{"applied": False, "reason": "no_reference_channel"}}
         return out
 
@@ -1919,6 +2076,9 @@ def _gate_release(token):
 
 
 {trial_reject_block}
+{data_rank_block}
+{amplitude_units_block}
+{eog_reference_block}
 
 TRIAL_REJECT = {trial_reject_repr}
 EPOCH_WINDOW = {epoch_window_repr}
@@ -2206,6 +2366,18 @@ def _process_one(work_dir, inp, steps):
         if trial_result is not None:
             data_dict.setdefault("meta", {{}})["easybci_trials"] = trial_result
 
+        # Effective rank at storage precision (float32): covariance-based
+        # downstream methods must be given this rank explicitly.
+        _rank_rec = estimate_rank(
+            data_dict["data"], channels=data_dict.get("channels"),
+            reducers=(data_dict.get("meta") or {{}}).get("rank_reducers"),
+            ch_types=(data_dict.get("meta") or {{}}).get("ch_types"),
+            default_ch_type="{rank_ch_type}")
+        data_dict.setdefault("meta", {{}})["easybci_data_rank"] = _rank_rec
+        print("[rank] {{}}/{{}} {{}} {{}}".format(
+            _rank_rec.get("rank"), _rank_rec.get("n_channels"),
+            _rank_rec.get("reducers") or "", _rank_rec.get("warnings") or ""))
+
         n_ch_out = len(data_dict.get("channels", []))
         fs_out = float(data_dict.get("frequency", 0.0))
         print("  Channels out: {{}}, fs: {{}} Hz".format(n_ch_out, fs_out))
@@ -2240,11 +2412,12 @@ def _process_one(work_dir, inp, steps):
             "dropped_channels_reasons": dict(data_dict.get("meta", {{}}).get("dropped_channels_reasons") or {{}}),
             "rejected_seconds": data_dict.get("meta", {{}}).get("rejected_seconds"),
             "unmatched_labels": list(data_dict.get("meta", {{}}).get("unmatched_labels", [])),
+            "data_rank": _rank_rec,
             "output_file": str(out_file),
             "success": True,
         }}
         _m_out = data_dict.get("meta", {{}})
-        for _k in ("regression_eog", "bad_segments", "pipeline_warnings"):
+        for _k in ("regression_eog", "bad_segments", "clip", "ica", "pipeline_warnings"):
             if _m_out.get(_k):
                 status[_k] = _m_out[_k]
         if trial_result is not None:
@@ -2720,6 +2893,17 @@ def _save_nwb_inline(*, data_dict, subject_id, out_path,
                 )
         except Exception as _tr_exc:
             print("[nwb] WARNING: trial table not written: {}".format(_tr_exc), file=sys.stderr)
+    _rank_d = meta_d.get("easybci_data_rank") if isinstance(meta_d, _Mapping_nwb) else None
+    if _rank_d:
+        try:
+            nwb.add_scratch(
+                json.dumps(_rank_d, ensure_ascii=False, default=str),
+                name="easybci_data_rank",
+                description="EasyBCIdata effective data rank at float32 precision (JSON); "
+                            "pass rank explicitly to covariance-based methods",
+            )
+        except Exception as _rk_exc:
+            print("[nwb] WARNING: data rank not written: {}".format(_rk_exc), file=sys.stderr)
     if _bad_spans_s:
         try:
             nwb.add_scratch(
@@ -2835,6 +3019,13 @@ def _load_preprocessed_nwb(pre_nwb):
             _bad_sp = np.asarray(_nwb.get_scratch("easybci_bad_spans")).tolist()
         except Exception:
             _bad_sp = None
+        # Effective data rank recorded by pipeline.py (JSON scratch).
+        _rank_d = None
+        try:
+            import json as _json_rk
+            _rank_d = _json_rk.loads(str(_nwb.get_scratch("easybci_data_rank")))
+        except Exception:
+            _rank_d = None
         # Zero-copy memmap onto the contiguous HDF5 data region. get_offset()
         # returns None for chunked/compressed datasets → fall back to full read.
         try:
@@ -2861,6 +3052,8 @@ def _load_preprocessed_nwb(pre_nwb):
         _meta["easybci_trials"] = _trials_d
     if _bad_sp:
         _meta["bad_spans_s"] = _bad_sp
+    if _rank_d:
+        _meta["easybci_data_rank"] = _rank_d
     return _data, _fs, _meta, _channels
 # --- end Preprocessed NWB loader ---
 '''
@@ -3072,6 +3265,10 @@ def generate_pipeline_script(
         nwb_helpers_block=_NWB_HELPERS_BLOCK,
         already_done_helper=_ALREADY_DONE_HELPER_SRC,
         trial_reject_block=_trial_reject.inline_source(),
+        data_rank_block=_data_rank.inline_source(),
+        amplitude_units_block=_amplitude_units.inline_source(),
+        eog_reference_block=_eog_reference.inline_source(),
+        rank_ch_type=_data_rank.default_ch_type(modality),
         trial_reject_repr=repr(trial_reject_cfg),
         epoch_window_repr=repr(_ew),
         fallback_epoch_window_repr=repr((-0.2, float(fallback_segment_duration))),
@@ -3438,10 +3635,13 @@ def _write_report(qc_dir, session_id, subject_id, data_path, steps, metrics, ste
         payload["trial_rejection"] = trials
     if time_sep:
         payload["time_separability"] = time_sep
-    _notes = {{k: status[k] for k in ("regression_eog", "bad_segments", "pipeline_warnings")
+    _notes = {{k: status[k] for k in ("regression_eog", "bad_segments", "clip", "ica", "pipeline_warnings")
               if status.get(k)}}
     if _notes:
         payload["pipeline_notes"] = _notes
+    _rank = status.get("data_rank")
+    if _rank:
+        payload["data_rank"] = _rank
     if bad_spans:
         payload["bad_spans_s"] = bad_spans
     prefix = "{{}}_".format(stem) if stem else ""
@@ -3503,7 +3703,43 @@ def _write_report(qc_dir, session_id, subject_id, data_path, steps, metrics, ste
             md.append("- reject_bad_segments ({{}}, {{}}): {{}} span(s), {{}} s ({{:.1%}})".format(
                 _bs.get("action"), _bs.get("method"), _bs.get("n_spans"),
                 _bs.get("bad_seconds"), float(_bs.get("bad_fraction") or 0.0)))
+        _cl = _notes.get("clip")
+        if _cl:
+            md.append("- clip ({{}} {{}}{{}}): {{:.4%}} of samples clipped{{}}".format(
+                _cl.get("mode"), _cl.get("threshold"), _cl.get("unit") or "",
+                float(_cl.get("clipped_frac") or 0.0),
+                " — **{{}}**".format(_cl["warning"]) if _cl.get("warning") else ""))
+            if _cl.get("unit_status") in ("unit_unknown", "unit_mismatch"):
+                md.append("  - **{{}}**: data unit {{!r}}, threshold applied unconverted".format(
+                    _cl["unit_status"], _cl.get("data_unit")))
+        _ica = _notes.get("ica")
+        if _ica:
+            md.append("- ica: {{}} component(s), excluded {{}}; blink reference {{}} ({{}})".format(
+                _ica.get("n_components"), _ica.get("excluded"), _ica.get("eog_reference"),
+                _ica.get("eog_reference_source")))
         for w in _notes.get("pipeline_warnings") or []:
+            md.append("- WARN: {{}}".format(w))
+        md.append("")
+    if _rank:
+        md += ["## Data rank", ""]
+        if _rank.get("status") == "ok":
+            md.append("- Effective rank: {{}} / {{}} channels at {{}} precision".format(
+                _rank.get("rank"), _rank.get("n_channels"), _rank.get("precision")))
+            if _rank.get("reducers"):
+                md.append("- Rank-reducing steps: {{}}".format(", ".join(_rank["reducers"])))
+            _r, _n = _rank.get("rank"), _rank.get("n_channels")
+            _types = _rank.get("ch_types") or {{"eeg": _n}}
+            if isinstance(_r, int) and isinstance(_n, int) and _r < _n:
+                if len(_types) == 1:
+                    md.append("- **Pass rank=" + '{{"' + str(next(iter(_types))) + '": ' + str(_r) + '}}'
+                              + " to covariance-based methods** (CSP, xDAWN, Riemannian, ICA, source imaging)")
+                else:
+                    md.append("- **Mixed channel types {{}}: {{}} is the whole-matrix rank** — pass the "
+                              "rank of the channel type used downstream".format(_types, _r))
+        else:
+            md.append("- Rank could not be estimated ({{}}) — estimate it before any "
+                      "covariance-based method".format(_rank.get("reason")))
+        for w in _rank.get("warnings") or []:
             md.append("- WARN: {{}}".format(w))
         md.append("")
     if time_sep:
@@ -4758,6 +4994,30 @@ STRIDE = {stride}
 EVENTS_PRESENT = {events_present}
 LABEL_CONFIG = {label_config_repr}
 
+{data_rank_block}
+
+def _epochs_rank_fields(epochs, channels, meta):
+    """``rank`` / ``rank_reason`` / ``rank_info`` for the pickle payload: the
+    rank of the delivered epochs at float32 precision, with the reducers
+    pipeline.py recorded (car, ica). Downstream covariance-based methods
+    (CSP, xDAWN, Riemannian) must pass this rank explicitly."""
+    prior = (meta or {{}}).get("easybci_data_rank") if isinstance(meta, dict) else None
+    _names = (prior or {{}}).get("reducers") or []
+    _drops = (prior or {{}}).get("reducer_drops")
+    if not isinstance(_drops, list) or len(_drops) != len(_names):
+        _drops = [1 if op == "car" else 0 for op in _names]
+    reducers = [{{"op": op, "drop": int(dr), "channels": list(channels)}}
+                for op, dr in zip(_names, _drops)]
+    prior_types = (prior or {{}}).get("ch_types") or {{}}
+    info = estimate_rank(
+        epochs, channels=channels, reducers=reducers,
+        ch_types=(meta or {{}}).get("ch_types") if isinstance(meta, dict) else None,
+        default_ch_type=next(iter(prior_types)) if len(prior_types) == 1 else "eeg")
+    if info.get("status") != "ok":
+        return {{"rank": None, "rank_reason": [], "rank_info": info}}
+    return {{"rank": int(info["rank"]), "rank_reason": list(info.get("reducers") or []),
+             "rank_info": info}}
+
 
 def _sliding(data, fs, dur, stride):
     win = int(dur * fs)
@@ -5007,6 +5267,7 @@ def _ai_ready_one(work_dir, inp):
         out_dir = work_dir / "preprocessed_output" / "AI_ready" / sub_id / "ses-{{}}".format(ses)
         out_dir.mkdir(parents=True, exist_ok=True)
         out_file = out_dir / "{{}}_epochs.pkl".format(stem)
+        _rk = _epochs_rank_fields(epochs, channels, meta)
         payload = {{
             "epochs": epochs,
             "labels": labels,
@@ -5014,6 +5275,7 @@ def _ai_ready_one(work_dir, inp):
             "channels": channels,
             "trial_index": trial_index,
             "epoch_window": trials_d.get("epoch_window"),
+            **_rk,
         }}
         with open(out_file, "wb") as f:
             pickle.dump(payload, f)
@@ -5027,6 +5289,8 @@ def _ai_ready_one(work_dir, inp):
             "epoch_window": trials_d.get("epoch_window"),
             "n_trials_rejected": len(trials_d.get("rejected") or []),
             "reject_cap_hit": bool(rej.get("cap_hit")),
+            "rank": _rk["rank"],
+            "rank_reason": _rk["rank_reason"],
             "output_file": str(out_file),
         }}
 
@@ -5091,11 +5355,13 @@ def _ai_ready_one(work_dir, inp):
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "{{}}_epochs.pkl".format(stem)
 
+    _rk = _epochs_rank_fields(epochs, channels, meta)
     payload = {{
         "epochs": epochs,
         "labels": labels,
         "frequency": fs,
         "channels": channels,
+        **_rk,
     }}
     with open(out_file, "wb") as f:
         pickle.dump(payload, f)
@@ -5113,6 +5379,8 @@ def _ai_ready_one(work_dir, inp):
         "session_id": ses,
         "n_epochs": int(epochs.shape[0]),
         "n_classes": n_classes,
+        "rank": _rk["rank"],
+        "rank_reason": _rk["rank_reason"],
         "output_file": str(out_file),
     }}
 
@@ -5252,6 +5520,7 @@ def generate_build_ai_ready_script(
         label_config_repr=repr(label_config or {}),
         nwb_loader_block=_NWB_PREPROCESSED_LOADER_BLOCK,
         already_done_helper=_ALREADY_DONE_HELPER_SRC,
+        data_rank_block=_data_rank.inline_source(),
     )
 
 

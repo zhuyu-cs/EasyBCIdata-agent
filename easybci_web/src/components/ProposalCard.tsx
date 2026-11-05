@@ -1,44 +1,10 @@
 import { lazy, Suspense } from "react";
+import type { ProposalShape } from "./proposalJson";
+import { t } from "@/lib/i18n";
 
 const EvidencePanel = lazy(() =>
   import("./EvidencePanel").then((m) => ({ default: m.EvidencePanel })),
 );
-
-interface ProposalStep {
-  operator: string;
-  params?: Record<string, unknown>;
-  param_evidence?: Record<string, import("./EvidencePanel").ParameterEvidence>;
-}
-
-interface ProposalShape {
-  modality?: string;
-  paradigm?: string;
-  registry_version?: string;
-  steps: ProposalStep[];
-  rationale?: string[];
-}
-
-export function isProposalJson(text: string): ProposalShape | null {
-  try {
-    const obj = JSON.parse(text);
-    if (
-      obj &&
-      Array.isArray(obj.steps) &&
-      obj.steps.length > 0 &&
-      obj.steps.every(
-        (s: { operator?: unknown; param_evidence?: unknown }) =>
-          typeof s.operator === "string" &&
-          typeof s.param_evidence === "object" &&
-          s.param_evidence !== null,
-      )
-    ) {
-      return obj as ProposalShape;
-    }
-  } catch {
-    /* not JSON */
-  }
-  return null;
-}
 
 interface Props {
   proposal: ProposalShape;
@@ -46,21 +12,21 @@ interface Props {
 
 export function ProposalCard({ proposal }: Props) {
   return (
-    <div className="my-2 rounded-lg border border-[var(--border-primary,#e8e5e0)] overflow-hidden">
-      <div className="px-3 py-1.5 bg-[var(--bg-tertiary,#f1f1ef)] border-b border-[var(--border-primary,#e8e5e0)] flex items-center gap-2">
-        <span className="text-[11px] font-medium text-[var(--text-muted,#9b9a97)]">
-          Proposal
+    <div className="my-2 rounded-lg border border-[var(--border-primary)] overflow-hidden">
+      <div className="px-3 py-1.5 bg-[var(--bg-tertiary)] border-b border-[var(--border-primary)] flex items-center gap-2">
+        <span className="text-[11px] font-medium text-[var(--text-muted)]">
+          {t("Proposal")}
         </span>
-        <span className="text-[10px] text-[var(--text-faint,#c4c3c0)]">
-          {proposal.steps.length} steps
+        <span className="text-[11px] text-[var(--text-faint)]">
+          {t("{n} steps", { n: proposal.steps.length })}
         </span>
         {proposal.modality && (
-          <span className="text-[10px] text-[var(--text-faint,#c4c3c0)]">
+          <span className="text-[11px] text-[var(--text-faint)]">
             · {proposal.modality}
           </span>
         )}
         {proposal.paradigm && (
-          <span className="text-[10px] text-[var(--text-faint,#c4c3c0)]">
+          <span className="text-[11px] text-[var(--text-faint)]">
             · {proposal.paradigm}
           </span>
         )}
@@ -68,7 +34,7 @@ export function ProposalCard({ proposal }: Props) {
       <div className="p-3 space-y-2">
         {proposal.steps.map((step, i) => (
           <div key={i} className="text-[12px]">
-            <div className="font-mono text-[var(--text-secondary,#5f5e5b)]">
+            <div className="font-mono text-[var(--text-secondary)]">
               {i + 1}. {step.operator}
               {step.params &&
                 Object.keys(step.params).length > 0 &&

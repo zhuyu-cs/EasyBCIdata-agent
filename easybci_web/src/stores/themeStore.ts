@@ -4,7 +4,16 @@ type Theme = "light" | "dark" | "system";
 
 interface ThemeStore {
   theme: Theme;
+  /** Resolved appearance — follows the OS while `theme` is "system". */
+  isDark: boolean;
   setTheme: (t: Theme) => void;
+}
+
+const darkQuery =
+  typeof window !== "undefined" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+
+function resolveDark(theme: Theme): boolean {
+  return theme === "dark" || (theme === "system" && !!darkQuery?.matches);
 }
 
 function getInitialTheme(): Theme {
@@ -13,12 +22,7 @@ function getInitialTheme(): Theme {
 }
 
 function applyTheme(theme: Theme) {
-  const root = document.documentElement;
-  if (theme === "system") {
-    root.removeAttribute("data-theme");
-  } else {
-    root.setAttribute("data-theme", theme);
-  }
+  document.documentElement.setAttribute("data-theme", resolveDark(theme) ? "dark" : "light");
   localStorage.setItem("easybci-theme", theme);
 }
 
@@ -42,26 +46,25 @@ export const useThemeStore = create<ThemeStore>((set) => {
   if (typeof window !== "undefined") applyTheme(initial);
   return {
     theme: initial,
+    isDark: resolveDark(initial),
     setTheme: (t) => {
       triggerThemeTransition();
       applyTheme(t);
-      set({ theme: t });
+      set({ theme: t, isDark: resolveDark(t) });
     },
   };
 });
 
+darkQuery?.addEventListener("change", () => {
+  const { theme } = useThemeStore.getState();
+  if (theme === "system") applyTheme(theme);
+  useThemeStore.setState({ isDark: resolveDark(theme) });
+});
+
 export function useThemeToggle() {
-  const { theme, setTheme } = useThemeStore();
-  const toggle = () => {
-    const isDark =
-      theme === "dark" ||
-      (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-    setTheme(isDark ? "light" : "dark");
-  };
-  const isDark =
-    theme === "dark" ||
-    (theme === "system" &&
-      typeof window !== "undefined" &&
-      window.matchMedia("(prefers-color-scheme: dark)").matches);
+  const theme = useThemeStore((s) => s.theme);
+  const isDark = useThemeStore((s) => s.isDark);
+  const setTheme = useThemeStore((s) => s.setTheme);
+  const toggle = () => setTheme(isDark ? "light" : "dark");
   return { theme, isDark, toggle, setTheme };
 }

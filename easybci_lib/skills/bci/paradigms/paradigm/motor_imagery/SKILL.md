@@ -111,11 +111,11 @@ Step rationale:
 4. **resample:256** — standardise sampling rate.  256 Hz suffices for
    ≤ 80 Hz analysis (Nyquist = 128).  Skip if recording is already at a
    target rate.
-5. **ICA:eog** — remove blinks; *only* fit ICA when the recording has
-   ≥ 32 channels and ≥ 60 s of data — below that, ICA components are
-   under-determined and the extracted "blink" component leaks
-   sensorimotor signal.  Consider regression-based EOG removal as an
-   alternative for small-channel-count datasets.
+5. **ica:eog** — remove blinks. Whether ICA or regression fits the recording
+   (effective channel count, duration, EOG channel vs frontal-pole proxy) is
+   decided by the `ocular_artifact` decision skill; the `ocular_artifact`
+   block in the plan_pipeline return already carries its recommendation.
+   `clip`, `scale` and trial rejection do not replace this step.
 6. **scale:robust** — robust scaling (median + IQR) is more stable than
    z-score under heavy-tailed trial-level outliers (movement bursts).
 
@@ -169,6 +169,11 @@ Recommended grade thresholds (encoded in `quality/grader.py`):
 | **EEGNet** | 70–80% | Compact CNN; strong on within-subject. Lawhern et al. 2018. |
 | **ShallowConvNet / DeepConvNet** | 70–82% | Schirrmeister et al. 2017. Larger models, more data needed. |
 | **EEG-Conformer / transformer baselines** | 75–85% | 2022–2024 papers; gain over EEGNet is typically < 5 pp on small datasets. |
+
+> CSP / FBCSP / Riemannian on EasyBCI output: pass the recorded rank
+> (`epochs.pkl["rank"]`, e.g. `CSP(..., rank={"eeg": rank})`). With `car`
+> and float32 storage, `rank=None` overestimates the rank and CSP collapses
+> to predicting one class — see the `csp` skill.
 
 For two-class motor imagery (left vs right hand), 80–90% is achievable
 with FBCSP on well-curated subjects.  Generic "let me classify any new

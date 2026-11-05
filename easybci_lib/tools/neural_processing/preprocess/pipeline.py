@@ -24,6 +24,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from easybci_lib.tools.neural_processing._seed import EASYBCI_SEED
+from easybci_lib.tools.neural_processing.preprocess.amplitude_units import (
+    rescaled_unit,
+    split_amplitude,
+    to_data_units,
+)
 from easybci_lib.tools.neural_processing.preprocess.operator_vocab import (
     engine_operators as _engine_operators,
 )
@@ -435,10 +440,13 @@ def _step_resample(d: Dict, param: str) -> Dict:
 def _step_scale(d: Dict, param: str) -> Dict:
     """Scale data: 'robust', 'standard', or a numeric factor."""
     data = d["data"]
+    meta = d.get("meta") if isinstance(d.get("meta"), dict) else None
 
     try:
         factor = float(param)
         d["data"] = data * factor
+        if meta is not None:
+            meta["data_unit"] = rescaled_unit(meta.get("data_unit"), factor)
         return d
     except ValueError:
         pass
@@ -457,13 +465,39 @@ def _step_scale(d: Dict, param: str) -> Dict:
 
     # Scale per channel (fit across time)
     d["data"] = scaler.fit_transform(data.T).T.astype(np.float32)
+    if meta is not None:
+        meta["data_unit"] = "unitless"
     return d
 
 
 def _step_clip(d: Dict, param: str) -> Dict:
-    """Clamp values to ±max_abs."""
-    max_abs = float(param)
-    d["data"] = np.clip(d["data"], -max_abs, max_abs)
+    """Clamp values: ``<max_abs>[unit]`` (bare = data units; ``500uV`` is
+    converted to ``meta["data_unit"]``) or ``sd=<k>`` (per-channel mean ± k·SD).
+    Same semantics as the generated pipeline's ``op_clip``."""
+    p = (param or "").strip().lower()
+    if not p:
+        raise ValueError("clip: a threshold is required — clip:<max_abs>[unit] or clip:sd=<k>")
+    orig = np.asarray(d["data"])
+    data = orig.astype(np.float64)
+    if p.startswith("sd="):
+        k = float(p[3:])
+        if not k > 0:
+            raise ValueError(f"clip: threshold must be > 0, got {param!r}")
+        mu = np.nanmean(data, axis=1, keepdims=True)
+        sd = np.nanstd(data, axis=1, keepdims=True)
+        lo, hi = mu - k * sd, mu + k * sd
+    else:
+        value, unit = split_amplitude(p)
+        if not value > 0:
+            raise ValueError(f"clip: threshold must be > 0, got {param!r}")
+        data_unit = (d.get("meta") or {}).get("data_unit")
+        max_abs, status = to_data_units(value, unit, data_unit)
+        if status in ("unit_unknown", "unit_mismatch"):
+            logger.warning("clip:%s — %s: data unit is %r, threshold applied unconverted",
+                           param, status, data_unit)
+        lo, hi = -max_abs, max_abs
+    out_dtype = orig.dtype if np.issubdtype(orig.dtype, np.floating) else np.float32
+    d["data"] = np.clip(data, lo, hi).astype(out_dtype)
     return d
 
 

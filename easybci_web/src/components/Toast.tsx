@@ -3,14 +3,14 @@ import { useToastStore } from "@/stores/toastStore";
 const ICONS = {
   success: (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <circle cx="7" cy="7" r="6" stroke="#2d8a4e" strokeWidth="1.5" />
-      <path d="M4.5 7l2 2 3.5-3.5" stroke="#2d8a4e" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="7" cy="7" r="6" stroke="var(--accent-green)" strokeWidth="1.5" />
+      <path d="M4.5 7l2 2 3.5-3.5" stroke="var(--accent-green)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
   error: (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <circle cx="7" cy="7" r="6" stroke="#d1242f" strokeWidth="1.5" />
-      <path d="M5 5l4 4M9 5l-4 4" stroke="#d1242f" strokeWidth="1.5" strokeLinecap="round" />
+      <circle cx="7" cy="7" r="6" stroke="var(--accent-red)" strokeWidth="1.5" />
+      <path d="M5 5l4 4M9 5l-4 4" stroke="var(--accent-red)" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   ),
   info: (

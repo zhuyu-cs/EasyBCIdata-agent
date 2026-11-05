@@ -50,6 +50,9 @@ from typing import Any, Dict, List, Literal, Optional
 
 from easybci_lib.tools.neural_processing._seed import EASYBCI_SEED
 from easybci_lib.tools.neural_processing.export._lint import ruff_fix
+from easybci_lib.tools.neural_processing.quality.data_rank import (
+    summarize_work_dir as _summarize_data_rank,
+)
 from easybci_lib.tools.neural_processing.quality.trial_reject import normalize_epoch_window
 from easybci_lib.tools.neural_processing.export._size_utils import (
     dir_size_bytes, format_size, paths_size_bytes,
@@ -424,6 +427,45 @@ def _resolve_epoch_window_for_repo(
     return normalize_epoch_window((pipeline_record or {}).get("epoch_window"))
 
 
+def _stamp_data_rank(out: Path, pipeline_record: Dict[str, Any]) -> None:
+    """Copy the per-file data-rank summary into ``pipeline_record`` (fail-open)."""
+    try:
+        block = _summarize_data_rank(out)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("data_rank summary skipped: %s", exc)
+        block = None
+    if block:
+        pipeline_record["data_rank"] = block
+
+
+def _stamp_run_facts(
+    out: Path, record: Dict[str, Any], epoch_window: Optional[List[float]],
+) -> None:
+    """Epoch window (+ source) and data rank — stamped on every record
+    ``build_mini_repo`` writes, including the fallback ones."""
+    if epoch_window is not None:
+        record["epoch_window"] = epoch_window
+    record.update(_resolve_epoch_window_meta(out, record))
+    _stamp_data_rank(out, record)
+
+
+def _readme_rank_row(pipeline_record: Optional[Dict[str, Any]]) -> Optional[str]:
+    """README Input-table row for the effective data rank (None when unknown)."""
+    dr = (pipeline_record or {}).get("data_rank")
+    if not isinstance(dr, dict) or not isinstance(dr.get("rank_min"), int):
+        return None
+    files = [f for f in dr.get("per_file") or [] if isinstance(f, dict)]
+    n_ch = min((f["n_channels"] for f in files if isinstance(f.get("n_channels"), int)), default=None)
+    if n_ch is None:
+        return None
+    if not dr.get("rank_deficient"):
+        return f"| Data rank | {dr['rank_min']} / {n_ch} (full rank) |"
+    reducers = sorted({r for f in files for r in (f.get("reducers") or [])})
+    why = ", ".join(reducers) or "dependent channels"
+    return (f"| Data rank | {dr['rank_min']} / {n_ch} ({why}) — pass rank explicitly "
+            "to CSP / covariance methods |")
+
+
 def _resolve_epoch_window_meta(
     out: Path, pipeline_record: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
@@ -753,6 +795,7 @@ def build_mini_repo(
         )
         created_files.append("plan/reasoning.md")
 
+    _readme_record = pipeline_record
     if pipeline_record:
         # Stamp reproducibility info so consumers (CLI/WebUI) can render a badge.
         pipeline_record.setdefault("reproducibility", {
@@ -804,9 +847,7 @@ def build_mini_repo(
         pipeline_record["web_evidence_provider"] = (
             web_evidence.get("provider") if isinstance(web_evidence, dict) else None
         )
-        if _epoch_window is not None:
-            pipeline_record["epoch_window"] = _epoch_window
-        pipeline_record.update(_resolve_epoch_window_meta(out, pipeline_record))
+        _stamp_run_facts(out, pipeline_record, _epoch_window)
         # Stamp lifecycle status so downstream tooling (CLI listings, validators,
         # the proven-pipeline flywheel) can distinguish partial vs. ok builds.
         pipeline_record["status"] = status
@@ -849,6 +890,8 @@ def build_mini_repo(
         }
         if pending_consolidations:
             minimal_record["pending_consolidations"] = pending_consolidations
+        _stamp_run_facts(out, minimal_record, _epoch_window)
+        _readme_record = minimal_record
         _write(out / "plan" / "pipeline_record.json", json.dumps(
             minimal_record, indent=2, default=str, ensure_ascii=False))
         created_files.append("plan/pipeline_record.json")
@@ -865,6 +908,8 @@ def build_mini_repo(
         promoted.pop("partial_reason", None)
         promoted.pop("pending_consolidations", None)
         promoted.setdefault("reproducibility", {"seed": EASYBCI_SEED, "locked": True})
+        _stamp_run_facts(out, promoted, _epoch_window)
+        _readme_record = promoted
         _write(out / "plan" / "pipeline_record.json", json.dumps(
             promoted, indent=2, default=str, ensure_ascii=False))
         created_files.append("plan/pipeline_record.json")
@@ -907,6 +952,8 @@ def build_mini_repo(
             "reproducibility": {"seed": EASYBCI_SEED, "locked": True},
             "auto_synthesized": not _real_signal,
         }
+        _stamp_run_facts(out, minimal_record, _epoch_window)
+        _readme_record = minimal_record
         _write(out / "plan" / "pipeline_record.json", json.dumps(
             minimal_record, indent=2, default=str, ensure_ascii=False))
         created_files.append("plan/pipeline_record.json")
@@ -1116,7 +1163,7 @@ def build_mini_repo(
                             created_files.append(str(rel))
 
     # --- README.md ---
-    _write_readme(out, steps, data_info, pipeline_record, modality, paradigm,
+    _write_readme(out, steps, data_info, _readme_record, modality, paradigm,
                   input_path, split_config, output_hierarchy,
                   status=status, partial_reason=partial_reason,
                   pending_consolidations=pending_consolidations)
@@ -1934,6 +1981,9 @@ def _write_readme(
         lines.append(f"| Epoch window | {list(_ew)} s ({_ews or 'unspecified'}) |")
     elif _ews == "not_applicable":
         lines.append("| Epoch window | not applicable (continuous recording) |")
+    _rank_row = _readme_rank_row(pipeline_record)
+    if _rank_row:
+        lines.append(_rank_row)
     n_subjects = len(output_hierarchy)
     n_sessions = sum(len(ses) for ses in output_hierarchy.values())
     if n_subjects > 0:

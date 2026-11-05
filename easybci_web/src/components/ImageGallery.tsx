@@ -1,6 +1,7 @@
-import { useState, useMemo, lazy, Suspense } from "react";
-import type { Message } from "@/hooks/useConversation";
+import { useState, useMemo, lazy, Suspense, memo } from "react";
+import type { Turn } from "@/lib/turns";
 import { fileServeUrl } from "@/lib/api";
+import { t } from "@/lib/i18n";
 
 const FilePreview = lazy(() =>
   import("@/components/FilePreview").then((m) => ({ default: m.FilePreview })),
@@ -9,34 +10,25 @@ const FilePreview = lazy(() =>
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "svg", "webp"]);
 const IMAGE_PATH_RE = /(?:^|\s)(\/(?:[^\s/]+\/)*[^\s/]+\.(?:png|jpg|jpeg|gif|svg|webp))(?:\s|$|[,.);\]}])/gi;
 
-function extractImagePaths(messages: Message[]): string[] {
+function extractImagePaths(turns: Turn[]): string[] {
   const seen = new Set<string>();
   const paths: string[] = [];
-
-  for (const msg of messages) {
-    if (msg.role !== "assistant") continue;
-
-    if (msg.content) {
-      let match: RegExpExecArray | null;
-      const re = new RegExp(IMAGE_PATH_RE.source, IMAGE_PATH_RE.flags);
-      while ((match = re.exec(msg.content)) !== null) {
-        const p = match[1];
-        if (!seen.has(p)) {
-          seen.add(p);
-          paths.push(p);
-        }
-      }
+  const add = (p: string) => {
+    if (!seen.has(p)) {
+      seen.add(p);
+      paths.push(p);
     }
+  };
 
-    if (msg.toolCalls) {
-      for (const tc of msg.toolCalls) {
-        if (tc.preview) {
-          const ext = tc.preview.split(".").pop()?.toLowerCase() ?? "";
-          if (IMAGE_EXTS.has(ext) && !seen.has(tc.preview)) {
-            seen.add(tc.preview);
-            paths.push(tc.preview);
-          }
-        }
+  for (const turn of turns) {
+    for (const item of turn.items) {
+      if (item.kind === "text") {
+        const re = new RegExp(IMAGE_PATH_RE.source, IMAGE_PATH_RE.flags);
+        let match: RegExpExecArray | null;
+        while ((match = re.exec(item.text)) !== null) add(match[1]);
+      } else if (item.kind === "step" && item.step.preview) {
+        const ext = item.step.preview.split(".").pop()?.toLowerCase() ?? "";
+        if (IMAGE_EXTS.has(ext)) add(item.step.preview);
       }
     }
   }
@@ -83,7 +75,7 @@ function Thumbnail({
         </svg>
       </div>
       <div className="absolute bottom-0 inset-x-0 px-1.5 py-1 bg-gradient-to-t from-black/50 to-transparent">
-        <span className="text-[9px] text-white/90 truncate block font-mono">
+        <span className="text-[11px] text-white/90 truncate block font-mono">
           {fileName}
         </span>
       </div>
@@ -100,7 +92,7 @@ function DownloadButton({ path }: { path: string }) {
       href={src}
       download={fileName}
       className="w-6 h-6 flex items-center justify-center rounded hover:bg-[var(--bg-hover)] text-[var(--text-muted)] transition-colors"
-      title="Download"
+      title={t("Download")}
     >
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
         <path d="M6 1v8M6 9L3 6M6 9l3-3M2 11h8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
@@ -110,11 +102,17 @@ function DownloadButton({ path }: { path: string }) {
 }
 
 interface Props {
-  messages: Message[];
+  turns: Turn[];
+  /** Skip the trailing turn — it is still streaming, and its paths may be
+   *  half-written. */
+  excludeLast?: boolean;
 }
 
-export function ImageGallery({ messages }: Props) {
-  const images = useMemo(() => extractImagePaths(messages), [messages]);
+function ImageGalleryImpl({ turns, excludeLast = false }: Props) {
+  const images = useMemo(
+    () => extractImagePaths(excludeLast ? turns.slice(0, -1) : turns),
+    [turns, excludeLast],
+  );
   const [previewPath, setPreviewPath] = useState<string | null>(null);
 
   if (images.length === 0) return null;
@@ -130,9 +128,9 @@ export function ImageGallery({ messages }: Props) {
               <path d="M1.5 9.5l3-3 2 2 3-3 3 3" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
             <span className="text-[11px] font-medium text-[var(--text-muted)]">
-              Images in Conversation
+              {t("Images in Conversation")}
             </span>
-            <span className="text-[10px] text-[var(--text-faint)]">
+            <span className="text-[11px] text-[var(--text-faint)]">
               {images.length}
             </span>
           </div>
@@ -176,3 +174,16 @@ export function ImageGallery({ messages }: Props) {
     </>
   );
 }
+
+// Streaming replaces the turns array on every flush, but only its last element
+// changes; the gallery re-renders only when a settled turn does.
+function settledEqual(a: Props, b: Props): boolean {
+  if (a.excludeLast !== b.excludeLast) return false;
+  const n = a.excludeLast ? a.turns.length - 1 : a.turns.length;
+  const m = b.excludeLast ? b.turns.length - 1 : b.turns.length;
+  if (n !== m) return false;
+  for (let i = 0; i < n; i++) if (a.turns[i] !== b.turns[i]) return false;
+  return true;
+}
+
+export const ImageGallery = memo(ImageGalleryImpl, settledEqual);

@@ -802,12 +802,28 @@ def setup_model_provider(config: dict, *, quick: bool = False):
     save_config(config)
 
 
+def _resync_after_aux(config: dict) -> None:
+    """Re-sync the wizard's in-memory config after an aux pick.
+
+    The aux flow saves to disk itself (aux slots, plus any endpoint saved to
+    ``custom_providers`` / ``providers``); without this the final
+    save_config(config) of setup_model_provider would overwrite them with
+    stale in-memory state.
+    """
+    _refreshed = load_config()
+    for key in ("auxiliary", "custom_providers", "providers"):
+        if key in _refreshed:
+            config[key] = _refreshed[key]
+        else:
+            config.pop(key, None)
+
+
 def _setup_aux_general(config: dict, main_model_name: str, main_provider: str) -> None:
     """Wizard section: pick how non-vision aux tasks should be routed.
 
     Two options:
-      0. Configure now: opens _aux_pick_routing and fans the result out to
-         all aux slots except vision
+      0. Configure now: runs the main-model flow (_aux_pick_routing) and fans
+         the result out to all aux slots except vision
       1. Configure separately later (no-op — user can run `easybci model →
          Configure auxiliary models...` afterward)
     """
@@ -832,19 +848,12 @@ def _setup_aux_general(config: dict, main_model_name: str, main_provider: str) -
     if idx == 0:
         routing = _aux_pick_routing(
             title="Configure auxiliary model (applied to all non-vision aux tasks)",
-            allow_auto=False,
         )
         if routing is None:
             print_info("Skipped — configure later with: easybci model → auxiliary")
             return
         n = _aux_apply_routing_to_all_tasks(routing, exclude=["vision"])
-        # _aux_apply_routing_to_all_tasks did its own load_config()/save_config()
-        # cycle, so re-sync the wizard's in-memory dict — otherwise the final
-        # save_config(config) at the end of setup_model_provider would
-        # overwrite our aux writes with stale in-memory state.
-        _refreshed = load_config()
-        if isinstance(_refreshed.get("auxiliary"), dict):
-            config["auxiliary"] = _refreshed["auxiliary"]
+        _resync_after_aux(config)
         print_success(f"Wrote auxiliary routing to {n} task(s).")
     else:
         print_info("Skipped — configure later with: easybci model → auxiliary")
@@ -878,7 +887,6 @@ def _setup_aux_vision(config: dict, main_model_name: str, main_provider: str) ->
         routing = _aux_pick_routing(
             title="Configure vision-capable model",
             require_vision_capable=True,
-            allow_auto=False,
         )
         if routing is None:
             print_info(
@@ -886,19 +894,8 @@ def _setup_aux_vision(config: dict, main_model_name: str, main_provider: str) ->
                 "easybci model → auxiliary → Vision"
             )
             return
-        _save_aux_choice(
-            "vision",
-            provider=routing["provider"],
-            model=routing.get("model", ""),
-            base_url=routing.get("base_url", ""),
-            api_key=routing.get("api_key", ""),
-        )
-        # _save_aux_choice did its own load_config()/save_config() cycle —
-        # re-sync the wizard's in-memory config so the final
-        # save_config(config) doesn't overwrite our vision write.
-        _refreshed = load_config()
-        if isinstance(_refreshed.get("auxiliary"), dict):
-            config["auxiliary"] = _refreshed["auxiliary"]
+        _save_aux_choice("vision", **routing)
+        _resync_after_aux(config)
         provider_lbl = routing["provider"]
         model_lbl = routing.get("model", "")
         print_success(

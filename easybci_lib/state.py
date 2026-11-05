@@ -33,7 +33,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_easybci_home() / "state.db"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 11
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -2303,6 +2303,7 @@ class SessionDB:
                 m.tool_name,
                 s.source,
                 s.model,
+                s.title AS session_title,
                 s.started_at AS session_started
             FROM messages_fts
             JOIN messages m ON m.id = messages_fts.rowid

@@ -97,3 +97,16 @@ epoch_window:
   not_applicable: "not applicable — continuous recording without trial events; no epoching"
   warn_no_data_basis: "Epoch window has no basis in this dataset's documentation or metadata — please confirm."
   warn_label_independent: "Window includes phases identical across classes: {phases}"
+
+ocular:
+  section: "Ocular artifacts"
+  evidence: "Evidence"
+  reference: "Blink reference"
+  none: "none (no EOG or frontal-pole channel)"
+  handled_by: "Removed by"
+  not_handled: "No step in this pipeline removes ocular artifacts"
+  not_counted: "{steps} do not remove ocular artifacts — they clip, rescale or drop trials; the blink stays in every kept trial"
+  recommended: "Recommended"
+  no_method: "Ocular artifacts cannot be removed (no EOG or frontal-pole channel); trial rejection is the only fallback"
+  exempt: "Not required for this run ({reason})"
+  order_warning: "Ocular removal runs after car — the average reference has already spread blinks to every channel; move it before car"

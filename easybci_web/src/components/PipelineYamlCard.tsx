@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
+import { t } from "@/lib/i18n";
 
 interface PipelineStep {
   name: string;
@@ -173,10 +174,10 @@ export function PipelineYamlCard({ yaml, analysisGoal, onGoalChange }: Props) {
   const chipLabel = currentGoal ? `goal: ${currentGoal}` : "goal: (unspecified)";
 
   return (
-    <div className="my-2 rounded-lg border border-[var(--border-primary,#e8e5e0)] overflow-hidden">
-      <div className="px-3 py-1.5 bg-[var(--bg-tertiary,#f1f1ef)] border-b border-[var(--border-primary,#e8e5e0)] flex items-center gap-2">
-        <span className="text-[11px] font-medium text-[var(--text-muted,#9b9a97)]">Pipeline</span>
-        <span className="text-[10px] text-[var(--text-faint,#c4c3c0)]">{steps.length} steps</span>
+    <div className="my-2 rounded-lg border border-[var(--border-primary)] overflow-hidden">
+      <div className="px-3 py-1.5 bg-[var(--bg-tertiary)] border-b border-[var(--border-primary)] flex items-center gap-2">
+        <span className="text-[11px] font-medium text-[var(--text-muted)]">{t("Pipeline")}</span>
+        <span className="text-[11px] text-[var(--text-faint)]">{steps.length} steps</span>
         <button
           type="button"
           aria-expanded={interactive ? open : undefined}
@@ -184,35 +185,35 @@ export function PipelineYamlCard({ yaml, analysisGoal, onGoalChange }: Props) {
           onClick={interactive ? () => setOpen((o) => !o) : undefined}
           disabled={!interactive}
           className={
-            "text-[10px] px-1.5 py-0.5 rounded border tabular-nums " +
-            "border-[var(--border-primary,#e8e5e0)] bg-[var(--bg-secondary,#fafaf8)] " +
-            "text-[var(--text-secondary,#5f5e5b)] font-mono " +
+            "text-[11px] px-1.5 py-0.5 rounded border tabular-nums " +
+            "border-[var(--border-primary)] bg-[var(--bg-secondary)] " +
+            "text-[var(--text-secondary)] font-mono " +
             (interactive
-              ? "cursor-pointer hover:bg-[var(--bg-hover,#ebebea)]"
+              ? "cursor-pointer hover:bg-[var(--bg-hover)]"
               : "cursor-default")
           }
           title={
             interactive
-              ? "Click to change analysis goal — re-runs propose_pipeline"
-              : "Inferred analysis goal (from plan/proposal.json)"
+              ? t("Click to change analysis goal — re-runs propose_pipeline")
+              : t("Inferred analysis goal (from plan/proposal.json)")
           }
         >
           {chipLabel}
           {interactive && <span className="ml-1 opacity-50">{open ? "−" : "+"}</span>}
         </button>
         <span
-          className="ml-auto text-[10px] px-1.5 py-0.5 rounded border border-emerald-300 bg-emerald-50 text-emerald-800"
-          title="All randomness (numpy, random, PYTHONHASHSEED, ICA, splits) pinned to seed 42"
+          className="ml-auto text-[11px] px-1.5 py-0.5 rounded border border-emerald-300 bg-emerald-50 text-emerald-800"
+          title={t("All randomness (numpy, random, PYTHONHASHSEED, ICA, splits) pinned to seed 42")}
         >
-          reproducible · seed 42
+          {t("reproducible · seed 42")}
         </span>
       </div>
       {interactive && open && (
         <div
           id={detailsId}
-          className="px-3 py-2 bg-[var(--bg-secondary,#fafaf8)] border-b border-[var(--border-primary,#e8e5e0)] text-[11px] text-[var(--text-secondary,#5f5e5b)]"
+          className="px-3 py-2 bg-[var(--bg-secondary)] border-b border-[var(--border-primary)] text-[11px] text-[var(--text-secondary)]"
         >
-          <p className="mb-1.5 text-[var(--text-muted,#9b9a97)]">
+          <p className="mb-1.5 text-[var(--text-muted)]">
             Pick the downstream analysis. Leave on the LLM-inferred value to keep current pipeline; switching re-runs propose_pipeline. <span className="font-mono">generic</span> if you want broad-coverage defaults.
           </p>
           <div className="flex flex-wrap gap-1.5">
@@ -226,10 +227,10 @@ export function PipelineYamlCard({ yaml, analysisGoal, onGoalChange }: Props) {
                     if (!active) onGoalChange!(opt);
                   }}
                   className={
-                    "text-[10px] px-2 py-0.5 rounded border font-mono " +
+                    "text-[11px] px-2 py-0.5 rounded border font-mono " +
                     (active
-                      ? "border-[var(--border-active,#d4d3cf)] bg-[var(--bg-active,#ebebea)] text-[var(--text-primary,#37352f)]"
-                      : "border-[var(--border-primary,#e8e5e0)] bg-[var(--bg-base,#ffffff)] text-[var(--text-secondary,#5f5e5b)] hover:bg-[var(--bg-hover,#ebebea)] cursor-pointer")
+                      ? "border-[var(--border-secondary)] bg-[var(--bg-active)] text-[var(--text-primary)]"
+                      : "border-[var(--border-primary)] bg-[var(--bg-primary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] cursor-pointer")
                   }
                   aria-pressed={active}
                   disabled={active}
@@ -239,7 +240,7 @@ export function PipelineYamlCard({ yaml, analysisGoal, onGoalChange }: Props) {
               );
             })}
             {enumOptions === null && (
-              <span className="text-[10px] text-[var(--text-faint,#c4c3c0)]">loading…</span>
+              <span className="text-[11px] text-[var(--text-faint)]">{t("loading…")}</span>
             )}
           </div>
         </div>
@@ -248,21 +249,21 @@ export function PipelineYamlCard({ yaml, analysisGoal, onGoalChange }: Props) {
         {steps.map((step, i) => (
           <div key={i} className="flex items-center gap-2.5">
             <span
-              className="w-5 h-5 rounded flex items-center justify-center bg-[var(--bg-tertiary,#f1f1ef)] shrink-0"
-              style={{ color: "var(--text-secondary,#5f5e5b)" }}
+              className="w-5 h-5 rounded flex items-center justify-center bg-[var(--bg-tertiary)] shrink-0"
+              style={{ color: "var(--text-secondary)" }}
             >
               {getIcon(step.name)}
             </span>
-            <span className="text-[11px] font-medium text-[var(--text-muted,#9b9a97)] w-4 shrink-0">
+            <span className="text-[11px] font-medium text-[var(--text-muted)] w-4 shrink-0">
               {i + 1}
             </span>
-            <span className="text-[12px] font-mono text-[var(--text-secondary,#5f5e5b)]">
+            <span className="text-[12px] font-mono text-[var(--text-secondary)]">
               {step.name}
             </span>
             {step.params && Object.entries(step.params).slice(0, 3).map(([k, v]) => (
               <span
                 key={k}
-                className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-hover,#ebebea)] text-[var(--text-muted,#9b9a97)] font-mono"
+                className="text-[11px] px-1.5 py-0.5 rounded bg-[var(--bg-hover)] text-[var(--text-muted)] font-mono"
               >
                 {k}={String(v)}
               </span>

@@ -412,6 +412,17 @@ def step_to_string(step: Any) -> str:
     if isinstance(params, dict):
         if set(params) == {"raw"}:
             ps = _param_value_str(params["raw"])
+        elif op.lower() == "clip":
+            # clip:<max_abs>[unit] (bare = data units) or clip:sd=<k>; never
+            # let an SD multiplier serialize as an absolute threshold.
+            low = {str(k).strip().lower(): v for k, v in params.items()}
+            if low.get("sd") not in (None, ""):
+                ps = "sd=" + _param_value_str(low["sd"])
+            else:
+                v = next((low[k] for k in ("max_abs", "threshold", "value", "uv") if low.get(k) not in (None, "")),
+                         next((val for key, val in low.items() if key != "unit"), None))
+                unit = "uV" if "uv" in low and low.get("uv") not in (None, "") else low.get("unit")
+                ps = _param_value_str(v) + (str(unit).strip() if unit not in (None, "") else "")
         elif op.lower() in _KV_PARAM_OPERATORS:
             ps = ",".join(
                 "{}={}".format(k, _param_value_str(v, "~"))

@@ -84,6 +84,13 @@ except Exception:  # noqa: BLE001
     _summarize_time_separability = None  # type: ignore[assignment]
 
 try:
+    from easybci_lib.tools.neural_processing.quality.data_rank import (
+        summarize_work_dir as _summarize_data_rank,
+    )
+except Exception:  # noqa: BLE001
+    _summarize_data_rank = None  # type: ignore[assignment]
+
+try:
     from easybci_lib.tools.neural_processing.quality.trial_reject import (
         normalize_epoch_window as _normalize_epoch_window,
     )
@@ -113,6 +120,13 @@ try:
     )
 except Exception:  # noqa: BLE001
     _decide_epoch_window = None  # type: ignore[assignment]
+try:
+    from easybci_lib.tools.neural_processing.preprocess.ocular_policy import (
+        assess_ocular_multi as _assess_ocular_multi,
+        render_reasoning_section as _render_ocular_section,
+    )
+except Exception:  # noqa: BLE001
+    _assess_ocular_multi = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +159,21 @@ def _qc_quality_blocks(work_dir) -> dict:
             ts = None
         if ts:
             out["time_separability"] = ts
+    dr = _data_rank_block(work_dir)
+    if dr:
+        out["data_rank"] = dr
     return out
+
+
+def _data_rank_block(work_dir) -> Optional[dict]:
+    """Tool-return block with the effective data rank pipeline.py recorded (fail-open)."""
+    if _summarize_data_rank is None or not work_dir:
+        return None
+    try:
+        return _summarize_data_rank(work_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("data_rank summary skipped: %s", exc)
+        return None
 
 
 def _qc_extra_hint(blocks: dict) -> str:
@@ -167,6 +195,10 @@ def _qc_extra_hint(blocks: dict) -> str:
     if ts and ts.get("status") in ("WARN", "INFO"):
         parts.append(" Present time_separability (status " + str(ts.get("status")) + ")"
                      + (": " + ts["hint"] if ts.get("hint") else "."))
+    dr = blocks.get("data_rank")
+    if dr and dr.get("must_present"):
+        parts.append(" Present data_rank (effective rank {} of the channels): {}".format(
+            dr.get("rank_min"), dr.get("hint") or ""))
     return "".join(parts)
 
 
@@ -3049,6 +3081,10 @@ def _handle_revise_proposal(args, **kw):
     }
     if warnings:
         payload["step_warnings"] = warnings
+    _oc = _ocular_block({}, work_dir, normalized, analysis_goal=proposal.get("analysis_goal"),
+                        modality=proposal.get("modality"), paradigm=proposal.get("paradigm"))
+    if _oc:
+        payload["ocular_artifact"] = _oc
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -3720,6 +3756,7 @@ def _do_handle_preprocess_neural(args, **kw):
         except Exception as _ban_err:
             logger.debug("NWB banner injection skipped: %s", _ban_err)
         _trial_block = _trial_rejection_block(work_dir)
+        _rank_block = _data_rank_block(work_dir)
         return json.dumps({
             "success": True,
             "stage": "pipeline",
@@ -3728,6 +3765,7 @@ def _do_handle_preprocess_neural(args, **kw):
             "stdout_tail": result["stdout_tail"],
             "analysis_goal": analysis_goal,
             **({"trial_rejection": _trial_block} if _trial_block else {}),
+            **({"data_rank": _rank_block} if _rank_block else {}),
             "next_action": {
                 "next_tool": "quality_check",
                 "hint": (
@@ -4796,6 +4834,13 @@ def _handle_suggest_pipeline(args, **kw):
             ),
         }
 
+    _oc = _ocular_block(args, _resolve_work_dir_from_args(args),
+                        result.get("recommended_steps") or [],
+                        analysis_goal=args.get("analysis_goal"), modality=modality,
+                        paradigm=paradigm)
+    if _oc:
+        result["ocular_artifact"] = _oc
+
     _attach_memory_footprint(result, args)
     return cap_return(result)
 
@@ -5174,6 +5219,28 @@ def _attach_window_plan(result: dict, plan: dict) -> None:
         result["dataset_understanding_hint"] = plan["hint"]
 
 
+def _ocular_block(args: dict, work_dir, steps, *, analysis_goal, modality,
+                  paradigm=None) -> Optional[dict]:
+    """Plan-time ocular-artifact coverage of the proposed steps (fail-open).
+
+    Reads every per-file inspection report of the work_dir; falls back to
+    ``args['inspection_report_path']``.
+    """
+    if _assess_ocular_multi is None:
+        return None
+    try:
+        report = None
+        _rp = args.get("inspection_report_path")
+        if _rp and Path(_rp).is_file():
+            report = json.loads(Path(_rp).read_text(encoding="utf-8"))
+        return _assess_ocular_multi(work_dir, list(steps or []), analysis_goal=analysis_goal,
+                                    modality=modality, paradigm=paradigm,
+                                    fallback_report=report)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("ocular assessment skipped: %s", exc)
+        return None
+
+
 def _handle_propose_pipeline_evidence(args, **kw):
     """Evidence-driven propose: validates step-level param_evidence, hydrates
     missing entries from the parameter-uncertainty registry, and STAGES the
@@ -5320,6 +5387,8 @@ def _handle_propose_pipeline_evidence(args, **kw):
     _wplan = _epoch_window_plan(args, output_path)
     _wdec = _wplan["decision"] or {}
     _epoch_window = _wdec.get("epoch_window", args.get("epoch_window"))
+    _ocular = _ocular_block(args, output_path, _enforced_step_dicts,
+                            analysis_goal=analysis_goal, modality=modality, paradigm=paradigm)
     proposal = {
         "modality": modality,
         "paradigm": paradigm,
@@ -5378,9 +5447,10 @@ def _handle_propose_pipeline_evidence(args, **kw):
             rationales=rationale,
             evidence_per_step=evidence_per_step,
         )
-        if _wplan["sections_md"]:
+        _pre_steps_md = _wplan["sections_md"] + (_render_ocular_section(_ocular) if _ocular else "")
+        if _pre_steps_md:
             _h1, _sep, _rest = md.partition("\n")
-            md = _h1 + "\n\n" + _wplan["sections_md"] + _rest.lstrip("\n")
+            md = _h1 + "\n\n" + _pre_steps_md + _rest.lstrip("\n")
         # Prepend the web-evidence banner so reviewers see, immediately under
         # the title, which search provider (if any) shaped the proposal.
         # Format mirrors `_write_reasoning_md` (the export-time fallback) so
@@ -5520,6 +5590,8 @@ def _handle_propose_pipeline_evidence(args, **kw):
     except Exception:
         pass
     _attach_window_plan(_evidence_propose_result, _wplan)
+    if _ocular:
+        _evidence_propose_result["ocular_artifact"] = _ocular
     _attach_memory_footprint(_evidence_propose_result, args)
     return cap_return(_evidence_propose_result)
 
@@ -5740,6 +5812,10 @@ def _handle_propose_pipeline(args, **kw):
     _wplan = _epoch_window_plan(args, work_dir)
     _wdec = _wplan["decision"] or {}
     _epoch_window = _wdec.get("epoch_window", args.get("epoch_window"))
+    _ocular = _ocular_block(args, work_dir, steps, analysis_goal=analysis_goal, modality=modality,
+                            paradigm=paradigm)
+    # Sections shown before the steps at confirm time (_render_staged_pipeline).
+    _pre_steps_md = _wplan["sections_md"] + (_render_ocular_section(_ocular) if _ocular else "")
     _proposal_payload = {
         "modality": modality,
         "paradigm": paradigm,
@@ -5796,7 +5872,7 @@ def _handle_propose_pipeline(args, **kw):
             "proposal.json": proposal_json_text,
             "goal.json": goal_json_text,
             "web_evidence.json": web_evidence_json_text,
-            **({"dataset_understanding.md": _wplan["sections_md"]} if _wplan["sections_md"] else {}),
+            **({"dataset_understanding.md": _pre_steps_md} if _pre_steps_md else {}),
             **({"dataset_understanding.json": json.dumps(_wplan["understanding"], ensure_ascii=False, indent=2)}
                if _wplan["understanding"] else {}),
         },
@@ -5877,6 +5953,8 @@ def _handle_propose_pipeline(args, **kw):
     except Exception:
         pass
     _attach_window_plan(_propose_result, _wplan)
+    if _ocular:
+        _propose_result["ocular_artifact"] = _ocular
     _attach_memory_footprint(_propose_result, args)
     return cap_return(_propose_result)
 

@@ -374,7 +374,7 @@ def _suggest_extra_steps(
             _clip_threshold = 0.2 if scenario == "research" else 0.1
             if profile.artifact_ratio > _clip_threshold:
                 extra.append(RoutingDecision(
-                    step="clip:500",
+                    step="clip:500uV",
                     action="include",
                     reason=f"High artifact contamination ({profile.artifact_ratio:.0%} of windows). "
                            f"Adding amplitude clipping to limit extreme outliers before scaling.",

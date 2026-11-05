@@ -75,9 +75,12 @@ class PsdSummary:
 @dataclass
 class ArtifactSummary:
     sample_pct: float
-    blink_rate_per_min: float
+    blink_rate_per_min: float | None
     muscle_artifact_pct: float
     saturation_pct: float
+    # Channel(s) the blink count was taken from: "eog(<names>)" /
+    # "frontal_proxy(<names>)"; None when the montage has neither.
+    blink_reference: str | None = None
 
 
 @dataclass

@@ -16,15 +16,21 @@ type Props = {
 };
 
 export function TurnEtaIndicator({ latestTurnEta }: Props) {
-  // Tick every 500ms so the countdown is visibly live.
-  const [, forceTick] = useState(0);
+  // The clock lives in state and ticks every 500ms so the countdown is
+  // visibly live while render itself stays pure.
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!latestTurnEta) return;
-    const id = setInterval(() => forceTick((n) => (n + 1) % 1_000_000), 500);
-    return () => clearInterval(id);
+    const tick = () => setNow(Date.now());
+    const first = setTimeout(tick, 0);
+    const id = setInterval(tick, 500);
+    return () => {
+      clearTimeout(first);
+      clearInterval(id);
+    };
   }, [latestTurnEta]);
 
-  const remaining = computeRemainingSeconds(latestTurnEta, Date.now());
+  const remaining = computeRemainingSeconds(latestTurnEta, now);
   const etaText = formatEtaText(remaining);
 
   if (!etaText) return null;

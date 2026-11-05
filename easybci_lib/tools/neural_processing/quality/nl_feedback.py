@@ -233,7 +233,7 @@ def _analyze_validator_issues(
                         id=_next_id(counter),
                         label="Clip extreme values",
                         description="Limit amplitude to ±500 µV (standard EEG range)",
-                        steps_to_add=["clip:500"],
+                        steps_to_add=["clip:500uV"],
                     ),
                     RemediationOption(
                         id=_next_id(counter),
@@ -363,7 +363,7 @@ def _analyze_artifacts(
                     id=_next_id(counter),
                     label="Apply aggressive clipping",
                     description="Clip amplitudes to ±200 µV to reduce artifact impact",
-                    steps_to_add=["clip:200"],
+                    steps_to_add=["clip:200uV"],
                 ),
                 RemediationOption(
                     id=_next_id(counter),

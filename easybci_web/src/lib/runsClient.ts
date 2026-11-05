@@ -10,6 +10,11 @@ export interface RunEvent {
   text?: string;
   duration?: number;
   error?: boolean | string;
+  // tool.started / tool.completed: pairs a result with its call.
+  tool_call_id?: string;
+  // tool.completed: head of the result and its original length.
+  result_preview?: string;
+  result_chars?: number;
   output?: string;
   usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
   command?: string;
@@ -59,14 +64,11 @@ function getAuthHeaders(): Record<string, string> {
   return {};
 }
 
-export async function startRun(
-  input: string,
-  sessionId?: string,
-  conversationHistory?: Array<{ role: string; content: string }>,
-): Promise<string> {
+// No conversation_history is sent: the gateway restores the full stored
+// transcript (tool calls and results included) from the session id.
+export async function startRun(input: string, sessionId?: string): Promise<string> {
   const body: Record<string, unknown> = { input };
   if (sessionId) body.session_id = sessionId;
-  if (conversationHistory?.length) body.conversation_history = conversationHistory;
 
   const res = await fetch(`${GATEWAY_BASE}/runs`, {
     method: "POST",
@@ -83,6 +85,68 @@ export async function startRun(
 
 const TERMINAL_EVENTS = new Set(["run.completed", "run.failed", "run.cancelled"]);
 
+export interface RunStatusInfo {
+  run_id: string;
+  status: string;
+  session_id?: string;
+  error?: string;
+  output?: string;
+}
+
+const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+/** Pollable run status. Resolves null when the gateway no longer knows the
+ *  run (404), throws on transport errors so callers can keep retrying. */
+export async function getRunStatus(runId: string): Promise<RunStatusInfo | null> {
+  const res = await fetch(`${GATEWAY_BASE}/runs/${runId}`, { headers: getAuthHeaders() });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`run status ${res.status}`);
+  return (await res.json()) as RunStatusInfo;
+}
+
+export function isLiveRunStatus(status: string | undefined): boolean {
+  return !!status && !TERMINAL_STATUSES.has(status);
+}
+
+// After a few failed reconnects, ask the gateway whether the run still exists.
+// A vanished run is a hard failure; a run that finished while we were away is
+// closed with a synthetic gap + terminal event so the caller reconciles
+// against the stored transcript instead of retrying forever.
+const PROBE_AFTER_ATTEMPTS = 3;
+
+type ProbeOutcome = "retry" | "handled";
+
+async function probeDroppedRun(
+  runId: string,
+  onEvent: (ev: RunEvent) => void,
+  onDone: () => void,
+  onError: (err: Error) => void,
+): Promise<ProbeOutcome> {
+  let info: RunStatusInfo | null;
+  try {
+    info = await getRunStatus(runId);
+  } catch {
+    return "retry";
+  }
+  if (info === null) {
+    onError(new Error("The run is no longer available on the gateway."));
+    return "handled";
+  }
+  if (TERMINAL_STATUSES.has(info.status)) {
+    const ts = Date.now() / 1000;
+    onEvent({ event: "stream.gap", run_id: runId, timestamp: ts });
+    onEvent({
+      event: `run.${info.status}`,
+      run_id: runId,
+      timestamp: ts,
+      ...(info.error ? { error: info.error } : {}),
+    });
+    onDone();
+    return "handled";
+  }
+  return "retry";
+}
+
 export function subscribeToRun(
   runId: string,
   onEvent: (ev: RunEvent) => void,
@@ -94,19 +158,18 @@ export function subscribeToRun(
   const authHeaders = getAuthHeaders();
 
   if (Object.keys(authHeaders).length > 0) {
-    return subscribeWithFetchRetry(url, authHeaders, onEvent, onDone, onError, options);
+    return subscribeWithFetchRetry(runId, url, authHeaders, onEvent, onDone, onError, options);
   }
 
-  return subscribeWithEventSourceRetry(url, onEvent, onDone, onError, options);
+  return subscribeWithEventSourceRetry(runId, url, onEvent, onDone, onError, options);
 }
 
 function subscribeWithEventSourceRetry(
+  runId: string,
   url: string,
   onEvent: (ev: RunEvent) => void,
   onDone: () => void,
-  // Retained for signature symmetry with subscribeToRun; unused because we now
-  // retry indefinitely and never surface a hard "failed" error.
-  _onError: (err: Error) => void,
+  onError: (err: Error) => void,
   options: SubscribeOptions,
 ): () => void {
   let attempt = 0;
@@ -153,10 +216,21 @@ function subscribeWithEventSourceRetry(
       // Last-Event-ID replay fill the gap.
       attempt++;
       status?.({ kind: "reconnecting", attempt });
-      const climb = Math.min(attempt, BACKOFF_CAP_ATTEMPTS);
-      const delay = Math.min(Math.pow(2, climb - 1) * 1000, MAX_BACKOFF_MS);
-      retryTimer = setTimeout(connect, delay);
+      scheduleRetry();
     };
+  }
+
+  async function scheduleRetry() {
+    if (attempt >= PROBE_AFTER_ATTEMPTS) {
+      const outcome = await probeDroppedRun(runId, onEvent, onDone, (err) => {
+        status?.({ kind: "failed", reason: err.message });
+        onError(err);
+      });
+      if (cancelled || outcome === "handled") return;
+    }
+    const climb = Math.min(attempt, BACKOFF_CAP_ATTEMPTS);
+    const delay = Math.min(Math.pow(2, climb - 1) * 1000, MAX_BACKOFF_MS);
+    retryTimer = setTimeout(connect, delay);
   }
 
   connect();
@@ -169,13 +243,12 @@ function subscribeWithEventSourceRetry(
 }
 
 function subscribeWithFetchRetry(
+  runId: string,
   url: string,
   headers: Record<string, string>,
   onEvent: (ev: RunEvent) => void,
   onDone: () => void,
-  // Retained for signature symmetry with subscribeToRun; unused because we now
-  // retry indefinitely and never surface a hard "failed" error.
-  _onError: (err: Error) => void,
+  onError: (err: Error) => void,
   options: SubscribeOptions,
 ): () => void {
   let attempt = 0;
@@ -239,14 +312,23 @@ function subscribeWithFetchRetry(
           }
         }
       }
-      onDone();
+      // A clean EOF without a terminal event is a dropped stream, not a
+      // completion — fall through to the reconnect path.
+      throw new Error("SSE stream ended without a terminal event");
     } catch (err) {
       if ((err as Error).name === "AbortError" || cancelled) return;
 
-      // Same policy as the EventSource path: retry indefinitely until a
-      // server terminal event ends the stream. Never surface a hard "failed".
+      // Same policy as the EventSource path: keep reconnecting while the run
+      // is alive; the probe ends the stream once it is gone or finished.
       attempt++;
       status?.({ kind: "reconnecting", attempt });
+      if (attempt >= PROBE_AFTER_ATTEMPTS) {
+        const outcome = await probeDroppedRun(runId, onEvent, onDone, (e) => {
+          status?.({ kind: "failed", reason: e.message });
+          onError(e);
+        });
+        if (cancelled || outcome === "handled") return;
+      }
       const climb = Math.min(attempt, BACKOFF_CAP_ATTEMPTS);
       const delay = Math.min(Math.pow(2, climb - 1) * 1000, MAX_BACKOFF_MS);
       retryTimer = setTimeout(connect, delay);

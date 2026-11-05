@@ -90,6 +90,8 @@ steps = [
 
 **Do NOT call `skill_view` on individual L3 operators (bandpass, notch, resample, etc.) at planning time.** The suggest return + paradigm skill already contain all information needed. Operator skill docs are available during codegen (Step 5) if the code generator needs them.
 
+**One exception — ocular artifacts.** When the suggest / propose return carries `ocular_artifact.must_present: true`, present the block to the user with the proposal: evidence, the recommended method (`ica:eog` / `regression_eog`) and its reason, and which proposed steps do not count as ocular removal (`clip`, `scale`, trial rejection). Either add the recommended step (after bandpass, before car) or record why ocular artifacts are left in. The block already carries the reasoning; load `skill_view(name='ocular_artifact')` only if you need the full decision table.
+
 **Only operators in `runnable_operators` (suggest return) execute.** Many operators have a SKILL.md but no executor; `propose_pipeline` / `revise_proposal` reject them with `guard: non_runnable_steps` + per-step `substitutes`. Swap in a substitute, re-propose, and say in the rationale which step was replaced and why.
 
 **One rationale per step, same order.** `rationale[i]` describes `steps[i]`; a step injected by the system (e.g. `drop_nondata_channels`) gets its own entry — check `rationale_warning` in the return.

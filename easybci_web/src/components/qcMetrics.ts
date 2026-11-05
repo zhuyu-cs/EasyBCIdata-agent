@@ -1,6 +1,6 @@
 // Detection + parsing helpers for QC-metrics JSON blocks. Kept separate from
 // QCCard.tsx so the card can stay a lazy-loaded, component-only module (and so
-// MessageBubble can import the cheap parser without pulling in the card).
+// Markdown can import the cheap parser without pulling in the card).
 
 export interface QCMetrics {
   snr?: number;

@@ -33,10 +33,36 @@ Examples:
 | artifact_types | comma-separated | eog | Which artifact types to detect: `eog`, `ecg` |
 
 Internal parameters (not user-configurable):
-- `n_components`: min(n_channels - 1, 25)
+- `n_components`: min(effective data rank, 20) — rank estimated at float32 precision; an earlier `car` lowers it by one
 - `method`: FastICA
 - `random_state`: 42 (EasyBCI global EASYBCI_SEED — keep fixed for reproducibility)
 - `max_iter`: 500
+
+## EOG reference
+
+The `eog` target is matched against, in order (shared resolver
+`resolve_eog_reference`, the same one `regression_eog` and `deep_inspect` use):
+
+1. Explicit names — `ica:eog,E25,E8` (or `ica:E25,E8`): any token other than `eog` / `ecg`
+   is a reference channel; `measure="correlation"`, threshold 0.6.
+2. EOG channels — channel type eog, or an EOG name (`*EOG*`, `VEO`/`HEO`, `LOC`/`ROC`,
+   AASM `E1`/`E2`) — MNE default z-score detection. If no component follows the EOG
+   channel (detached or mis-wired electrode), the frontal proxy below is used instead
+   and `eog_channel_unmatched` names the EOG channel(s).
+3. Frontal proxy — Fp1 / Fp2 / Fpz, else AF7 / AF8 / AF3 / AF4 / AFz; vendor-decorated
+   names (`EEG Fp1-REF`, `Fp1.`, `FP1-F7`) included — `measure="correlation"`,
+   threshold 0.6. Frontal EEG that correlates with blinks is removed too; a pipeline
+   warning says so.
+4. Neither — nothing is removed; `pipeline_status.ica` and the QC "Pipeline notes" say
+   `ocular artifacts NOT removed` (and whether the channel names were recognised as
+   10-20 / 10-10 at all).
+
+The decision (`applied`, `n_components`, `excluded`, `eog_reference`,
+`eog_reference_source`) is in `pipeline_status.ica`. Each removed component
+lowers the data rank by one; a later `car` does not lower it again (n − 1
+channels after `ica` → `car`, n − 1 − k after `car` → `ica`; see
+`data_rank`). Whether ICA or regression fits
+a recording is decided by the `ocular_artifact` decision skill.
 
 ## When to Use
 
@@ -63,7 +89,7 @@ Internal parameters (not user-configurable):
 ## Ordering
 
 - Apply AFTER: notch, bandpass
-- Apply BEFORE: resample, scale, segmentation
+- Apply BEFORE: car, resample, scale, segmentation (after car the blink is spread to every channel)
 - Reason: ICA needs full temporal resolution and clean frequency content to separate sources
 
 ## Common Issues

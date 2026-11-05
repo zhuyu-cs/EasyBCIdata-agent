@@ -42,7 +42,7 @@ async function checkGateway(): Promise<boolean> {
 
 // Adaptive intervals (ms): healthy → relaxed; first failure → fast probe;
 // repeated failures → exponential backoff capped at 30s.
-const HEALTHY_INTERVAL = 60_000;
+const HEALTHY_INTERVAL = 15_000;
 const FAILURE_BASE = 5_000;
 const FAILURE_MAX = 30_000;
 

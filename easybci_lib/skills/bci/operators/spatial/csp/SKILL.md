@@ -76,6 +76,28 @@ unsupervised analysis; phase-locking required (variance loses phase).
 - Apply **after** epoching.
 - Train on training trials; **freeze** spatial filters; project test trials.
 
+## Rank
+
+EasyBCI output is stored as float32. After `car` (−1) or ICA component
+removal (−k) the channels are linearly dependent, but at float32 precision
+that dependency only holds to ~1e-7, so MNE's default `rank=None` (a float64
+criterion) reports full rank. CSP then whitens with a near-singular
+covariance: filter weights blow up and cross-session transfer predicts a
+single class.
+
+Read the rank EasyBCI recorded and pass it explicitly:
+
+```python
+with open(pkl_path, "rb") as f:            # AI_ready/<id>/<ses>/*_epochs.pkl
+    payload = pickle.load(f)
+rank = payload["rank"]                      # e.g. 13 for 14 channels after car
+csp = mne.decoding.CSP(n_components=4, reg="ledoit_wolf", log=True, rank={"eeg": rank})
+```
+
+When pooling sessions use the minimum rank across files. The same value is
+in `pipeline_status__<fid>.json:data_rank`, the NWB scratch
+`easybci_data_rank`, `pipeline_record.json:data_rank` and the README.
+
 ## Failure Modes & Detection
 
 | Failure | Symptom | Detection |
@@ -83,6 +105,7 @@ unsupervised analysis; phase-locking required (variance loses phase).
 | Singular cov (n_ch > trials) | LinAlgError on eig. | Pre-check `n_trials >= 2 * n_ch`; raise recoverable; suggest `reg="oas"`. |
 | Class imbalance (>10:1) | Worse-class eigenvectors poorly estimated. | Warn if `min(class_counts) / max < 0.3`. |
 | One trivial class | All eigenvalues ≈ 0.5; no separability. | Warn if `λ_top - λ_bottom < 0.1`. |
+| Rank-deficient data with `rank=None` (float32 + car / ICA) | Test trials all predicted as one class; filter weights ≫ 1. | Pass `rank={"eeg": payload["rank"]}`; check the `data_rank` tool-return block. |
 
 ## Common Issues
 

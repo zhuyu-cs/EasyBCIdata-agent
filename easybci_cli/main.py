@@ -1478,13 +1478,19 @@ def _is_profile_api_key_provider(provider_id: str) -> bool:
         return False
 
 
-def select_provider_and_model(args=None):
+def select_provider_and_model(args=None, *, for_aux=False):
     """Core provider selection + model picking logic.
 
-    Shared by ``cmd_model`` (``easybci model``) and the setup wizard
-    (``setup_model_provider`` in setup.py).  Handles the full flow:
+    Shared by ``cmd_model`` (``easybci model``), the setup wizard
+    (``setup_model_provider`` in setup.py) and the auxiliary-model pickers
+    (``for_aux=True``, via ``_aux_pick_routing``).  Handles the full flow:
     provider picker, credential prompting, model selection, and config
     persistence.
+
+    ``for_aux=True`` hides the main-only menu entries (aux config, remove
+    custom provider, "currently active" marker) and skips the post-switch
+    ``OPENAI_BASE_URL`` cleanup; the caller captures and restores
+    ``model.*``.  Returns the selected provider key, or None on cancel.
     """
     from easybci_cli.auth import (
         resolve_provider,
@@ -1549,10 +1555,11 @@ def select_provider_and_model(args=None):
     provider_labels = dict(_PROVIDER_LABELS)  # derive from canonical list
     active_label = provider_labels.get(active, active) if active else "none"
 
-    print()
-    print(f"  Current model:    {current_model}")
-    print(f"  Active provider:  {active_label}")
-    print()
+    if not for_aux:
+        print()
+        print(f"  Current model:    {current_model}")
+        print(f"  Active provider:  {active_label}")
+        print()
 
     # Step 1: Provider selection — flat list from CANONICAL_PROVIDERS
     all_providers = [(p.slug, p.tui_desc) for p in CANONICAL_PROVIDERS]
@@ -1674,7 +1681,7 @@ def select_provider_and_model(args=None):
     ordered = []
     default_idx = 0
     for key, label in all_providers:
-        if active and key == active:
+        if active and key == active and not for_aux:
             ordered.append((key, f"{label}  ← currently active"))
             default_idx = len(ordered) - 1
         else:
@@ -1684,10 +1691,11 @@ def select_provider_and_model(args=None):
     _has_saved_custom_list = isinstance(config.get("custom_providers"), list) and bool(
         config.get("custom_providers")
     )
-    if _has_saved_custom_list:
+    if _has_saved_custom_list and not for_aux:
         ordered.append(("remove-custom", "Remove a saved custom provider"))
-    ordered.append(("aux-config", "Configure auxiliary models..."))
-    ordered.append(("cancel", "Leave unchanged"))
+    if not for_aux:
+        ordered.append(("aux-config", "Configure auxiliary models..."))
+    ordered.append(("cancel", "Back" if for_aux else "Leave unchanged"))
 
     provider_idx = _prompt_provider_choice(
         [label for _, label in ordered],
@@ -1695,13 +1703,13 @@ def select_provider_and_model(args=None):
     )
     if provider_idx is None or ordered[provider_idx][0] == "cancel":
         print("No change.")
-        return
+        return None
 
     selected_provider = ordered[provider_idx][0]
 
     if selected_provider == "aux-config":
         _aux_config_menu()
-        return
+        return None
 
     # Step 2: Provider-specific setup + model selection
     if selected_provider == "openrouter":
@@ -1726,7 +1734,7 @@ def select_provider_and_model(args=None):
                 "Warning: the selected saved custom provider is no longer available. "
                 "It may have been removed from config.yaml. No change."
             )
-            return
+            return None
         _model_flow_named_custom(config, provider_info)
     elif selected_provider == "remove-custom":
         _remove_custom_provider(config)
@@ -1766,12 +1774,15 @@ def select_provider_and_model(args=None):
     # When the user switches to a named provider (anything except "custom"),
     # a leftover OPENAI_BASE_URL in ~/.easybci/.env can poison auxiliary
     # clients that use provider:auto. Clear it proactively.
+    if for_aux:
+        return selected_provider
     if selected_provider not in {
         "custom",
         "cancel",
         "remove-custom",
     } and not selected_provider.startswith("custom:"):
         _clear_stale_openai_base_url()
+    return selected_provider
 
 
 def _clear_stale_openai_base_url():
@@ -1812,9 +1823,8 @@ def _clear_stale_openai_base_url():
 # its own provider+model pair in config.yaml under `auxiliary.<task>`.
 #
 # The UI lives behind "Configure auxiliary models..." at the bottom of the
-# `easybci model` provider picker. It does NOT re-run credential setup — it
-# only routes already-authenticated providers to specific aux tasks. Users
-# configure new providers through the normal `easybci model` flow first.
+# `easybci model` provider picker and in the setup wizard. Picking a model
+# for an aux task runs the same flow as the main model (`_aux_pick_routing`).
 # ─────────────────────────────────────────────────────────────────────────────
 
 # (task_key, display_name, short_description)
@@ -1856,6 +1866,18 @@ def _format_aux_current(task_cfg: dict) -> str:
     return provider
 
 
+def _write_aux_routing(entry: dict, routing: dict) -> None:
+    """Write the routing fields of one aux slot; other keys stay untouched."""
+    entry["provider"] = routing.get("provider", "auto") or "auto"
+    entry["model"] = routing.get("model", "") or ""
+    entry["base_url"] = routing.get("base_url", "") or ""
+    entry["api_key"] = routing.get("api_key", "") or ""
+    if routing.get("api_mode"):
+        entry["api_mode"] = routing["api_mode"]
+    else:
+        entry.pop("api_mode", None)
+
+
 def _save_aux_choice(
     task: str,
     *,
@@ -1863,10 +1885,11 @@ def _save_aux_choice(
     model: str = "",
     base_url: str = "",
     api_key: str = "",
+    api_mode: str = "",
 ) -> None:
     """Persist an auxiliary task's provider/model to config.yaml.
 
-    Only writes the four routing fields — timeout, download_timeout, and any
+    Only writes the routing fields — timeout, download_timeout, and any
     other task-specific settings are preserved untouched. The main model
     config (``model.default``/``model.provider``) is never modified.
     """
@@ -1881,10 +1904,10 @@ def _save_aux_choice(
     if not isinstance(entry, dict):
         entry = {}
         aux[task] = entry
-    entry["provider"] = provider
-    entry["model"] = model or ""
-    entry["base_url"] = base_url or ""
-    entry["api_key"] = api_key or ""
+    _write_aux_routing(entry, {
+        "provider": provider, "model": model, "base_url": base_url,
+        "api_key": api_key, "api_mode": api_mode,
+    })
     save_config(cfg)
 
 
@@ -1925,10 +1948,7 @@ def _aux_apply_routing_to_all_tasks(
         if not isinstance(entry, dict):
             entry = {}
             aux[task_key] = entry
-        entry["provider"] = routing.get("provider", "auto") or "auto"
-        entry["model"] = routing.get("model", "") or ""
-        entry["base_url"] = routing.get("base_url", "") or ""
-        entry["api_key"] = routing.get("api_key", "") or ""
+        _write_aux_routing(entry, routing)
         count += 1
     save_config(cfg)
     return count
@@ -2026,368 +2046,156 @@ def _aux_config_menu() -> None:
 def _aux_select_for_task(task: str) -> None:
     """Pick a provider + model for a single auxiliary task and persist it.
 
-    Thin wrapper around `_aux_pick_routing` (which does the prompting)
-    plus `_save_aux_choice` (which writes one task slot). Behavior is
-    identical to the pre-refactor implementation; the shared
-    `_aux_pick_routing` lets the setup wizard reuse the same picker.
+    `_aux_pick_routing` runs the main-model flow; `_save_aux_choice`
+    writes one task slot.
     """
     from easybci_cli.config import load_config
 
+    display_name = next((name for key, name, _ in _AUX_TASKS if key == task), task)
     cfg = load_config()
     aux = cfg.get("auxiliary", {}) if isinstance(cfg.get("auxiliary"), dict) else {}
     task_cfg = aux.get(task, {}) if isinstance(aux.get(task), dict) else {}
-    current_provider = str(task_cfg.get("provider") or "auto").strip() or "auto"
-    current_model = str(task_cfg.get("model") or "").strip()
-    current_base_url = str(task_cfg.get("base_url") or "").strip()
-
-    display_name = next((name for key, name, _ in _AUX_TASKS if key == task), task)
 
     routing = _aux_pick_routing(
         title=f"Configure {display_name} — current: {_format_aux_current(task_cfg)}",
-        current_provider=current_provider,
-        current_model=current_model,
-        current_base_url=current_base_url,
         require_vision_capable=(task == "vision"),
     )
     if routing is None:
         return
 
-    _save_aux_choice(
-        task,
-        provider=routing["provider"],
-        model=routing.get("model", ""),
-        base_url=routing.get("base_url", ""),
-        api_key=routing.get("api_key", ""),
-    )
-
-    provider = routing["provider"]
-    model = routing.get("model", "")
-    base_url = routing.get("base_url", "")
-    if provider == "auto":
-        print(f"{display_name}: reset to auto.")
-    elif provider == "custom":
-        short_url = base_url.replace("https://", "").replace("http://", "").rstrip("/")
-        suffix = f" · {model}" if model else ""
-        print(f"{display_name}: custom ({short_url}){suffix}")
-    elif model:
-        print(f"{display_name}: {provider} · {model}")
-    else:
-        print(f"{display_name}: {provider} (provider default model)")
+    _save_aux_choice(task, **routing)
+    print(f"{display_name}: {_format_aux_current(routing)}")
 
 
-def _aux_prompt_for_provider(
-    provider_slug: str,
-    curated_models: list,
-    current_model: str = "",
-) -> dict | None:
-    """Pure prompt — returns routing dict or None on cancel; no I/O writes.
+_AUX_RESTORED_ENV = ("OPENAI_BASE_URL", "OPENAI_API_KEY")
 
-    Mirrors the model-selection logic of `_aux_flow_provider_model` but
-    returns the picked model as a dict instead of saving it to disk.
-    Used by `_aux_pick_routing` so a single picker can drive both
-    per-task saves (`_aux_select_for_task`) and apply-to-all flows
-    (setup wizard's `_setup_aux_general`).
+
+def _aux_routing_from_model_section(model_cfg: dict, before: dict) -> dict:
+    """Turn the ``model`` section the main flow wrote into an aux routing dict.
+
+    Custom endpoints carry their URL/key/api_mode; named providers keep
+    only slug + model so the aux client resolves their credentials the
+    same way the main model does.
     """
-    from easybci_cli.auth import _prompt_model_selection
-    from easybci_cli.models import get_pricing_for_provider
-
-    try:
-        pricing = get_pricing_for_provider(provider_slug) or {}
-    except Exception:
-        pricing = {}
-
-    model_list = list(curated_models)
-    if not model_list:
-        print(f"No curated model list for {provider_slug}.")
-        print("Enter a model slug manually (blank = use provider default):")
-        try:
-            val = input("Model: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print()
-            return None
-        selected = val or ""
-    else:
-        selected = _prompt_model_selection(
-            model_list,
-            current_model=current_model,
-            pricing=pricing,
-        )
-        if selected is None:
-            return None
+    provider = str(model_cfg.get("provider") or "").strip() or "auto"
+    model = str(model_cfg.get("default") or "").strip()
+    base_url = str(model_cfg.get("base_url") or "").strip()
+    api_mode = str(model_cfg.get("api_mode") or "").strip()
+    if provider == "custom":
+        # "Endpoint saved" without a model name leaves the previous main
+        # model in ``default`` — don't inherit it for a different endpoint.
+        if model == str(before.get("default") or "").strip() and base_url != str(
+            before.get("base_url") or ""
+        ).strip():
+            model = ""
+        return {
+            "provider": "custom",
+            "model": model,
+            "base_url": base_url,
+            "api_key": str(model_cfg.get("api_key") or "").strip(),
+            "api_mode": api_mode,
+        }
     return {
-        "provider": provider_slug,
-        "model": selected or "",
+        "provider": provider,
+        "model": model,
         "base_url": "",
         "api_key": "",
-    }
-
-
-def _aux_prompt_custom_endpoint(
-    current_base_url: str = "",
-    current_model: str = "",
-) -> dict | None:
-    """Pure prompt — returns routing dict for a custom OpenAI-compatible endpoint.
-
-    Mirrors `_aux_flow_custom_endpoint` but returns the routing dict
-    instead of saving. Returns None if cancelled or no URL provided.
-    """
-    import getpass
-
-    print()
-    print("  Custom endpoint")
-    print("  Provide an OpenAI-compatible base URL (e.g. http://localhost:11434/v1)")
-    print()
-    try:
-        url_prompt = (
-            f"Base URL [{current_base_url}]: " if current_base_url else "Base URL: "
-        )
-        url = input(url_prompt).strip()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        return None
-    url = url or current_base_url
-    if not url:
-        print("No URL provided. No change.")
-        return None
-    try:
-        model_prompt = (
-            f"Model slug (optional) [{current_model}]: "
-            if current_model
-            else "Model slug (optional): "
-        )
-        model = input(model_prompt).strip()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        return None
-    model = model or current_model
-    try:
-        api_key = getpass.getpass(
-            "API key (optional, blank = use OPENAI_API_KEY): "
-        ).strip()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        return None
-    return {
-        "provider": "custom",
-        "model": model or "",
-        "base_url": url,
-        "api_key": api_key,
+        "api_mode": api_mode,
     }
 
 
 def _aux_pick_routing(
     *,
     title: str,
-    current_provider: str = "auto",
-    current_model: str = "",
-    current_base_url: str = "",
     require_vision_capable: bool = False,
-    allow_auto: bool = True,
 ) -> dict | None:
-    """Run provider+model picker, return routing dict or None on cancel.
+    """Run the main-model flow for an auxiliary slot; return its routing.
 
-    Provider menu = `auto` (when allow_auto=True) + already-authenticated
-    providers (via `list_authenticated_providers`) + `custom endpoint`
-    (manual URL/key/model). Per the spec, this matches the existing
-    `_aux_select_for_task` UX — custom-endpoint is the path that
-    satisfies the URL/key/model constraint when the user wants a
-    provider not yet authenticated.
-
-    When `allow_auto=False` (used by the first-run setup wizard), the
-    "auto (recommended)" entry is suppressed: the user must commit to a
-    concrete provider/endpoint or hit Back to skip. The "auto" routing
-    silently falls through to main_model at runtime, which on a fresh
-    install often means "no vision" / "wrong endpoint" without the user
-    realizing — so the wizard forces a deliberate choice.
-
-    When `require_vision_capable=True`:
-      - canonical providers in `_PROVIDERS_WITHOUT_VISION` are tagged
-        '(no image input)' in the menu
-      - if the user picks one anyway, a warning is printed but the
-        routing is still returned (deliberate user override)
-      - custom-endpoint entries are not tagged (we can't know their
-        image support)
+    Same provider menu, credential prompts, endpoint probing and model
+    picker as ``easybci model`` (``select_provider_and_model(for_aux=True)``).
+    The flow writes ``model.*`` / auth.json / ``OPENAI_*`` as usual; the
+    result is captured and those main-model values are restored — also on
+    error or cancel.  Provider credentials and saved ``custom_providers``
+    entries are shared per provider and kept.
 
     Returned dict shape:
-      {"provider": str, "model": str, "base_url": str, "api_key": str}
+      {"provider", "model", "base_url", "api_key", "api_mode"}
     """
+    import copy
+
     from easybci_agent.auxiliary_client import _PROVIDERS_WITHOUT_VISION
+    from easybci_cli.auth import _auth_store_lock, _load_auth_store, _save_auth_store
     from easybci_cli.cli_output import print_warning
-    from easybci_cli.model_switch import list_authenticated_providers
+    from easybci_cli.config import (
+        get_config_path,
+        load_env,
+        read_raw_config,
+        remove_env_value,
+        save_config,
+        save_env_value,
+    )
 
-    try:
-        providers = list_authenticated_providers(
-            current_provider=current_provider,
-            current_model=current_model,
-            current_base_url=current_base_url,
-        )
-    except Exception as exc:
-        print(f"Could not detect authenticated providers: {exc}")
-        providers = []
+    def _config_stamp() -> tuple:
+        # Inode too: saves are atomic renames, and mtime alone is coarse.
+        try:
+            st = get_config_path().stat()
+            return (st.st_ino, st.st_mtime_ns, st.st_size)
+        except OSError:
+            return ()
 
-    entries: list[tuple[str, str, list[str]]] = []  # (slug, label, models)
-    if allow_auto:
-        auto_marker = (
-            "  ← current" if current_provider == "auto" and not current_base_url else ""
-        )
-        entries.append(("__auto__", f"auto (recommended){auto_marker}", []))
-
-    for p in providers:
-        slug = p.get("slug", "")
-        name = p.get("name") or slug
-        total = p.get("total_models", 0)
-        models = p.get("models") or []
-        model_hint = f" — {total} models" if total else ""
-        marker = (
-            "  ← current" if slug == current_provider and not current_base_url else ""
-        )
-        vision_warn = (
-            "  (no image input)"
-            if require_vision_capable and slug in _PROVIDERS_WITHOUT_VISION
-            else ""
-        )
-        entries.append(
-            (slug, f"{name}{model_hint}{marker}{vision_warn}", list(models))
-        )
-
-    custom_marker = "  ← current" if current_base_url else ""
-    entries.append(("__custom__", f"Custom endpoint (direct URL){custom_marker}", []))
-    entries.append(("__back__", "Back", []))
+    before_model = copy.deepcopy(read_raw_config().get("model"))
+    before_stamp = _config_stamp()
+    with _auth_store_lock():
+        before_active = _load_auth_store().get("active_provider")
+    before_env_file = {k: load_env().get(k) for k in _AUX_RESTORED_ENV}
+    before_environ = {k: os.environ.get(k) for k in _AUX_RESTORED_ENV}
 
     print()
     print(f"  {title}")
-    print()
 
-    idx = _prompt_provider_choice([label for _, label, _ in entries], default=0)
-    if idx is None:
+    selected = None
+    after_model = None
+    try:
+        selected = select_provider_and_model(for_aux=True)
+        after_model = copy.deepcopy(read_raw_config().get("model"))
+    finally:
+        rewritten = _config_stamp() != before_stamp
+        if rewritten:
+            cfg = read_raw_config()
+            if before_model is None:
+                cfg.pop("model", None)
+            else:
+                cfg["model"] = copy.deepcopy(before_model)
+            save_config(cfg)
+        with _auth_store_lock():
+            store = _load_auth_store()
+            if store.get("active_provider") != before_active:
+                store["active_provider"] = before_active
+                _save_auth_store(store)
+        for key in _AUX_RESTORED_ENV:
+            file_val = before_env_file[key]
+            if load_env().get(key) != file_val:
+                if file_val is None:
+                    remove_env_value(key)
+                else:
+                    save_env_value(key, file_val)
+            environ_val = before_environ[key]
+            if environ_val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = environ_val
+
+    if selected is None or not rewritten or not isinstance(after_model, dict):
         return None
-    slug, _label, models = entries[idx]
-    if slug == "__back__":
-        return None
-    if slug == "__auto__":
-        return {"provider": "auto", "model": "", "base_url": "", "api_key": ""}
-    if slug == "__custom__":
-        routing = _aux_prompt_custom_endpoint(current_base_url, current_model)
-    else:
-        routing = _aux_prompt_for_provider(slug, models, current_model)
-    if routing is None:
-        return None
-    if (
-        require_vision_capable
-        and routing.get("provider") in _PROVIDERS_WITHOUT_VISION
-    ):
+    before = before_model if isinstance(before_model, dict) else {}
+    routing = _aux_routing_from_model_section(after_model, before)
+    if require_vision_capable and routing["provider"] in _PROVIDERS_WITHOUT_VISION:
         print_warning(
             f"Provider '{routing['provider']}' does not accept image input — "
             "vision calls will fail. You can change this later via "
             "`easybci model → Configure auxiliary models → Vision`."
         )
     return routing
-
-
-def _aux_flow_provider_model(
-    task: str,
-    provider_slug: str,
-    curated_models: list,
-    current_model: str = "",
-) -> None:
-    """Prompt for a model under an already-authenticated provider, save to aux."""
-    from easybci_cli.auth import _prompt_model_selection
-    from easybci_cli.models import get_pricing_for_provider
-
-    display_name = next((name for key, name, _ in _AUX_TASKS if key == task), task)
-
-    # Fetch live pricing for this provider (non-blocking)
-    pricing: dict = {}
-    try:
-        pricing = get_pricing_for_provider(provider_slug) or {}
-    except Exception:
-        pricing = {}
-
-    model_list = list(curated_models)
-
-    # Let the user pick a model. _prompt_model_selection supports "Enter custom
-    # model name" and cancel.  When there's no curated list (rare), fall back
-    # to a raw input prompt.
-    if not model_list:
-        print(f"No curated model list for {provider_slug}.")
-        print("Enter a model slug manually (blank = use provider default):")
-        try:
-            val = input("Model: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print()
-            return
-        selected = val or ""
-    else:
-        selected = _prompt_model_selection(
-            model_list,
-            current_model=current_model,
-            pricing=pricing,
-        )
-        if selected is None:
-            print("No change.")
-            return
-
-    _save_aux_choice(
-        task, provider=provider_slug, model=selected or "", base_url="", api_key=""
-    )
-    if selected:
-        print(f"{display_name}: {provider_slug} · {selected}")
-    else:
-        print(f"{display_name}: {provider_slug} (provider default model)")
-
-
-def _aux_flow_custom_endpoint(task: str, task_cfg: dict) -> None:
-    """Prompt for a direct OpenAI-compatible base_url + optional api_key/model."""
-    import getpass
-
-    display_name = next((name for key, name, _ in _AUX_TASKS if key == task), task)
-    current_base_url = str(task_cfg.get("base_url") or "").strip()
-    current_model = str(task_cfg.get("model") or "").strip()
-
-    print()
-    print(f"  Custom endpoint for {display_name}")
-    print("  Provide an OpenAI-compatible base URL (e.g. http://localhost:11434/v1)")
-    print()
-    try:
-        url_prompt = (
-            f"Base URL [{current_base_url}]: " if current_base_url else "Base URL: "
-        )
-        url = input(url_prompt).strip()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        return
-    url = url or current_base_url
-    if not url:
-        print("No URL provided. No change.")
-        return
-    try:
-        model_prompt = (
-            f"Model slug (optional) [{current_model}]: "
-            if current_model
-            else "Model slug (optional): "
-        )
-        model = input(model_prompt).strip()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        return
-    model = model or current_model
-    try:
-        api_key = getpass.getpass(
-            "API key (optional, blank = use OPENAI_API_KEY): "
-        ).strip()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        return
-
-    _save_aux_choice(
-        task,
-        provider="custom",
-        model=model,
-        base_url=url,
-        api_key=api_key,
-    )
-    short_url = url.replace("https://", "").replace("http://", "").rstrip("/")
-    print(f"{display_name}: custom ({short_url})" + (f" · {model}" if model else ""))
 
 
 def _prompt_provider_choice(choices, *, default=0):

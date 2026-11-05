@@ -60,8 +60,8 @@ _REMEDY_TABLE: List[Dict[str, Any]] = [
     {
         "check": "amplitude",
         "severity_min": "warning",
-        "action": "clip:500",
-        "reason": "Extreme amplitude values — adding clip:500 to limit outliers",
+        "action": "clip:500uV",
+        "reason": "Extreme amplitude values — adding clip:500uV to limit outliers",
         "position": "before_scale",
         "priority": 5,
     },

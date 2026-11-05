@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { api, type SessionSearchResult } from "@/lib/api";
+import { useDialog } from "@/hooks/useDialog";
+import { t } from "@/lib/i18n";
 
 export interface PaletteAction {
   id: string;
@@ -65,6 +67,7 @@ type Row =
   | { kind: "session"; result: SessionSearchResult };
 
 export function CommandPalette({ actions, onClose, onSelectSession }: Props) {
+  const dialogRef = useDialog<HTMLDivElement>(onClose);
   const [query, setQuery] = useState("");
   const [sessionResults, setSessionResults] = useState<SessionSearchResult[]>([]);
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -150,9 +153,6 @@ export function CommandPalette({ actions, onClose, onSelectSession }: Props) {
       e.preventDefault();
       const row = rows[clampedIdx];
       if (row) choose(row);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      onClose();
     }
   };
 
@@ -162,6 +162,11 @@ export function CommandPalette({ actions, onClose, onSelectSession }: Props) {
     <div className="fixed inset-0 z-[60] flex items-start justify-center pt-[12vh]" onClick={onClose}>
       <div className="absolute inset-0 bg-black/40 animate-backdrop-in" />
       <div
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("Command palette")}
         className="relative w-[90vw] max-w-[560px] rounded-xl overflow-hidden animate-dialog-in"
         style={{ background: "var(--bg-secondary)", boxShadow: "var(--shadow-lg)", border: "1px solid var(--border-primary)" }}
         onClick={(e) => e.stopPropagation()}
@@ -177,18 +182,18 @@ export function CommandPalette({ actions, onClose, onSelectSession }: Props) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Search actions and sessions..."
+            placeholder={t("Search actions and sessions...")}
             className="flex-1 bg-transparent text-[14px] outline-none placeholder:text-[var(--text-faint)]"
             style={{ color: "var(--text-primary)" }}
           />
-          <kbd className="text-[10px] font-mono px-1.5 py-0.5 rounded border" style={{ color: "var(--text-faint)", borderColor: "var(--border-secondary)" }}>esc</kbd>
+          <kbd className="text-[11px] font-mono px-1.5 py-0.5 rounded border" style={{ color: "var(--text-faint)", borderColor: "var(--border-secondary)" }}>esc</kbd>
         </div>
 
         {/* Results */}
         <div className="max-h-[50vh] overflow-y-auto py-1">
           {rows.length === 0 && (
             <div className="px-4 py-6 text-center text-[12px]" style={{ color: "var(--text-muted)" }}>
-              No matches
+              {t("No matches")}
             </div>
           )}
 
@@ -198,10 +203,10 @@ export function CommandPalette({ actions, onClose, onSelectSession }: Props) {
             return (
               <div key={row.kind === "action" ? `a-${row.action.id}` : `s-${row.result.session_id}-${i}`}>
                 {row.kind === "action" && i === 0 && actionCount > 0 && (
-                  <div className="px-4 pt-2 pb-1 text-[10px] uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>Actions</div>
+                  <div className="px-4 pt-2 pb-1 text-[11px] uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>{t("Actions")}</div>
                 )}
                 {isFirstSession && (
-                  <div className="px-4 pt-2 pb-1 text-[10px] uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>Sessions</div>
+                  <div className="px-4 pt-2 pb-1 text-[11px] uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>{t("Sessions")}</div>
                 )}
                 <button
                   onClick={() => choose(row)}
@@ -231,7 +236,7 @@ export function CommandPalette({ actions, onClose, onSelectSession }: Props) {
                         </svg>
                       </span>
                       <span className="text-[13px] flex-1 truncate" style={{ color: "var(--text-secondary)" }}>
-                        {row.result.snippet || "Untitled session"}
+                        {row.result.title || row.result.snippet || t("Untitled Session")}
                       </span>
                     </>
                   )}
@@ -241,9 +246,9 @@ export function CommandPalette({ actions, onClose, onSelectSession }: Props) {
           })}
         </div>
 
-        <div className="px-4 py-2 border-t flex items-center gap-3 text-[10px]" style={{ borderColor: "var(--border-primary)", color: "var(--text-faint)" }}>
-          <span><kbd className="font-mono">↑↓</kbd> navigate</span>
-          <span><kbd className="font-mono">↵</kbd> select</span>
+        <div className="px-4 py-2 border-t flex items-center gap-3 text-[11px]" style={{ borderColor: "var(--border-primary)", color: "var(--text-faint)" }}>
+          <span><kbd className="font-mono">↑↓</kbd> {t("navigate")}</span>
+          <span><kbd className="font-mono">↵</kbd> {t("select")}</span>
         </div>
       </div>
     </div>

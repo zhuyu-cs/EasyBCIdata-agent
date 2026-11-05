@@ -31,11 +31,11 @@ export function EvidencePanel({ stepIndex, operator, evidenceByParam }: Props) {
   const entries = Object.entries(evidenceByParam ?? {});
   if (entries.length === 0) return null;
   return (
-    <div className="mt-2 border border-[var(--border-primary,#e8e5e0)] rounded">
+    <div className="mt-2 border border-[var(--border-primary)] rounded">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="w-full text-left px-3 py-1 text-[11px] text-[var(--text-secondary,#5f5e5b)] hover:bg-[var(--bg-hover,#ebebea)]"
+        className="w-full text-left px-3 py-1 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
       >
         {open ? "▼" : "▶"} Evidence — Step {stepIndex} {operator} ({entries.length})
       </button>
@@ -49,7 +49,7 @@ export function EvidencePanel({ stepIndex, operator, evidenceByParam }: Props) {
               <div className="flex flex-wrap items-baseline gap-2">
                 <strong>{param}</strong>
                 <span className="text-[11px]">= {String(ev.value)}</span>
-                <span className="text-[10px] opacity-70">
+                <span className="text-[11px] opacity-70">
                   {ev.source === "web"
                     ? `web · ${(ev.confidence ?? 0).toFixed(2)}`
                     : ev.source === "empirical_default"
@@ -60,10 +60,10 @@ export function EvidencePanel({ stepIndex, operator, evidenceByParam }: Props) {
                 </span>
               </div>
               {ev.summary && (
-                <div className="text-[10px] mt-1 opacity-80">{ev.summary}</div>
+                <div className="text-[11px] mt-1 opacity-80">{ev.summary}</div>
               )}
               {ev.citations && ev.citations.length > 0 && (
-                <div className="text-[10px] mt-1">
+                <div className="text-[11px] mt-1">
                   Sources:{" "}
                   {ev.citations.map((c, i) => (
                     <a
@@ -79,10 +79,10 @@ export function EvidencePanel({ stepIndex, operator, evidenceByParam }: Props) {
                 </div>
               )}
               {ev.default_origin && (
-                <div className="text-[10px] opacity-70">{ev.default_origin}</div>
+                <div className="text-[11px] opacity-70">{ev.default_origin}</div>
               )}
               {ev.previous_evidence && (
-                <div className="text-[10px] opacity-70 mt-1">
+                <div className="text-[11px] opacity-70 mt-1">
                   override (was {String(ev.previous_evidence.value)})
                 </div>
               )}

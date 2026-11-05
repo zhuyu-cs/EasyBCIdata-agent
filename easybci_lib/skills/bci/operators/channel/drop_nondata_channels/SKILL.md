@@ -35,6 +35,14 @@ to be analyzed.
 
 `drop_nondata_channels` with no param == `markers_only`.
 
+In the generated `pipeline.py`, `data_only` recognises physiological channels
+three ways: the name pattern (`EOG`/`VEOG`/`HEOG`/`ECG`/`EMG`/…), the shared
+EOG resolver (`VEO`/`HEO`, `LOC`/`ROC`, AASM `E1`/`E2` — never on EGI-style
+`E1..E256` nets) and the loader's channel type (`eog`/`ecg`/`emg`/`stim`/`resp`).
+Each dropped channel's reason is recorded in
+`pipeline_status.dropped_channels_reasons` (`marker_channel`, `physio_name`,
+`eog_channel`, `channel_type:<type>`).
+
 ## When to Use
 
 - **Almost always early in the pipeline** when `inspect_data`'s

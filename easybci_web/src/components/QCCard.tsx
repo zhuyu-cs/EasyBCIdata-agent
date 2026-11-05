@@ -1,4 +1,5 @@
 import type { QCMetrics } from "./qcMetrics";
+import { t } from "@/lib/i18n";
 
 interface Props {
   metrics: QCMetrics;
@@ -12,9 +13,9 @@ function getLevel(key: string, value: number): "good" | "warn" | "bad" {
 }
 
 const LEVEL_STYLES = {
-  good: { bg: "bg-[var(--bg-success-subtle)]", border: "border-[var(--border-success)]", text: "text-[var(--text-success)]", dot: "bg-[#22c55e]" },
-  warn: { bg: "bg-[var(--bg-warning-subtle)]", border: "border-[var(--border-warning)]", text: "text-[var(--text-warning)]", dot: "bg-[#eab308]" },
-  bad: { bg: "bg-[var(--bg-error-subtle)]", border: "border-[var(--border-error)]", text: "text-[var(--text-error)]", dot: "bg-[#ef4444]" },
+  good: { bg: "bg-[var(--bg-success-subtle)]", border: "border-[var(--border-success)]", text: "text-[var(--text-success)]", dot: "bg-[var(--accent-green)]" },
+  warn: { bg: "bg-[var(--bg-warning-subtle)]", border: "border-[var(--border-warning)]", text: "text-[var(--text-warning)]", dot: "bg-[var(--accent-yellow)]" },
+  bad: { bg: "bg-[var(--bg-error-subtle)]", border: "border-[var(--border-error)]", text: "text-[var(--text-error)]", dot: "bg-[var(--accent-red)]" },
 };
 
 const METRIC_LABELS: Record<string, string> = {
@@ -37,9 +38,9 @@ export function QCCard({ metrics }: Props) {
   if (entries.length === 0) return null;
 
   return (
-    <div className="my-2 rounded-lg border border-[var(--border-primary,#e8e5e0)] overflow-hidden">
-      <div className="px-3 py-1.5 bg-[var(--bg-tertiary,#f1f1ef)] border-b border-[var(--border-primary,#e8e5e0)]">
-        <span className="text-[11px] font-medium text-[var(--text-muted,#9b9a97)]">Quality Check Results</span>
+    <div className="my-2 rounded-lg border border-[var(--border-primary)] overflow-hidden">
+      <div className="px-3 py-1.5 bg-[var(--bg-tertiary)] border-b border-[var(--border-primary)]">
+        <span className="text-[11px] font-medium text-[var(--text-muted)]">{t("Quality Check Results")}</span>
       </div>
       <div className="p-3 grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.min(entries.length, 3)}, 1fr)` }}>
         {entries.map(([key, value]) => {
@@ -52,8 +53,8 @@ export function QCCard({ metrics }: Props) {
             >
               <div className="flex items-center gap-1.5 mb-1">
                 <span className={`w-2 h-2 rounded-full ${styles.dot}`} />
-                <span className="text-[10px] font-medium text-[var(--text-muted,#9b9a97)] uppercase tracking-wide">
-                  {METRIC_LABELS[key] || key}
+                <span className="text-[11px] font-medium text-[var(--text-muted)] uppercase tracking-wide">
+                  {METRIC_LABELS[key] ? t(METRIC_LABELS[key]) : key}
                 </span>
               </div>
               <div className={`text-[18px] font-semibold tabular-nums ${styles.text}`}>

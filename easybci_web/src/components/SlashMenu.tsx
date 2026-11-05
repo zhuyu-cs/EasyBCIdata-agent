@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { t } from "@/lib/i18n";
 
 interface SlashCommand {
   command: string;
@@ -81,15 +82,15 @@ export function SlashMenu({ query, onSelect, onClose, visible }: Props) {
           }`}
         >
           <span className="text-[12px] font-mono text-[var(--text-primary)] shrink-0">{cmd.command}</span>
-          <span className="text-[11px] text-[var(--text-muted)] truncate flex-1">{cmd.description}</span>
+          <span className="text-[11px] text-[var(--text-muted)] truncate flex-1">{t(cmd.description)}</span>
           {cmd.shortcut && (
-            <kbd className="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded border" style={{ color: "var(--text-faint)", borderColor: "var(--border-secondary)", background: "var(--bg-tertiary)" }}>
+            <kbd className="shrink-0 text-[11px] font-mono px-1.5 py-0.5 rounded border" style={{ color: "var(--text-faint)", borderColor: "var(--border-secondary)", background: "var(--bg-tertiary)" }}>
               {cmd.shortcut}
             </kbd>
           )}
         </button>
       ))}
-      <div className="px-3 pt-1 mt-1 border-t flex items-center gap-2 text-[10px]" style={{ borderColor: "var(--border-primary)", color: "var(--text-faint)" }}>
+      <div className="px-3 pt-1 mt-1 border-t flex items-center gap-2 text-[11px]" style={{ borderColor: "var(--border-primary)", color: "var(--text-faint)" }}>
         <span><kbd className="font-mono">↑↓</kbd> navigate</span>
         <span><kbd className="font-mono">↵</kbd> select</span>
         <span><kbd className="font-mono">esc</kbd> dismiss</span>

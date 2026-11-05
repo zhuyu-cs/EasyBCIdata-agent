@@ -42,6 +42,7 @@ _PROTECTED_KEYS = frozenset({
     "dataset_context", "dataset_understanding_hint", "unread_dataset_docs",
     "epoch_window_decision", "epoch_window_override_warning", "epoch_window_warning",
     "epoch_window_synced", "time_separability",
+    "data_rank", "ocular_artifact",
 })
 
 _MAX_LIST_ITEMS = 8

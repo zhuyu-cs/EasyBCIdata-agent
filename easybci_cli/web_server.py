@@ -760,6 +760,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                 if sid not in seen:
                     seen[sid] = {
                         "session_id": sid,
+                        "title": m.get("session_title"),
                         "snippet": m.get("snippet", ""),
                         "role": m.get("role"),
                         "source": m.get("source"),
@@ -2397,13 +2398,18 @@ async def get_session_messages(session_id: str, request: Request):
         db.close()
 
 
+_ARTIFACT_FIGURES_MAX = 24
+
+
 def _resolve_session_work_dir(db, sid: str) -> Optional[str]:
     """Return the mini-repo work_dir for session ``sid`` or None.
 
     Strategy:
     1. sessions.work_dir column (set by GatewayRunner via finalize hook).
-    2. Scan recent assistant/tool messages for any ``*_preprocess_work_dir``
-       mention so legacy sessions (pre-Phase-1) still surface artifacts.
+    2. For sessions recorded before (1) existed: a structured ``"work_dir"``
+       field in one of this session's tool results. Free-text mentions (user
+       prompts, assistant prose, directory listings) are ignored — they name
+       paths the session merely talked about, not the one it produced.
     """
     try:
         wd = db.get_session_work_dir(sid)
@@ -2414,34 +2420,22 @@ def _resolve_session_work_dir(db, sid: str) -> Optional[str]:
         if p.exists() and p.is_dir():
             return str(p)
 
-    # Fallback: regex-scan messages for "<something>_preprocess_work_dir"
     try:
         import re as _re
         messages = db.get_messages(sid)
     except Exception:
         return None
-    pattern = _re.compile(r"([^\s\"'`<>]+_preprocess_work_dir)(?:/|\b)")
+    pattern = _re.compile(r'"work_dir"\s*:\s*"([^"]+_preprocess_work_dir)/?"')
     for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
         content = msg.get("content")
-        if isinstance(content, list):
-            # multimodal: stringify
-            try:
-                content = " ".join(
-                    str(p.get("text", "")) for p in content if isinstance(p, dict)
-                )
-            except Exception:
-                content = ""
         if not isinstance(content, str) or not content:
             continue
         for m in pattern.finditer(content):
-            candidate = m.group(1)
-            cand_path = Path(candidate)
-            if cand_path.is_absolute() and cand_path.exists() and cand_path.is_dir():
+            cand_path = Path(m.group(1))
+            if cand_path.is_absolute() and (cand_path / "plan").is_dir():
                 return str(cand_path)
-            # Try CWD-relative
-            rel = Path.cwd() / candidate
-            if rel.exists() and rel.is_dir():
-                return str(rel)
     return None
 
 
@@ -2573,6 +2567,18 @@ async def get_session_artifacts(session_id: str, request: Request):
         if pipeline_yaml is not None:
             payload["pipeline_yaml"] = pipeline_yaml
 
+        # Run summary for the Workspace card: copied as recorded, absent when
+        # the record doesn't have them.
+        for key in ("steps", "qc_grade", "elapsed_s", "status", "deliverables", "epoch_window"):
+            if record.get(key) is not None:
+                payload[key] = record[key]
+        figures_dir = out_dir / "figures"
+        if figures_dir.is_dir():
+            figures = sorted(str(p) for p in figures_dir.rglob("*.png"))
+            if figures:
+                payload["figures"] = figures[:_ARTIFACT_FIGURES_MAX]
+                payload["figure_count"] = len(figures)
+
         # qc
         qc = record.get("qc") or record.get("qc_result")
         if isinstance(qc, dict):
@@ -2685,7 +2691,10 @@ async def get_session_version(session_id: str, request: Request, response: Respo
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
-        messages = db.get_messages(sid)
+        # Same lineage-stitched read as /messages so both endpoints compute an
+        # identical stamp; otherwise a compression-split session never matches
+        # and the client reports a phantom external update.
+        messages = db.get_messages_with_lineage(sid)
         last_ts = 0
         last_role = ""
         if messages:

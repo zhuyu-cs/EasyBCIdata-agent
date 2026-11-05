@@ -1,3 +1,4 @@
+import { t } from "@/lib/i18n";
 interface Props {
   onCopy: () => void;
   copied: boolean;
@@ -47,7 +48,7 @@ export function MessageToolbar({
 }: Props) {
   return (
     <div className="flex items-center gap-0.5 opacity-0 group-hover/msg:opacity-100 focus-within:opacity-100 transition-opacity duration-150">
-      <IconButton onClick={onCopy} title={copied ? "Copied" : "Copy text"}>
+      <IconButton onClick={onCopy} title={copied ? t("Copied") : t("Copy text")}>
         {copied ? (
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
             <path d="M2.5 7l2.5 2.5L10.5 4" stroke="var(--accent-green)" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
@@ -61,7 +62,7 @@ export function MessageToolbar({
       </IconButton>
 
       {onResend && (
-        <IconButton onClick={onResend} title="Re-send message">
+        <IconButton onClick={onResend} title={t("Re-send message")}>
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
             <path d="M10.5 5.5A4 4 0 103 8.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
             <path d="M10.5 2.5v3h-3" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
@@ -70,7 +71,7 @@ export function MessageToolbar({
       )}
 
       {collapsible && (
-        <IconButton onClick={onToggleCollapse} title={collapsed ? "Expand" : "Collapse"}>
+        <IconButton onClick={onToggleCollapse} title={collapsed ? t("Expand") : t("Collapse")}>
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none" className={`transition-transform duration-200 ${collapsed ? "" : "rotate-180"}`}>
             <path d="M3 8l3.5-3.5L10 8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
           </svg>

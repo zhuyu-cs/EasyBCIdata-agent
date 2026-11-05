@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { BCI_PROMPT_TEMPLATES } from "@/lib/prompts";
+import { t } from "@/lib/i18n";
 
 interface Props {
   onSelect: (text: string) => void;
@@ -41,7 +42,7 @@ const CHIP_ICONS: Record<string, ReactNode> = {
   ),
 };
 
-const CHIPS = BCI_PROMPT_TEMPLATES.filter((t) => t.id in CHIP_ICONS);
+const CHIPS = BCI_PROMPT_TEMPLATES.filter((tpl) => tpl.id in CHIP_ICONS);
 
 export function QuickStartChips({ onSelect }: Props) {
   return (
@@ -49,13 +50,13 @@ export function QuickStartChips({ onSelect }: Props) {
       {CHIPS.map((chip) => (
         <button
           key={chip.id}
-          onClick={() => onSelect(chip.prompt)}
+          onClick={() => onSelect(t(chip.prompt))}
           className="group flex items-center gap-2 px-3 py-2.5 rounded-lg border text-left transition-all duration-150 bg-[var(--bg-secondary)] border-[var(--border-primary)] hover:bg-[var(--bg-hover)] hover:-translate-y-[1px]"
           style={{ boxShadow: "var(--shadow-sm)" }}
         >
           <span className="shrink-0 text-[var(--accent-green)]">{CHIP_ICONS[chip.id]}</span>
           <span className="text-caption" style={{ color: "var(--text-secondary)" }}>
-            {chip.label}
+            {t(chip.label)}
           </span>
         </button>
       ))}

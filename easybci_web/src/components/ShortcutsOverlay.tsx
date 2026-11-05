@@ -1,4 +1,6 @@
 import { useEffect } from "react";
+import { useDialog } from "@/hooks/useDialog";
+import { t } from "@/lib/i18n";
 
 interface Props {
   onClose: () => void;
@@ -19,7 +21,7 @@ const GROUPS: { title: string; items: Shortcut[] }[] = [
     title: "Navigation",
     items: [
       { keys: [MOD, "K"], label: "Open command palette" },
-      { keys: [MOD, "/"], label: "Focus session search" },
+      { keys: ["/"], label: "Focus session search" },
       { keys: [MOD, "["], label: "Previous session" },
       { keys: [MOD, "]"], label: "Next session" },
     ],
@@ -59,9 +61,10 @@ function Keys({ keys }: { keys: string[] }) {
 }
 
 export function ShortcutsOverlay({ onClose }: Props) {
+  const dialogRef = useDialog<HTMLDivElement>(onClose);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" || e.key === "?") {
+      if (e.key === "?") {
         e.preventDefault();
         onClose();
       }
@@ -74,12 +77,17 @@ export function ShortcutsOverlay({ onClose }: Props) {
     <div className="fixed inset-0 z-[60] flex items-center justify-center" onClick={onClose}>
       <div className="absolute inset-0 bg-black/40 animate-backdrop-in" />
       <div
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("Keyboard shortcuts")}
         className="relative w-[90vw] max-w-[440px] rounded-lg overflow-hidden animate-dialog-in"
         style={{ background: "var(--bg-secondary)", boxShadow: "var(--shadow-lg)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-3 border-b" style={{ borderColor: "var(--border-primary)" }}>
-          <h3 className="text-heading-sm" style={{ color: "var(--text-primary)" }}>Keyboard shortcuts</h3>
+          <h3 className="text-heading-sm" style={{ color: "var(--text-primary)" }}>{t("Keyboard shortcuts")}</h3>
           <button
             onClick={onClose}
             className="w-6 h-6 flex items-center justify-center rounded hover:bg-[var(--bg-hover)] transition-colors"
@@ -94,12 +102,12 @@ export function ShortcutsOverlay({ onClose }: Props) {
           {GROUPS.map((group) => (
             <div key={group.title}>
               <div className="text-label uppercase tracking-wide mb-2" style={{ color: "var(--text-faint)" }}>
-                {group.title}
+                {t(group.title)}
               </div>
               <div className="space-y-1.5">
                 {group.items.map((item) => (
                   <div key={item.label} className="flex items-center justify-between gap-3">
-                    <span className="text-caption" style={{ color: "var(--text-secondary)" }}>{item.label}</span>
+                    <span className="text-caption" style={{ color: "var(--text-secondary)" }}>{t(item.label)}</span>
                     <Keys keys={item.keys} />
                   </div>
                 ))}

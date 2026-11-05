@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { fetchJSON, fileServeUrl } from "@/lib/api";
+import { useDialog } from "@/hooks/useDialog";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { t } from "@/lib/i18n";
 
 interface Props {
   filePath: string;
@@ -52,6 +54,14 @@ function isMarkdown(path: string): boolean {
   return path.endsWith(".md");
 }
 
+function isHtml(path: string): boolean {
+  return /\.html?$/i.test(path);
+}
+
+function isPdf(path: string): boolean {
+  return /\.pdf$/i.test(path);
+}
+
 interface NavProps {
   index: number;
   total: number;
@@ -61,16 +71,17 @@ interface NavProps {
 
 // Shared close + sibling navigation keyboard handling for both preview modes.
 function usePreviewKeys(onClose: () => void, nav?: NavProps) {
+  const dialogRef = useDialog<HTMLDivElement>(onClose);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { onClose(); return; }
       if (!nav) return;
       if (e.key === "ArrowLeft") { e.preventDefault(); nav.onPrev?.(); }
       else if (e.key === "ArrowRight") { e.preventDefault(); nav.onNext?.(); }
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [onClose, nav]);
+  }, [nav]);
+  return dialogRef;
 }
 
 function NavArrows({ nav, light }: { nav: NavProps; light?: boolean }) {
@@ -84,7 +95,7 @@ function NavArrows({ nav, light }: { nav: NavProps; light?: boolean }) {
         onClick={(e) => { e.stopPropagation(); nav.onPrev?.(); }}
         disabled={!nav.onPrev}
         className={`absolute left-3 top-1/2 -translate-y-1/2 z-10 w-9 h-9 flex items-center justify-center rounded-full transition-colors disabled:opacity-30 ${base}`}
-        title="Previous (←)"
+        title={t("Previous (←)")}
       >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
           <path d="M10 3L5 8l5 5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -94,7 +105,7 @@ function NavArrows({ nav, light }: { nav: NavProps; light?: boolean }) {
         onClick={(e) => { e.stopPropagation(); nav.onNext?.(); }}
         disabled={!nav.onNext}
         className={`absolute right-3 top-1/2 -translate-y-1/2 z-10 w-9 h-9 flex items-center justify-center rounded-full transition-colors disabled:opacity-30 ${base}`}
-        title="Next (→)"
+        title={t("Next (→)")}
       >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
           <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -109,7 +120,7 @@ function ImagePreview({ filePath, onClose, nav }: { filePath: string; onClose: (
   const fileName = filePath.split("/").pop() ?? filePath;
   const src = fileServeUrl(filePath);
 
-  usePreviewKeys(onClose, nav);
+  const dialogRef = usePreviewKeys(onClose, nav);
 
   // Reset zoom when the previewed file changes — adjusted during render via the
   // prev-prop pattern instead of a state-setting effect.
@@ -124,6 +135,11 @@ function ImagePreview({ filePath, onClose, nav }: { filePath: string; onClose: (
       <div className="absolute inset-0 bg-black/60 animate-backdrop-in" />
       {nav && <NavArrows nav={nav} light />}
       <div
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={fileName}
         className="relative flex flex-col items-center max-w-[92vw] max-h-[90vh] animate-dialog-in"
         onClick={(e) => e.stopPropagation()}
       >
@@ -146,6 +162,7 @@ function ImagePreview({ filePath, onClose, nav }: { filePath: string; onClose: (
           </button>
           <button
             onClick={onClose}
+            aria-label={t("Close")}
             className="w-8 h-8 flex items-center justify-center rounded-full bg-black/50 text-white hover:bg-black/70 transition-colors ml-2"
           >
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -196,7 +213,33 @@ export function FilePreview({ filePath, onClose, siblings, onNavigate }: Props) 
     return <ImagePreview filePath={filePath} onClose={onClose} nav={nav} />;
   }
 
+  if (isPdf(filePath)) {
+    return <PdfPreview filePath={filePath} onClose={onClose} nav={nav} />;
+  }
+
   return <TextFilePreview filePath={filePath} onClose={onClose} nav={nav} />;
+}
+
+function PdfPreview({ filePath, onClose, nav }: { filePath: string; onClose: () => void; nav?: NavProps }) {
+  const fileName = filePath.split("/").pop() ?? filePath;
+  const dialogRef = usePreviewKeys(onClose, nav);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/40 animate-backdrop-in" />
+      {nav && <NavArrows nav={nav} />}
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={fileName}
+        className="relative w-[90vw] max-w-4xl h-[85vh] bg-[var(--bg-secondary)] rounded-lg shadow-xl overflow-hidden animate-dialog-in"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <iframe src={fileServeUrl(filePath)} title={fileName} className="w-full h-full" />
+      </div>
+    </div>
+  );
 }
 
 function TextFilePreview({ filePath, onClose, nav }: { filePath: string; onClose: () => void; nav?: NavProps }) {
@@ -215,7 +258,7 @@ function TextFilePreview({ filePath, onClose, nav }: { filePath: string; onClose
 
   const fileName = filePath.split("/").pop() ?? filePath;
 
-  usePreviewKeys(onClose, nav);
+  const dialogRef = usePreviewKeys(onClose, nav);
 
   useEffect(() => {
     let cancelled = false;
@@ -232,7 +275,7 @@ function TextFilePreview({ filePath, onClose, nav }: { filePath: string; onClose
           });
       })
       .catch((e) => {
-        if (!cancelled) setResult({ path: filePath, content: null, error: e instanceof Error ? e.message : "Failed to read file" });
+        if (!cancelled) setResult({ path: filePath, content: null, error: e instanceof Error ? e.message : t("Failed to read file") });
       });
     return () => { cancelled = true; };
   }, [filePath]);
@@ -249,6 +292,11 @@ function TextFilePreview({ filePath, onClose, nav }: { filePath: string; onClose
       <div className="absolute inset-0 bg-black/40 animate-backdrop-in" />
       {nav && <NavArrows nav={nav} />}
       <div
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={fileName}
         className="relative w-[90vw] max-w-3xl max-h-[80vh] bg-[var(--bg-secondary)] rounded-lg shadow-xl flex flex-col overflow-hidden animate-dialog-in"
         onClick={(e) => e.stopPropagation()}
       >
@@ -263,6 +311,7 @@ function TextFilePreview({ filePath, onClose, nav }: { filePath: string; onClose
           </div>
           <button
             onClick={onClose}
+            aria-label={t("Close")}
             className="w-6 h-6 flex items-center justify-center rounded hover:bg-[var(--bg-hover)] text-[var(--text-muted)] transition-colors"
           >
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -278,10 +327,10 @@ function TextFilePreview({ filePath, onClose, nav }: { filePath: string; onClose
               <path d="M6 3.5v3M6 8.5h.01M1.5 6a4.5 4.5 0 119 0 4.5 4.5 0 01-9 0z" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
             </svg>
             <span>
-              Showing first {formatBytes(PREVIEW_LIMIT_BYTES)} of {formatBytes(size)}
+              {t("Showing first {a} of {b}", { a: formatBytes(PREVIEW_LIMIT_BYTES), b: formatBytes(size) })}
             </span>
-            <span className="ml-auto text-[var(--text-faint)] font-mono truncate" title={`Open ${filePath} on this machine`}>
-              open locally: {filePath}
+            <span className="ml-auto text-[var(--text-faint)] font-mono truncate" title={filePath}>
+              {t("open locally: {p}", { p: filePath })}
             </span>
           </div>
         )}
@@ -291,7 +340,7 @@ function TextFilePreview({ filePath, onClose, nav }: { filePath: string; onClose
           {loading && (
             <div className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]">
               <span className="w-3 h-3 border-2 border-[var(--text-muted)] border-t-transparent rounded-full animate-spin" />
-              Loading...
+              {t("Loading...")}
             </div>
           )}
 
@@ -307,17 +356,21 @@ function TextFilePreview({ filePath, onClose, nav }: { filePath: string; onClose
               </svg>
               <p className="text-[12px] text-[var(--text-muted)]">
                 {size != null && size > 100 * 1024
-                  ? `File is ${formatBytes(size)} — too large to preview inline.`
-                  : "This file isn't a previewable text type."}
+                  ? t("File is {s} — too large to preview inline.", { s: formatBytes(size) })
+                  : t("This file isn't a previewable text type.")}
               </p>
               <p className="text-[11px] text-[var(--text-faint)] font-mono break-all max-w-[80%]">
-                open locally: {filePath}
+                {t("open locally: {p}", { p: filePath })}
               </p>
             </div>
           )}
 
           {content !== null && !loading && (
-            isMarkdown(filePath) ? (
+            isHtml(filePath) ? (
+              // No sandbox permissions: reports may carry scripts, and this page
+              // holds the session token. Static content still renders.
+              <iframe sandbox="" srcDoc={content} title={fileName} className="w-full h-[62vh] bg-white rounded" />
+            ) : isMarkdown(filePath) ? (
               <div className="prose-compact text-[13px] leading-relaxed text-[var(--text-primary)]">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
               </div>

@@ -58,6 +58,7 @@ from datetime import datetime
 from pathlib import Path
 
 from easybci_lib.constants import get_easybci_home
+from easybci_lib.session_reconcile import stored_tail_overlap
 
 
 _OPENAI_CLS_CACHE: Optional[type] = None
@@ -341,6 +342,16 @@ def _multimodal_text_summary(value: Any) -> str:
         return _json.dumps(value, default=str)
     except Exception:
         return str(value)
+
+
+# Head of a tool result carried on `tool.completed` progress events so live
+# UIs can show what a step returned without waiting for the transcript.
+_TOOL_RESULT_PREVIEW_CHARS = 2000
+
+
+def _tool_result_preview_kwargs(value: Any) -> dict:
+    text = _multimodal_text_summary(value) if value is not None else ""
+    return {"result_preview": text[:_TOOL_RESULT_PREVIEW_CHARS], "result_chars": len(text)}
 
 
 def _append_subdir_hint_to_multimodal(value: Dict[str, Any], hint: str) -> None:
@@ -4357,6 +4368,11 @@ class AIAgent:
                 self._ensure_db_session()
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
+            if flush_from < len(messages):
+                # Rows a read-side self-heal already copied from the JSON log.
+                flush_from += stored_tail_overlap(
+                    self._session_db.get_messages(self.session_id), messages[flush_from:],
+                )
             logger.info(
                 "[flush-trace] session=%s len(messages)=%d len(history)=%d "
                 "start_idx=%d last_flushed=%d flush_from=%d writing=%d",
@@ -10210,7 +10226,7 @@ class AIAgent:
             if self.tool_progress_callback:
                 try:
                     preview = _build_tool_preview(name, args)
-                    self.tool_progress_callback("tool.started", name, preview, args)
+                    self.tool_progress_callback("tool.started", name, preview, args, tool_call_id=tc.id)
                 except Exception as cb_err:
                     logging.debug(f"Tool progress callback error: {cb_err}")
             self._emit_turn_scope_eta(name)
@@ -10450,6 +10466,7 @@ class AIAgent:
                         self.tool_progress_callback(
                             "tool.completed", function_name, None, None,
                             duration=tool_duration, is_error=is_error,
+                            tool_call_id=tc.id, **_tool_result_preview_kwargs(function_result),
                         )
                     except Exception as cb_err:
                         logging.debug(f"Tool progress callback error: {cb_err}")
@@ -10645,7 +10662,10 @@ class AIAgent:
             if not _execution_blocked and self.tool_progress_callback:
                 try:
                     preview = _build_tool_preview(function_name, function_args)
-                    self.tool_progress_callback("tool.started", function_name, preview, function_args)
+                    self.tool_progress_callback(
+                        "tool.started", function_name, preview, function_args,
+                        tool_call_id=tool_call.id,
+                    )
                 except Exception as cb_err:
                     logging.debug(f"Tool progress callback error: {cb_err}")
             if not _execution_blocked:
@@ -10924,6 +10944,7 @@ class AIAgent:
                     self.tool_progress_callback(
                         "tool.completed", function_name, None, None,
                         duration=tool_duration, is_error=_is_error_result,
+                        tool_call_id=tool_call.id, **_tool_result_preview_kwargs(function_result),
                     )
                 except Exception as cb_err:
                     logging.debug(f"Tool progress callback error: {cb_err}")

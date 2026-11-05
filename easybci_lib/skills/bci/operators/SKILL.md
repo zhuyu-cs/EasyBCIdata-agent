@@ -92,10 +92,11 @@ ordering constraints, and failure modes; load one with
 | [select_events](event/select_events/SKILL.md) | `select_events` | eeg, seeg, ecog, meg | Filter events by condition/attribute criteria |
 | [attach_metadata](event/attach_metadata/SKILL.md) | `attach_metadata` | eeg, seeg, ecog, meg | Join trial-level behavioural/stimulus metadata onto epochs |
 
-### `adaptive_cleaning/` — Adaptive artifact cleaning  *(8)*
+### `adaptive_cleaning/` — Adaptive artifact cleaning  *(9)*
 
 | Operator | step_string | Modalities | Description |
 |---|---|---|---|
+| [ocular_artifact](adaptive_cleaning/ocular_artifact/SKILL.md) | — *(decision)* | eeg, meg | Whether / how to remove ocular artifacts; clip, scale and trial rejection do not count |
 | [ica](adaptive_cleaning/ica/SKILL.md) | `ica` | eeg, meg | ICA artifact removal — automatic detection and exclusion of EOG/ECG components |
 | [ic_classify](adaptive_cleaning/ic_classify/SKILL.md) | `ic_classify` | eeg, meg | Automatic IC classification (ICLabel, MEGNet, correlation) |
 | [manual_ic_selection](adaptive_cleaning/manual_ic_selection/SKILL.md) | `manual_ic_selection` | eeg, meg | Human-in-the-loop IC selection from reviewed index list |

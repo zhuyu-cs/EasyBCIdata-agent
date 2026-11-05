@@ -1,8 +1,9 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { api, fetchJSON, ApiError } from "@/lib/api";
-import type { DirSummary } from "@/lib/api";
+import type { SessionArtifacts } from "@/lib/api";
 import type { RunEvent } from "@/lib/runsClient";
 import { warn } from "@/lib/debug";
+import { t } from "@/lib/i18n";
 
 export interface FileNode {
   name: string;
@@ -26,18 +27,24 @@ interface WorkspaceState {
   sourceDir: string | null;
   sourceFiles: FileNode[];
   sourceTrunc: TreeTruncation | null;
-  /** At-a-glance summary of the Source directory. Null while loading
-   *  or when the summary endpoint failed. */
-  sourceSummary: DirSummary | null;
   outputDir: string | null;
   outputFiles: FileNode[];
   outputTrunc: TreeTruncation | null;
+  sourceLoading: boolean;
+  outputLoading: boolean;
+  /** Either tree is loading — kept for the header spinner. */
   loading: boolean;
+  /** What the session's pipeline_record says about its run, once known. */
+  artifacts: SessionArtifacts | null;
+  /** The first artifacts lookup for this session has finished. */
+  settled: boolean;
 }
 
 interface TreeResult {
   files: FileNode[];
   trunc: TreeTruncation;
+  /** False when the listing failed (e.g. the directory doesn't exist). */
+  ok: boolean;
 }
 
 async function fetchFileTree(dirPath: string, maxDepth = 2): Promise<TreeResult> {
@@ -53,16 +60,11 @@ async function fetchFileTree(dirPath: string, maxDepth = 2): Promise<TreeResult>
         count: data.truncated_at_count ?? 0,
         depth: !!data.truncated_at_depth,
       },
+      ok: true,
     };
   } catch {
-    return { files: [], trunc: { count: 0, depth: false } };
+    return { files: [], trunc: { count: 0, depth: false }, ok: false };
   }
-}
-
-function extractPathFromPreview(preview: string | undefined): string | null {
-  if (!preview) return null;
-  const match = preview.match(/(?:^|\s)(\/[^\s"']+)/);
-  return match ? match[1] : null;
 }
 
 /** If the path looks like a file (has a known extension), return its parent
@@ -77,56 +79,46 @@ function dirnameIfFile(p: string): string {
   return p.replace(/\/+$/, "") || p;
 }
 
-function extractOutputPath(text: string): string | null {
-  const patterns = [
-    /output_dir[:\s]+"?(\/[^\s"]+)/,
-    /Output:\s+(\/[^\s]+)/,
-    /exported to\s+(\/[^\s]+)/i,
-    /work_dir[:\s]+"?(\/[^\s"]+)/,
-  ];
-  for (const pat of patterns) {
-    const m = text.match(pat);
-    if (m) return m[1];
-  }
-  return null;
-}
-
-const FILE_PATH_REGEX = /(?:^|\s)(\/(?:[^\s/]+\/)*[^\s/]+\.[a-zA-Z0-9]{1,6})(?:\s|$|[,.);\]}])/g;
 const KNOWN_EXTENSIONS = new Set([
   "edf", "bdf", "fif", "set", "vhdr", "eeg", "cnt", "mat", "h5", "hdf5",
   "npy", "npz", "csv", "tsv", "json", "yaml", "yml", "txt", "py",
   "png", "jpg", "svg", "pdf", "md", "toml",
 ]);
 
-function extractPathsFromText(text: string): string[] {
-  const paths: string[] = [];
-  let match: RegExpExecArray | null;
-  const re = new RegExp(FILE_PATH_REGEX.source, FILE_PATH_REGEX.flags);
-  while ((match = re.exec(text)) !== null) {
-    const path = match[1];
-    const ext = path.split(".").pop()?.toLowerCase();
-    if (ext && KNOWN_EXTENSIONS.has(ext)) {
-      paths.push(path);
-    }
-  }
-  return paths;
+
+const EMPTY_STATE: WorkspaceState = {
+  sourceDir: null,
+  sourceFiles: [],
+  sourceTrunc: null,
+  outputDir: null,
+  outputFiles: [],
+  outputTrunc: null,
+  sourceLoading: false,
+  outputLoading: false,
+  loading: false,
+  artifacts: null,
+  settled: false,
+};
+
+// A reload starts from the last layout, so the conversation doesn't shift.
+const PANEL_VISIBLE_KEY = "easybci-workspace-visible";
+
+function withLoading(s: WorkspaceState): WorkspaceState {
+  return { ...s, loading: s.sourceLoading || s.outputLoading };
 }
 
 export function useWorkspace() {
-  const [state, setState] = useState<WorkspaceState>({
-    sourceDir: null,
-    sourceFiles: [],
-    sourceTrunc: null,
-    sourceSummary: null,
-    outputDir: null,
-    outputFiles: [],
-    outputTrunc: null,
-    loading: false,
-  });
+  const [state, setRawState] = useState<WorkspaceState>(EMPTY_STATE);
+  const setState = useCallback(
+    (fn: (prev: WorkspaceState) => WorkspaceState) => setRawState((prev) => withLoading(fn(prev))),
+    [],
+  );
+  // Session the panel currently belongs to. Every async result checks it so a
+  // slow response for a previous session can never paint into the new one.
+  const sessionRef = useRef<string | null | undefined>(undefined);
 
   const outputDirRef = useRef<string | null>(null);
   const sourceDirRef = useRef<string | null>(null);
-  const detectedPathsRef = useRef<Set<string>>(new Set());
   // Current requested depth per directory — bumped by loadDeeper (B10).
   const sourceDepthRef = useRef(2);
   const outputDepthRef = useRef(2);
@@ -147,51 +139,51 @@ export function useWorkspace() {
     if (dir === sourceDirRef.current) return;
     sourceDirRef.current = dir;
     sourceDepthRef.current = 2;
-    setState((prev) => ({ ...prev, sourceDir: dir, sourceSummary: null, loading: true }));
-    // Load the full tree and the at-a-glance summary concurrently. A summary
-    // failure must not block (or clear) the tree, and vice-versa.
-    const [treeRes, summaryRes] = await Promise.allSettled([
-      fetchFileTree(dir, sourceDepthRef.current),
-      api.getDirSummary(dir),
-    ]);
-    const tree =
-      treeRes.status === "fulfilled"
-        ? treeRes.value
-        : { files: [] as FileNode[], trunc: { count: 0, depth: false } };
-    const summary = summaryRes.status === "fulfilled" ? summaryRes.value : null;
+    setState((prev) => ({ ...prev, sourceDir: dir, sourceLoading: true }));
+    const tree = await fetchFileTree(dir, sourceDepthRef.current);
+    if (sourceDirRef.current !== dir) return;
     setState((prev) => ({
       ...prev,
       sourceFiles: tree.files,
       sourceTrunc: tree.trunc,
-      sourceSummary: summary,
-      loading: false,
+      sourceLoading: false,
     }));
-  }, []);
+  }, [setState]);
 
-  const setOutputDir = useCallback(async (dir: string) => {
+  /** `guessed`: the path was inferred from tool args rather than reported by
+   *  /artifacts — drop it again if it doesn't exist on disk. */
+  const setOutputDir = useCallback(async (dir: string, opts: { guessed?: boolean } = {}) => {
     if (dir === outputDirRef.current) return;
     outputDirRef.current = dir;
     outputDepthRef.current = 2;
-    setState((prev) => ({ ...prev, outputDir: dir, loading: true }));
-    const { files, trunc } = await fetchFileTree(dir, outputDepthRef.current);
-    setState((prev) => ({ ...prev, outputFiles: files, outputTrunc: trunc, loading: false }));
-  }, []);
+    setState((prev) => ({ ...prev, outputDir: dir, outputLoading: true }));
+    const { files, trunc, ok } = await fetchFileTree(dir, outputDepthRef.current);
+    if (outputDirRef.current !== dir) return;
+    if (!ok && opts.guessed) {
+      outputDirRef.current = null;
+      setState((prev) => ({ ...prev, outputDir: null, outputFiles: [], outputTrunc: null, outputLoading: false }));
+      return;
+    }
+    setState((prev) => ({ ...prev, outputFiles: files, outputTrunc: trunc, outputLoading: false }));
+  }, [setState]);
 
   const refreshOutput = useCallback(async () => {
     const dir = outputDirRef.current;
     if (!dir) return;
-    setState((prev) => ({ ...prev, loading: true }));
+    setState((prev) => ({ ...prev, outputLoading: true }));
     const { files, trunc } = await fetchFileTree(dir, outputDepthRef.current);
-    setState((prev) => ({ ...prev, outputFiles: files, outputTrunc: trunc, loading: false }));
-  }, []);
+    if (outputDirRef.current !== dir) return;
+    setState((prev) => ({ ...prev, outputFiles: files, outputTrunc: trunc, outputLoading: false }));
+  }, [setState]);
 
   const refreshSource = useCallback(async () => {
     const dir = sourceDirRef.current;
     if (!dir) return;
-    setState((prev) => ({ ...prev, loading: true }));
+    setState((prev) => ({ ...prev, sourceLoading: true }));
     const { files, trunc } = await fetchFileTree(dir, sourceDepthRef.current);
-    setState((prev) => ({ ...prev, sourceFiles: files, sourceTrunc: trunc, loading: false }));
-  }, []);
+    if (sourceDirRef.current !== dir) return;
+    setState((prev) => ({ ...prev, sourceFiles: files, sourceTrunc: trunc, sourceLoading: false }));
+  }, [setState]);
 
   // Re-fetch a directory tree one level deeper — used by the "load deeper"
   // affordance when the listing was depth-limited (B10).
@@ -200,14 +192,17 @@ export function useWorkspace() {
     if (!dir) return;
     const depthRef = which === "source" ? sourceDepthRef : outputDepthRef;
     depthRef.current = Math.min(depthRef.current + 1, 6);
-    setState((prev) => ({ ...prev, loading: true }));
+    const loadingKey = which === "source" ? "sourceLoading" : "outputLoading";
+    setState((prev) => ({ ...prev, [loadingKey]: true }));
     const { files, trunc } = await fetchFileTree(dir, depthRef.current);
+    const current = which === "source" ? sourceDirRef.current : outputDirRef.current;
+    if (current !== dir) return;
     setState((prev) =>
       which === "source"
-        ? { ...prev, sourceFiles: files, sourceTrunc: trunc, loading: false }
-        : { ...prev, outputFiles: files, outputTrunc: trunc, loading: false },
+        ? { ...prev, sourceFiles: files, sourceTrunc: trunc, sourceLoading: false }
+        : { ...prev, outputFiles: files, outputTrunc: trunc, outputLoading: false },
     );
-  }, []);
+  }, [setState]);
 
   // Delete a file/dir inside a mini-repo work_dir, then refresh both trees so
   // the panels reflect disk. The backend rejects source-side / out-of-bounds
@@ -222,7 +217,7 @@ export function useWorkspace() {
         const d = (e.detail ?? {}) as { files?: number; bytes?: number };
         const mb = ((d.bytes ?? 0) / (1024 * 1024)).toFixed(1);
         const ok = window.confirm(
-          `Will delete ${d.files ?? "?"} file(s) (${mb} MB). Confirm?`,
+          t("Will delete {n} file(s) ({m} MB). Confirm?", { n: d.files ?? "?", m: mb }),
         );
         if (!ok) return false;
         await api.deleteFile(path, true);
@@ -230,9 +225,9 @@ export function useWorkspace() {
         throw e;
       }
     }
-    await Promise.all([refreshOutput(), refreshSource()]);
+    await refreshOutput();
     return true;
-  }, [refreshOutput, refreshSource]);
+  }, [refreshOutput]);
 
 
   // (e.g. activeSessionId stable but reloadCount bumped) share one request.
@@ -250,21 +245,24 @@ export function useWorkspace() {
     const promise = (async () => {
       try {
         const art = await api.getSessionArtifacts(sessionId);
-        if (!art.available) return;
+        if (sessionRef.current !== sessionId || !art.available) return;
+        setState((prev) => ({ ...prev, artifacts: art }));
         if (art.source_dir) await setSourceDir(art.source_dir);
+        if (sessionRef.current !== sessionId) return;
         const outDir = art.work_dir ?? art.output_dir;
         if (outDir) await setOutputDir(outDir);
       } catch (err) {
-        warn("loadFromArtifacts", "artifacts fetch failed; panels stay empty", err);
+        warn("loadFromArtifacts", "artifacts fetch failed; panels keep their last state", err);
       } finally {
         if (artifactsInflightRef.current?.sid === sessionId) {
           artifactsInflightRef.current = null;
         }
+        if (sessionRef.current === sessionId) setState((prev) => ({ ...prev, settled: true }));
       }
     })();
     artifactsInflightRef.current = { sid: sessionId, promise };
     return promise;
-  }, [setSourceDir, setOutputDir]);
+  }, [setSourceDir, setOutputDir, setState]);
 
   // Throttled artifacts refresh for use during a live SSE run. Leading-edge
   // fires immediately if we haven't fetched in the last ARTIFACTS_THROTTLE_MS;
@@ -279,7 +277,7 @@ export function useWorkspace() {
       artifactsTimerRef.current = setTimeout(() => {
         lastArtifactsAtRef.current = performance.now();
         artifactsTimerRef.current = null;
-        loadFromArtifacts(sessionId);
+        if (sessionRef.current === sessionId) loadFromArtifacts(sessionId);
       }, remaining);
       return;
     }
@@ -292,27 +290,28 @@ export function useWorkspace() {
     sourceDirRef.current = null;
     sourceDepthRef.current = 2;
     outputDepthRef.current = 2;
-    detectedPathsRef.current.clear();
     pendingToolPathsRef.current = [];
     if (artifactsTimerRef.current) {
       clearTimeout(artifactsTimerRef.current);
       artifactsTimerRef.current = null;
     }
     lastArtifactsAtRef.current = 0;
-    setState({
-      sourceDir: null,
-      sourceFiles: [],
-      sourceTrunc: null,
-      sourceSummary: null,
-      outputDir: null,
-      outputFiles: [],
-      outputTrunc: null,
-      loading: false,
-    });
+    artifactsInflightRef.current = null;
+    setRawState(EMPTY_STATE);
   }, []);
+
+  /** Point the panel at `sessionId`, clearing everything from the previous
+   *  session first. A no-op when it already shows that session. */
+  const bindSession = useCallback((sessionId: string | null) => {
+    if (sessionRef.current === sessionId) return;
+    sessionRef.current = sessionId;
+    reset();
+    if (sessionId === null) setRawState({ ...EMPTY_STATE, settled: true });
+  }, [reset]);
 
   const handleRunEvent = useCallback(
     (ev: RunEvent, sessionId?: string | null) => {
+      if (sessionId && sessionRef.current !== sessionId) return;
       // Fallback path-sniffing only fires before artifacts has bootstrapped
       // either dir — once we've got authoritative source/output paths from
       // /artifacts, regex/keyword scraping from preview text is just noise.
@@ -354,11 +353,6 @@ export function useWorkspace() {
         }
 
         const toolName = ev.tool ?? "";
-        if ((toolName === "inspect_data" || toolName === "inspect_neural") && fallbackActive) {
-          const path = extractPathFromPreview(ev.preview);
-          if (path) sourceCandidate = path;
-        }
-
         if (sourceCandidate !== null || outputCandidate !== null) {
           pendingToolPathsRef.current.push({
             tool: toolName,
@@ -368,30 +362,9 @@ export function useWorkspace() {
         }
       }
 
-      if (ev.event === "message.delta" && ev.delta && fallbackActive) {
-        const outputPath = extractOutputPath(ev.delta);
-        if (outputPath) setOutputDir(outputPath);
-
-        const textPaths = extractPathsFromText(ev.delta);
-        let hasNew = false;
-        for (const p of textPaths) {
-          if (!detectedPathsRef.current.has(p)) {
-            detectedPathsRef.current.add(p);
-            hasNew = true;
-            const dir = p.replace(/\/[^/]+$/, "");
-            if (dir && !sourceDirRef.current) {
-              setSourceDir(dir);
-            }
-          }
-        }
-        if (hasNew && outputDirRef.current) {
-          refreshOutput();
-        }
-      }
-
       if (ev.event === "tool.completed") {
         // Pair with the matching tool.started entry (LIFO by tool name, mirrors
-        // useConversation's toolCall pairing at line 524). On success, commit
+        // how a turn pairs its steps). On success, commit
         // the buffered candidate; on error, drop it so the agent's retry path
         // can flow through cleanly. The `!ref.current` checks preserve the
         // original first-write-wins semantic against artifacts-derived paths.
@@ -402,7 +375,7 @@ export function useWorkspace() {
           stack.splice(idx, 1);
           if (!ev.error) {
             if (entry.outputCandidate && !outputDirRef.current) {
-              setOutputDir(entry.outputCandidate);
+              setOutputDir(entry.outputCandidate, { guessed: true });
             }
             if (entry.sourceCandidate && !sourceDirRef.current) {
               setSourceDir(entry.sourceCandidate);
@@ -413,33 +386,36 @@ export function useWorkspace() {
         // Artifacts is the authoritative source. Refresh it first
         // (throttled), then refresh the file trees we already know about.
         if (sessionId) refreshFromArtifacts(sessionId);
-        // A tool just finished — its handler may have just created the output
-        // directory or written new files into it. Re-fetch both trees so the
-        // workspace panel reflects what's actually on disk.
+        // A tool just finished — its handler may have created the output
+        // directory or written into it. The source side is read-only, so only
+        // the output tree needs a refresh.
         if (outputDirRef.current) refreshOutput();
-        if (sourceDirRef.current) refreshSource();
       }
 
       if (ev.event === "run.completed") {
         if (sessionId) refreshFromArtifacts(sessionId);
-        if (ev.output && fallbackActive) {
-          const outputPath = extractOutputPath(ev.output);
-          if (outputPath) setOutputDir(outputPath);
-
-          const textPaths = extractPathsFromText(ev.output);
-          for (const p of textPaths) {
-            detectedPathsRef.current.add(p);
-            const dir = p.replace(/\/[^/]+$/, "");
-            if (dir && !outputDirRef.current) {
-              setOutputDir(dir);
-            }
-          }
-        }
         refreshOutput();
       }
     },
-    [setSourceDir, setOutputDir, refreshOutput, refreshSource, refreshFromArtifacts],
+    [setSourceDir, setOutputDir, refreshOutput, refreshFromArtifacts],
   );
 
-  return { ...state, setSourceDir, setOutputDir, reset, handleRunEvent, loadDeeper, loadFromArtifacts, refreshFromArtifacts, refreshSource, refreshOutput, deleteFile };
+  // The panel appears once there is something to show. Between two sessions it
+  // holds until the new one has answered, so the layout doesn't jump twice.
+  const hasContent = state.sourceFiles.length > 0 || state.outputFiles.length > 0 || !!state.artifacts;
+  const [panelVisible, setPanelVisible] = useState(() => {
+    try { return sessionStorage.getItem(PANEL_VISIBLE_KEY) === "1"; } catch { return false; }
+  });
+  if (hasContent && !panelVisible) setPanelVisible(true);
+  else if (!hasContent && panelVisible && state.settled) setPanelVisible(false);
+  useEffect(() => {
+    try { sessionStorage.setItem(PANEL_VISIBLE_KEY, panelVisible ? "1" : "0"); } catch { /* private mode */ }
+  }, [panelVisible]);
+
+  // Stable identity between state changes so the memoized panel only
+  // re-renders when the workspace itself changes.
+  return useMemo(
+    () => ({ ...state, panelVisible, setSourceDir, setOutputDir, reset, bindSession, handleRunEvent, loadDeeper, loadFromArtifacts, refreshFromArtifacts, refreshSource, refreshOutput, deleteFile }),
+    [state, panelVisible, setSourceDir, setOutputDir, reset, bindSession, handleRunEvent, loadDeeper, loadFromArtifacts, refreshFromArtifacts, refreshSource, refreshOutput, deleteFile],
+  );
 }

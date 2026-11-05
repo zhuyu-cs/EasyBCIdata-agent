@@ -3,8 +3,6 @@ import { create } from "zustand";
 interface SessionStore {
   activeSessionId: string | null;
   setActiveSessionId: (id: string | null) => void;
-  refreshTick: number;
-  triggerRefresh: () => void;
   pinnedIds: string[];
   togglePin: (id: string) => void;
 }
@@ -52,8 +50,6 @@ export const useSessionStore = create<SessionStore>((set) => ({
     syncHashToUrl(id);
     set({ activeSessionId: id });
   },
-  refreshTick: 0,
-  triggerRefresh: () => set((s) => ({ refreshTick: s.refreshTick + 1 })),
   pinnedIds: loadPinned(),
   togglePin: (id) =>
     set((s) => {

@@ -1,18 +1,32 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, memo } from "react";
 import { SlashMenu } from "./SlashMenu";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { BCI_PROMPT_TEMPLATES } from "@/lib/prompts";
+import { readDraft, saveDraft } from "@/lib/drafts";
+import { t } from "@/lib/i18n";
 
 interface Props {
+  /** Whose unsent text this is; switching it swaps the text in the box. */
+  draftKey: string;
   onSend: (text: string) => void;
   disabled?: boolean;
   placeholder?: string;
   isStreaming?: boolean;
+  isStopping?: boolean;
   onInterrupt?: () => void;
 }
 
-export function ChatInput({ onSend, disabled, placeholder, isStreaming, onInterrupt }: Props) {
-  const [input, setInput] = useState("");
+// Second Escape within this window stops the run.
+const STOP_CONFIRM_MS = 2000;
+
+export const ChatInput = memo(function ChatInput({ draftKey, onSend, disabled, placeholder, isStreaming, isStopping, onInterrupt }: Props) {
+  const [input, setInput] = useState(() => readDraft(draftKey));
+  const [shownKey, setShownKey] = useState(draftKey);
+  if (draftKey !== shownKey) {
+    setShownKey(draftKey);
+    setInput(readDraft(draftKey));
+  }
+  const [stopArmed, setStopArmed] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showSlash, setShowSlash] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
@@ -22,6 +36,8 @@ export function ChatInput({ onSend, disabled, placeholder, isStreaming, onInterr
   const dragCountRef = useRef(0);
   const history = useInputHistory();
 
+  useEffect(() => saveDraft(shownKey, input), [shownKey, input]);
+
   useEffect(() => {
     const ta = textareaRef.current;
     if (ta) {
@@ -29,6 +45,12 @@ export function ChatInput({ onSend, disabled, placeholder, isStreaming, onInterr
       ta.style.height = `${Math.min(ta.scrollHeight, 150)}px`;
     }
   }, [input]);
+
+  useEffect(() => {
+    if (!stopArmed) return;
+    const t = setTimeout(() => setStopArmed(false), STOP_CONFIRM_MS);
+    return () => clearTimeout(t);
+  }, [stopArmed]);
 
   // Close the template popover on outside click.
   useEffect(() => {
@@ -78,8 +100,8 @@ export function ChatInput({ onSend, disabled, placeholder, isStreaming, onInterr
   const insertFilePaths = useCallback((paths: string[]) => {
     if (paths.length === 0) return;
     const pathText = paths.length === 1
-      ? `Please process this file: ${paths[0]}`
-      : `Please process these files:\n${paths.map((p) => `- ${p}`).join("\n")}`;
+      ? t("Please process this file: {p}", { p: paths[0] })
+      : t("Please process these files:\n{p}", { p: paths.map((p) => `- ${p}`).join("\n") });
     setInput((prev) => (prev ? `${prev}\n${pathText}` : pathText));
     history.resetCursor();
     textareaRef.current?.focus();
@@ -137,11 +159,19 @@ export function ChatInput({ onSend, disabled, placeholder, isStreaming, onInterr
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (showSlash) return; // SlashMenu owns arrow/enter while open
     if (e.key === "Enter" && !e.shiftKey) {
+      // While a run streams this queues the message — it is sent when the
+      // run ends. Stopping is always an explicit action.
       e.preventDefault();
-      if (isStreaming) {
+      handleSubmit();
+      return;
+    }
+    if (e.key === "Escape" && isStreaming && !isStopping) {
+      e.preventDefault();
+      if (stopArmed) {
+        setStopArmed(false);
         onInterrupt?.();
       } else {
-        handleSubmit();
+        setStopArmed(true);
       }
       return;
     }
@@ -162,16 +192,17 @@ export function ChatInput({ onSend, disabled, placeholder, isStreaming, onInterr
 
   return (
     <div
-      className="shrink-0 px-5 pt-3 pb-6 border-t border-[var(--border-primary)]"
+      className="shrink-0 px-5 pt-3 pb-4 border-t border-[var(--border-primary)]"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
-      <div className={`relative flex items-end gap-1.5 rounded-lg border px-2 py-2 transition-all duration-200 ${
+      <div className="mx-auto max-w-[880px]">
+      <div className={`relative flex items-end gap-1.5 rounded-lg border px-2 py-2 transition-colors duration-100 ${
         isDragOver
-          ? "border-[var(--accent-green)] bg-[var(--bg-success-subtle)] shadow-[0_0_0_2px_rgba(45,138,78,0.15)]"
-          : "border-[var(--border-secondary)] bg-[var(--bg-secondary)] focus-within:border-[var(--text-primary)] focus-within:shadow-[0_0_0_2px_rgba(55,53,47,0.08)]"
+          ? "border-[var(--accent-green)] bg-[var(--bg-success-subtle)]"
+          : "border-[var(--border-secondary)] bg-[var(--bg-input)] focus-within:border-[var(--text-muted)]"
       }`}>
         <SlashMenu
           query={input}
@@ -181,7 +212,7 @@ export function ChatInput({ onSend, disabled, placeholder, isStreaming, onInterr
         />
         {isDragOver && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <span className="text-[13px] font-medium text-[var(--accent-green)]">Drop files to add path</span>
+            <span className="text-[13px] font-medium text-[var(--accent-green)]">{t("Drop files to add path")}</span>
           </div>
         )}
 
@@ -198,7 +229,7 @@ export function ChatInput({ onSend, disabled, placeholder, isStreaming, onInterr
           disabled={disabled}
           className="shrink-0 w-7 h-7 flex items-center justify-center rounded-md hover:bg-[var(--bg-hover)] transition-colors disabled:opacity-40"
           style={{ color: "var(--text-muted)" }}
-          title="Attach file path"
+          title={t("Attach file path")}
         >
           <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
             <path d="M11 5.5L6.2 10.3a1.8 1.8 0 01-2.5-2.5L8.8 2.7a1.2 1.2 0 011.7 1.7L5.4 9.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
@@ -211,7 +242,7 @@ export function ChatInput({ onSend, disabled, placeholder, isStreaming, onInterr
             disabled={disabled}
             className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors disabled:opacity-40 ${showTemplates ? "bg-[var(--bg-active)]" : "hover:bg-[var(--bg-hover)]"}`}
             style={{ color: showTemplates ? "var(--text-primary)" : "var(--text-muted)" }}
-            title="Insert task template"
+            title={t("Insert task template")}
           >
             <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
               <path d="M7.5 1.5l1.6 3.4 3.7.4-2.8 2.5.8 3.6-3.3-1.9-3.3 1.9.8-3.6L2 5.7l3.7-.4z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
@@ -219,16 +250,16 @@ export function ChatInput({ onSend, disabled, placeholder, isStreaming, onInterr
           </button>
           {showTemplates && (
             <div className="absolute bottom-full left-0 mb-2 w-[280px] rounded-lg border py-1 z-30 animate-fade-in" style={{ background: "var(--bg-secondary)", borderColor: "var(--border-primary)", boxShadow: "var(--shadow-lg)" }}>
-              <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>
-                BCI task templates
+              <div className="px-3 py-1.5 text-[11px] uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>
+                {t("BCI task templates")}
               </div>
-              {BCI_PROMPT_TEMPLATES.map((t) => (
+              {BCI_PROMPT_TEMPLATES.map((tpl) => (
                 <button
-                  key={t.id}
-                  onClick={() => insertTemplate(t.prompt)}
+                  key={tpl.id}
+                  onClick={() => insertTemplate(t(tpl.prompt))}
                   className="w-full text-left px-3 py-1.5 hover:bg-[var(--bg-tertiary)] transition-colors"
                 >
-                  <span className="text-[12px]" style={{ color: "var(--text-primary)" }}>{t.label}</span>
+                  <span className="text-[12px]" style={{ color: "var(--text-primary)" }}>{t(tpl.label)}</span>
                 </button>
               ))}
             </div>
@@ -239,42 +270,44 @@ export function ChatInput({ onSend, disabled, placeholder, isStreaming, onInterr
           ref={textareaRef}
           value={input}
           onChange={(e) => handleInputChange(e.target.value)}
-          placeholder={placeholder ?? "Message EasyBCI Agent..."}
+          placeholder={placeholder ?? t("Message EasyBCI Agent...")}
           rows={1}
           disabled={disabled}
           data-chat-input
           className="flex-1 resize-none text-[13.5px] text-[var(--text-primary)] placeholder-[var(--text-faint)] bg-transparent outline-none leading-relaxed disabled:opacity-50 self-center px-1"
           onKeyDown={handleKeyDown}
         />
-        {isStreaming ? (
+        {isStreaming && (
           <button
             onClick={onInterrupt}
-            className="shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-white active:scale-90 transition-all duration-150"
+            disabled={isStopping}
+            className="shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-white active:scale-90 transition-all duration-150 disabled:opacity-50"
             style={{
-              background: "var(--composer-stop-bg, #8a4a3a)",
+              background: "var(--composer-stop-bg)",
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = "var(--composer-stop-bg-hover, #6e3a2c)")}
-            onMouseLeave={(e) => (e.currentTarget.style.background = "var(--composer-stop-bg, #8a4a3a)")}
-            title="Stop (Enter)"
-            aria-label="Stop generation"
+            onMouseEnter={(e) => (e.currentTarget.style.background = "var(--composer-stop-bg-hover)")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "var(--composer-stop-bg)")}
+            title={isStopping ? t("Stopping…") : t("Stop (Esc twice)")}
+            aria-label={t("Stop generation")}
           >
             <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
               <rect width="10" height="10" rx="1" />
             </svg>
           </button>
-        ) : (
+        )}
+        {(!isStreaming || input.trim()) && (
           <button
             onClick={handleSubmit}
             className="shrink-0 w-7 h-7 flex items-center justify-center rounded-md active:scale-90 transition-all duration-150 disabled:opacity-30 disabled:active:scale-100"
             style={{
-              background: "var(--composer-btn-bg, #1f1f1f)",
-              color: "var(--composer-btn-fg, #ffffff)",
+              background: "var(--composer-btn-bg)",
+              color: "var(--composer-btn-fg)",
             }}
-            onMouseEnter={(e) => { if (!e.currentTarget.disabled) e.currentTarget.style.background = "var(--composer-btn-bg-hover, #000000)"; }}
-            onMouseLeave={(e) => (e.currentTarget.style.background = "var(--composer-btn-bg, #1f1f1f)")}
+            onMouseEnter={(e) => { if (!e.currentTarget.disabled) e.currentTarget.style.background = "var(--composer-btn-bg-hover)"; }}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "var(--composer-btn-bg)")}
             disabled={!input.trim() || disabled}
-            title="Send (Enter)"
-            aria-label="Send message"
+            title={isStreaming ? t("Queue — sent when the current run ends (Enter)") : t("Send (Enter)")}
+            aria-label={isStreaming ? t("Queue message") : t("Send message")}
           >
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
               <path d="M7 12V2M7 2L3 6M7 2l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -283,15 +316,20 @@ export function ChatInput({ onSend, disabled, placeholder, isStreaming, onInterr
         )}
       </div>
       <div className="flex items-center justify-between mt-1.5 px-1">
-        <span className="text-[10px] text-[var(--text-faint)]">
-          Shift+Enter for new line · ↑ for history
+        <span className={`text-[11px] ${stopArmed ? "" : "max-md:invisible"}`} style={{ color: stopArmed ? "var(--text-warning)" : "var(--text-faint)" }}>
+          {stopArmed
+            ? t("Press Esc again to stop the run")
+            : isStreaming
+              ? t("Enter queues a follow-up · Esc twice to stop")
+              : t("Shift+Enter for new line · ↑ for history")}
         </span>
         {input.length > 0 && (
-          <span className="text-[10px] text-[var(--text-faint)]">
-            {input.length} chars
+          <span className="text-[11px] text-[var(--text-faint)]">
+            {t("{n} chars", { n: input.length })}
           </span>
         )}
       </div>
+      </div>
     </div>
   );
-}
+});

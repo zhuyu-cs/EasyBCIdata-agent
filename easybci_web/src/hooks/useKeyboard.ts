@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 
 const isMac = typeof navigator !== "undefined" &&
@@ -18,9 +18,6 @@ function isTypingTarget(e: KeyboardEvent): boolean {
 }
 
 export interface KeyboardActions {
-  onNewSession?: () => void;
-  onFocusSearch?: () => void;
-  onCloseOverlay?: () => void;
   onCommandPalette?: () => void;
   onExport?: () => void;
   onInterrupt?: () => void;
@@ -31,19 +28,35 @@ export interface KeyboardActions {
 
 export function useKeyboard(actions: KeyboardActions) {
   const setActiveSessionId = useSessionStore((s) => s.setActiveSessionId);
+  // Read the latest callbacks through a ref so the document listener is
+  // attached once instead of on every render of the caller. Escape is not
+  // handled here — overlays register themselves via useEscapeLayer.
+  const actionsRef = useRef(actions);
+  useEffect(() => {
+    actionsRef.current = actions;
+  });
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        actions.onCloseOverlay?.();
-        return;
-      }
-
+      const actions = actionsRef.current;
       // "?" toggles the shortcuts overlay, but only outside text inputs and
       // without a modifier (so it doesn't clash with browser shortcuts).
       if (e.key === "?" && !isModKey(e) && !isTypingTarget(e)) {
         e.preventDefault();
         actions.onShowShortcuts?.();
+        return;
+      }
+
+      // "/" jumps to session search, under the same conditions.
+      if (e.key === "/" && !isModKey(e) && !e.altKey && !isTypingTarget(e)) {
+        e.preventDefault();
+        const searchInput = document.querySelector<HTMLInputElement>("[data-search-input]");
+        if (searchInput) {
+          searchInput.focus();
+        } else {
+          // Search bar is collapsed — ask SessionPanel to reveal + focus it.
+          window.dispatchEvent(new Event("easybci:focus-search"));
+        }
         return;
       }
 
@@ -60,7 +73,6 @@ export function useKeyboard(actions: KeyboardActions) {
       if (key === "n") {
         e.preventDefault();
         setActiveSessionId(null);
-        actions.onNewSession?.();
         // Shift+N additionally drops focus into the composer.
         if (e.shiftKey) {
           requestAnimationFrame(() => {
@@ -93,21 +105,9 @@ export function useKeyboard(actions: KeyboardActions) {
         actions.onNextSession?.();
         return;
       }
-
-      if (e.key === "/") {
-        e.preventDefault();
-        const searchInput = document.querySelector<HTMLInputElement>("[data-search-input]");
-        if (searchInput) {
-          searchInput.focus();
-        } else {
-          // Search bar is collapsed — ask SessionPanel to reveal + focus it.
-          window.dispatchEvent(new Event("easybci:focus-search"));
-        }
-        actions.onFocusSearch?.();
-      }
     };
 
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [actions, setActiveSessionId]);
+  }, [setActiveSessionId]);
 }

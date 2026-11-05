@@ -21,7 +21,10 @@
 
 /* ---- Light theme (default) ---- */
 :root {
-  --radius: 0.5rem;
+  /* Motion: everything moves on this one scale. */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --bg-primary: #f7f7f5;
   --bg-secondary: #ffffff;
   --bg-tertiary: #f1f1ef;
@@ -33,9 +36,9 @@
   --bg-agent-bubble: #f7f7f5;
   --bg-input: #f7f6f3;
   --text-primary: #37352f;
-  --text-secondary: #5f5e5b;
-  --text-muted: #9b9a97;
-  --text-faint: #c4c3c0;
+  --text-secondary: #55544f;
+  --text-muted: #6e6d69;
+  --text-faint: #807f7b;
   --border-primary: #e8e5e0;
   --border-secondary: #e0ddd8;
   --border-code: #e0ddd8;
@@ -43,6 +46,16 @@
   --accent-blue: #1a73e8;
   --accent-red: #d1242f;
   --accent-yellow: #854d0e;
+  --accent-purple: #7c3aed;
+  /* Approval buttons: mid-tones that carry white text in either theme. */
+  --btn-allow: #2d8a4e;
+  --btn-allow-hover: #256b3e;
+  --btn-session: #1a73e8;
+  --btn-session-hover: #155bb5;
+  --btn-always: #5f5e5b;
+  --btn-always-hover: #4a4946;
+  --btn-deny: #d1242f;
+  --btn-deny-hover: #b91c1c;
   /* Composer Send/Stop button — same color both states so the chrome stays
      calm; only the icon shape conveys send vs. stop. Light mode = near-black. */
   --composer-btn-bg: #1f1f1f;
@@ -53,14 +66,12 @@
      so the composer doesn't visually jump on streaming start. */
   --composer-stop-bg: #8a4a3a;
   --composer-stop-bg-hover: #6e3a2c;
-  --overlay-bg: rgba(0, 0, 0, 0.4);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
   --scrollbar-thumb: #d4d4d0;
   --scrollbar-hover: #a8a8a4;
   --resize-handle: rgba(55, 53, 47, 0.08);
-  --gradient-shimmer: linear-gradient(90deg, transparent, rgba(55, 53, 47, 0.06), transparent);
   --bg-success-subtle: #f0fdf4;
   --bg-warning-subtle: #fefce8;
   --bg-error-subtle: #fef2f2;
@@ -71,20 +82,16 @@
   --text-error: #dc2626;
   --text-warning: #854d0e;
   --text-success: #166534;
-  --ring-focus: rgba(55, 53, 47, 0.08);
   --bg-search-highlight: #fef9c3;
   --bg-delete-hover: #fef2f2;
   --text-delete: #d1242f;
-  --text-delete-hover: #b91c1c;
-  --bg-button-primary: #37352f;
-  --bg-button-primary-hover: #2f2e2b;
   --bg-button-danger: #d1242f;
   --bg-button-danger-hover: #b91c1c;
-  --bg-drop-active: #f0fdf4;
-  --border-drop-active: #2d8a4e;
 }
 
-/* ---- Dark theme ---- */
+/* ---- Dark theme ----
+   themeStore always sets data-theme to the resolved appearance, including in
+   "system" mode, so this is the only dark palette. */
 [data-theme="dark"] {
   --bg-primary: #191919;
   --bg-secondary: #232323;
@@ -97,9 +104,9 @@
   --bg-agent-bubble: #232323;
   --bg-input: #2a2a2a;
   --text-primary: #e8e6e3;
-  --text-secondary: #a8a6a2;
-  --text-muted: #777774;
-  --text-faint: #555553;
+  --text-secondary: #b4b2ae;
+  --text-muted: #9b9a96;
+  --text-faint: #807f7b;
   --border-primary: #333333;
   --border-secondary: #3d3d3d;
   --border-code: #3d3d3d;
@@ -107,6 +114,7 @@
   --accent-blue: #60a5fa;
   --accent-red: #f87171;
   --accent-yellow: #fbbf24;
+  --accent-purple: #a78bfa;
   /* Dark-mode composer button — soft white. The black-on-light → white-on-dark
      flip is the visual rhyme that makes the composer feel intentional. */
   --composer-btn-bg: #ededed;
@@ -116,14 +124,12 @@
      glaring. */
   --composer-stop-bg: #c97968;
   --composer-stop-bg-hover: #d68a78;
-  --overlay-bg: rgba(0, 0, 0, 0.6);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
   --scrollbar-thumb: #444;
   --scrollbar-hover: #666;
   --resize-handle: rgba(255, 255, 255, 0.06);
-    --gradient-shimmer: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.04), transparent);
   --bg-success-subtle: #052e16;
   --bg-warning-subtle: #422006;
   --bg-error-subtle: #450a0a;
@@ -134,82 +140,15 @@
   --text-error: #f87171;
   --text-warning: #fbbf24;
   --text-success: #4ade80;
-  --ring-focus: rgba(255, 255, 255, 0.06);
   --bg-search-highlight: #854d0e;
   --bg-delete-hover: #450a0a;
   --text-delete: #f87171;
-  --text-delete-hover: #fca5a5;
-  --bg-button-primary: #e8e6e3;
-  --bg-button-primary-hover: #d4d2cf;
   --bg-button-danger: #f87171;
   --bg-button-danger-hover: #fca5a5;
-  --bg-drop-active: #052e16;
-  --border-drop-active: #4ade80;
-}
-
-/* ---- Dark theme (system preference) ---- */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg-primary: #191919;
-    --bg-secondary: #232323;
-    --bg-tertiary: #2a2a2a;
-    --bg-hover: #333333;
-    --bg-active: #3d3d3d;
-    --bg-code: #1e1e1e;
-    --bg-code-header: #252525;
-    --bg-user-bubble: #2c2a26;
-    --bg-agent-bubble: #232323;
-    --bg-input: #2a2a2a;
-    --text-primary: #e8e6e3;
-    --text-secondary: #a8a6a2;
-    --text-muted: #777774;
-    --text-faint: #555553;
-    --border-primary: #333333;
-    --border-secondary: #3d3d3d;
-    --border-code: #3d3d3d;
-    --accent-green: #4ade80;
-    --accent-blue: #60a5fa;
-    --accent-red: #f87171;
-    --accent-yellow: #fbbf24;
-    --composer-btn-bg: #ededed;
-    --composer-btn-bg-hover: #ffffff;
-    --composer-btn-fg: #1a1a1a;
-    --composer-stop-bg: #c97968;
-    --composer-stop-bg-hover: #d68a78;
-    --overlay-bg: rgba(0, 0, 0, 0.6);
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
-    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
-    --scrollbar-thumb: #444;
-    --scrollbar-hover: #666;
-    --resize-handle: rgba(255, 255, 255, 0.06);
-    --gradient-shimmer: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.04), transparent);
-    --bg-success-subtle: #052e16;
-    --bg-warning-subtle: #422006;
-    --bg-error-subtle: #450a0a;
-    --border-success: #166534;
-    --border-warning: #92400e;
-    --border-error: #991b1b;
-    --text-on-accent: #ffffff;
-    --text-error: #f87171;
-    --text-warning: #fbbf24;
-    --text-success: #4ade80;
-    --ring-focus: rgba(255, 255, 255, 0.06);
-    --bg-search-highlight: #854d0e;
-    --bg-delete-hover: #450a0a;
-    --text-delete: #f87171;
-    --text-delete-hover: #fca5a5;
-    --bg-button-primary: #e8e6e3;
-    --bg-button-primary-hover: #d4d2cf;
-    --bg-button-danger: #f87171;
-    --bg-button-danger-hover: #fca5a5;
-    --bg-drop-active: #052e16;
-    --border-drop-active: #4ade80;
-  }
 }
 
 html {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   font-size: 15px;
   line-height: 1.5;
   height: 100dvh;
@@ -254,6 +193,14 @@ code, kbd, pre, samp, .font-mono {
   overflow: hidden;
 }
 
+/* In the base layer so a component's own focus style still wins. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--accent-blue);
+    outline-offset: 1px;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Semantic type scale                                                  */
 /* Centralizes font-size/line-height semantics so components reference   */
@@ -276,7 +223,7 @@ code, kbd, pre, samp, .font-mono {
     letter-spacing: 0.01em;
   }
   .text-micro {
-    font-size: 10px;
+    font-size: 11px;
     line-height: 1.3;
   }
   .text-heading-sm {
@@ -294,6 +241,12 @@ code, kbd, pre, samp, .font-mono {
   display: grid;
   grid-template-rows: 1fr;
   grid-template-areas: "session conversation workspace";
+  transition: grid-template-columns var(--motion-base) var(--ease-out);
+}
+
+/* A drag follows the pointer directly. */
+.panel-resizing .workspace-grid {
+  transition: none;
 }
 
 .session-panel {
@@ -335,55 +288,57 @@ code, kbd, pre, samp, .font-mono {
 /* Animations                                                           */
 /* ------------------------------------------------------------------ */
 
+/* No `forwards` fill below: a transform kept after the animation would make the
+   element the containing block of its position:fixed descendants. */
 @keyframes fade-in {
   from {
     opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
+    transform: translateY(4px);
   }
 }
 
 .animate-fade-in {
-  animation: fade-in 0.3s ease-out forwards;
+  animation: fade-in var(--motion-base) var(--ease-out);
 }
 
-/* Opacity-only fade for positioned/portaled elements (context menu) —
-   MUST NOT use transform: a transform on a position:fixed element makes it
-   its own containing block and breaks viewport-relative left/top. */
+/* Opacity-only fade for positioned/portaled elements (context menu). */
 @keyframes fade-in-opacity {
   from { opacity: 0; }
-  to { opacity: 1; }
 }
 
 .animate-fade-in-opacity {
-  animation: fade-in-opacity 0.15s ease-out forwards;
+  animation: fade-in-opacity var(--motion-fast) ease-out;
 }
 
-@keyframes backdrop-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+.animate-backdrop-in {
+  animation: fade-in-opacity var(--motion-base) ease-out;
 }
 
 @keyframes dialog-in {
   from {
     opacity: 0;
-    transform: scale(0.95) translateY(8px);
+    transform: scale(0.98) translateY(4px);
   }
-  to {
-    opacity: 1;
-    transform: scale(1) translateY(0);
-  }
-}
-
-.animate-backdrop-in {
-  animation: backdrop-in 0.2s ease-out forwards;
 }
 
 .animate-dialog-in {
-  animation: dialog-in 0.2s ease-out forwards;
+  animation: dialog-in var(--motion-base) var(--ease-out);
+}
+
+@keyframes slide-in-left {
+  from { transform: translateX(-16px); opacity: 0; }
+}
+
+@keyframes slide-in-right {
+  from { transform: translateX(16px); opacity: 0; }
+}
+
+.animate-slide-in-left {
+  animation: slide-in-left var(--motion-base) var(--ease-out);
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right var(--motion-base) var(--ease-out);
 }
 
 @keyframes shimmer {
@@ -406,33 +361,11 @@ code, kbd, pre, samp, .font-mono {
 .typing-dot:nth-child(2) { animation-delay: 0.2s; }
 .typing-dot:nth-child(3) { animation-delay: 0.4s; }
 
-@keyframes approval-slide-up {
-  from {
-    opacity: 0;
-    transform: translateY(20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
 .animate-approval-slide-up {
-  animation: approval-slide-up 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: dialog-in var(--motion-base) var(--ease-out);
 }
 
-/* Pulsing accent border for the agent bubble while it is streaming */
-@keyframes accent-pulse {
-  0%, 100% { border-left-color: var(--accent-green); }
-  50% { border-left-color: color-mix(in srgb, var(--accent-green) 55%, transparent); }
-}
-
-.animate-accent-pulse {
-  animation: accent-pulse 2s ease-in-out infinite;
-}
-
-/* Subtle breathing dot for the reasoning phase (thinking, no content yet) — a
-   gentler signal than the bubble's accent-pulse (U12). */
+/* Breathing dot for the reasoning phase (thinking, no content yet). */
 @keyframes reasoning-dot {
   0%, 100% { opacity: 0.35; }
   50% { opacity: 1; }
@@ -441,6 +374,35 @@ code, kbd, pre, samp, .font-mono {
 .reasoning-dot {
   animation: reasoning-dot 1.4s ease-in-out infinite;
 }
+
+/* Placeholder bars while a session's transcript loads. */
+.skeleton {
+  background: var(--bg-tertiary);
+  animation: reasoning-dot 1.4s ease-in-out infinite;
+}
+
+/* Height animation for content of unknown height (see Collapse.tsx). */
+.reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+}
+.reveal-open {
+  grid-template-rows: 1fr;
+}
+.reveal-animate {
+  transition: grid-template-rows var(--motion-base) var(--ease-out);
+}
+@starting-style {
+  .reveal-animate.reveal-open {
+    grid-template-rows: 0fr;
+  }
+}
+
+/* Near-zero rather than none, so transitionend and animationend still fire. */
 @media (prefers-reduced-motion: reduce) {
-  .reasoning-dot { animation: none; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

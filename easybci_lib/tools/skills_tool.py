@@ -1526,9 +1526,12 @@ def skill_view(
         # L3 atomic operators are 200-400 lines; the LLM only needs
         # parameter table + modalities + step_string for codegen. Return
         # a compact signature by default, saving ~4K tok per operator.
+        # Decision skills (metadata.kind: decision) have no parameter table or
+        # step_string — return them in full, without runnability fields.
         _is_l3_operator = (
             frontmatter.get("layer") == "L3"
             and frontmatter.get("group") not in (None, "misc", "index")
+            and (frontmatter.get("metadata") or {}).get("kind") != "decision"
         )
         if _is_l3_operator and not file_path:
             sig = _extract_operator_signature(rendered_content, frontmatter)

@@ -95,3 +95,39 @@ def reconcile_session_from_agent_log(db, session_id: str) -> int:
             logger.debug("reconcile append halted for %s at row +%d: %s", session_id, appended, e)
             break
     return appended
+
+
+def _call_ids(row: Dict[str, Any]) -> List[Any]:
+    calls = row.get("tool_calls")
+    return [c.get("id") for c in calls if isinstance(c, dict)] if isinstance(calls, list) else []
+
+
+def _same_row(stored: Dict[str, Any], msg: Dict[str, Any]) -> bool:
+    if stored.get("role") != msg.get("role"):
+        return False
+    if msg.get("role") == "tool":
+        return stored.get("tool_call_id") == msg.get("tool_call_id")
+    if _call_ids(stored) != _call_ids(msg):
+        return False
+    a, b = stored.get("content"), msg.get("content")
+    # Multimodal content is stored as a text summary, so it can't be compared.
+    return not (isinstance(b, str) and isinstance(a, str)) or a == b
+
+
+def stored_tail_overlap(stored: List[Dict[str, Any]], pending: List[Dict[str, Any]]) -> int:
+    """How many leading ``pending`` rows are already the tail of ``stored``.
+
+    The agent's JSON log runs ahead of its SQLite flush during a run, so a read
+    mid-run makes ``reconcile_session_from_agent_log`` append rows the agent is
+    still going to flush. The agent skips this overlap so they aren't stored
+    twice. Returns 0 when in doubt, which keeps the plain append behaviour.
+    """
+    if not isinstance(stored, list) or not isinstance(pending, list):
+        return 0
+    for k in range(min(len(stored), len(pending)), 0, -1):
+        if all(
+            isinstance(s, dict) and isinstance(m, dict) and _same_row(s, m)
+            for s, m in zip(stored[-k:], pending[:k])
+        ):
+            return k
+    return 0

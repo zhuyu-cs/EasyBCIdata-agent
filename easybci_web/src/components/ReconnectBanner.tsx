@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { StreamStatus } from "@/lib/runsClient";
+import { t } from "@/lib/i18n";
 
 interface Props {
   status: StreamStatus | null;
@@ -54,7 +55,7 @@ export function ReconnectBanner({ status, onRetry, onCopyOutput }: Props) {
           style={{ background: "var(--text-warning)" }}
         />
         <span className="font-medium">
-          Reconnecting… {status.max ? `(attempt ${status.attempt}/${status.max})` : `(attempt ${status.attempt})`}
+          {status.max ? t("Reconnecting ({a}/{b})", { a: status.attempt, b: status.max }) : t("Reconnecting ({a})", { a: status.attempt })}
         </span>
       </div>
     );
@@ -76,7 +77,7 @@ export function ReconnectBanner({ status, onRetry, onCopyOutput }: Props) {
             className="w-2 h-2 rounded-full shrink-0"
             style={{ background: "var(--text-error)" }}
           />
-          <span className="font-medium truncate">Connection lost</span>
+          <span className="font-medium truncate">{t("Connection lost")}</span>
           <span className="opacity-80 truncate">— {status.reason}</span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -86,7 +87,7 @@ export function ReconnectBanner({ status, onRetry, onCopyOutput }: Props) {
               className="underline hover:no-underline"
               style={{ color: "var(--text-error)" }}
             >
-              Copy output
+              {t("Copy output")}
             </button>
           )}
           {onRetry && (
@@ -95,7 +96,7 @@ export function ReconnectBanner({ status, onRetry, onCopyOutput }: Props) {
               className="px-2 py-0.5 rounded border font-medium hover:bg-[var(--bg-hover)]"
               style={{ borderColor: "var(--border-error)", color: "var(--text-error)" }}
             >
-              Retry
+              {t("Retry")}
             </button>
           )}
         </div>
@@ -108,16 +109,16 @@ export function ReconnectBanner({ status, onRetry, onCopyOutput }: Props) {
       <div
         className="flex items-center gap-2 px-4 py-1.5 border-b text-[11px] animate-fade-in"
         style={{
-          background: "var(--bg-success-subtle, rgba(34, 197, 94, 0.08))",
-          borderColor: "var(--border-success, rgba(34, 197, 94, 0.25))",
-          color: "var(--accent-green, #16a34a)",
+          background: "var(--bg-success-subtle)",
+          borderColor: "var(--border-success)",
+          color: "var(--accent-green)",
         }}
         role="status"
       >
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
           <path d="M2.5 6.5l2 2 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
-        <span className="font-medium">Reconnected</span>
+        <span className="font-medium">{t("Reconnected")}</span>
       </div>
     );
   }
@@ -131,17 +132,17 @@ export function ReconnectBanner({ status, onRetry, onCopyOutput }: Props) {
  */
 export function StreamHealthDot({ status }: { status: StreamStatus | null }) {
   if (!status) return null;
-  let color = "var(--accent-green, #16a34a)";
-  let title = "Connected";
+  let color = "var(--accent-green)";
+  let title = t("Connected");
   if (status.kind === "connecting") {
     color = "var(--text-muted)";
-    title = "Connecting…";
+    title = t("Connecting…");
   } else if (status.kind === "reconnecting") {
     color = "var(--text-warning)";
-    title = status.max ? `Reconnecting (${status.attempt}/${status.max})` : `Reconnecting (${status.attempt})`;
+    title = status.max ? t("Reconnecting ({a}/{b})", { a: status.attempt, b: status.max }) : t("Reconnecting ({a})", { a: status.attempt });
   } else if (status.kind === "failed") {
     color = "var(--text-error)";
-    title = `Failed: ${status.reason}`;
+    title = t("Failed: {r}", { r: status.reason });
   }
   return (
     <span

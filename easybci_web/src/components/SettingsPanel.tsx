@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import {
   api,
   type ModelInfoResponse,
@@ -10,6 +10,8 @@ import {
 } from "@/lib/api";
 import { useThemeStore } from "@/stores/themeStore";
 import { useToast } from "@/stores/toastStore";
+import { useDialog } from "@/hooks/useDialog";
+import { setLang, t, useLangStore, type Lang } from "@/lib/i18n";
 
 interface Props {
   open: boolean;
@@ -29,9 +31,9 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 function ThemeSegment() {
   const { theme, setTheme } = useThemeStore();
   const options: { value: Theme; label: string }[] = [
-    { value: "light", label: "Light" },
-    { value: "dark", label: "Dark" },
-    { value: "system", label: "System" },
+    { value: "light", label: t("Light") },
+    { value: "dark", label: t("Dark") },
+    { value: "system", label: t("System") },
   ];
   return (
     <div className="flex rounded-md p-0.5 gap-0.5" style={{ background: "var(--bg-tertiary)" }}>
@@ -93,10 +95,12 @@ function PermissionsSection({ config, onConfigChange }: PermissionsSectionProps)
   const [mode, setMode] = useState<string>(current);
   const [busy, setBusy] = useState(false);
 
-  // Sync when config arrives async after the panel mounts
-  useEffect(() => {
-    setMode(((config?.approvals as { mode?: string } | undefined)?.mode ?? "off").toLowerCase());
-  }, [config]);
+  // Follow the stored value when config (re)loads — adjusted during render.
+  const [prevCurrent, setPrevCurrent] = useState(current);
+  if (current !== prevCurrent) {
+    setPrevCurrent(current);
+    setMode(current);
+  }
 
   const handleChange = async (value: string) => {
     const prev = mode;
@@ -105,10 +109,10 @@ function PermissionsSection({ config, onConfigChange }: PermissionsSectionProps)
     try {
       await api.saveConfig({ approvals: { mode: value } });
       onConfigChange({ mode: value });
-      toast(`Approval mode set to ${value}`, "success");
+      toast(t("Approval mode set to {v}", { v: value }), "success");
     } catch (e) {
       setMode(prev);
-      toast(e instanceof Error ? e.message : "Failed to save approval mode", "error");
+      toast(e instanceof Error ? e.message : t("Failed to save approval mode"), "error");
     } finally {
       setBusy(false);
     }
@@ -118,7 +122,7 @@ function PermissionsSection({ config, onConfigChange }: PermissionsSectionProps)
 
   return (
     <section>
-      <SectionTitle>Permissions</SectionTitle>
+      <SectionTitle>{t("Permissions")}</SectionTitle>
       <div
         className="rounded-md border p-3 space-y-2.5"
         style={{ borderColor: "var(--border-primary)", background: "var(--bg-tertiary)" }}
@@ -126,12 +130,10 @@ function PermissionsSection({ config, onConfigChange }: PermissionsSectionProps)
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="text-[12px] font-medium" style={{ color: "var(--text-primary)" }}>
-              Command approval mode
+              {t("Command approval mode")}
             </div>
             <div className="text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
-              Off — auto-run every command (catastrophic deletes still blocked).
-              Manual — prompt before each potentially-dangerous command.
-              Smart — auxiliary LLM auto-approves low-risk ones.
+              {t("Off — auto-run every command (catastrophic deletes still blocked). Manual — prompt before each potentially-dangerous command. Smart — auxiliary LLM auto-approves low-risk ones.")}
             </div>
           </div>
           <select
@@ -157,8 +159,8 @@ function PermissionsSection({ config, onConfigChange }: PermissionsSectionProps)
         >
           <span className="w-2 h-2 rounded-full" style={{ background: isYolo ? "var(--accent-green)" : "var(--text-faint)" }} />
           {isYolo
-            ? "Run-anything mode — only rm -rf /, mkfs, dd to /dev/sd*, shutdown/reboot, fork bomb stay blocked."
-            : "You will be asked before any flagged command runs."}
+            ? t("Run-anything mode — only rm -rf /, mkfs, dd to /dev/sd*, shutdown/reboot, fork bomb stay blocked.")
+            : t("You will be asked before any flagged command runs.")}
         </div>
       </div>
     </section>
@@ -200,8 +202,11 @@ function WebSearchSection({
     }
   };
   useEffect(() => {
-    refreshStatus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let alive = true;
+    api.getWebSearchStatus()
+      .then((s) => { if (alive) setWsStatus(s); })
+      .catch(() => { if (alive) setWsStatus(null); });
+    return () => { alive = false; };
   }, []);
 
   const handleBackendChange = async (value: string) => {
@@ -213,23 +218,23 @@ function WebSearchSection({
       await api.saveConfig({ web: { backend: value, search_backend: value } });
       onConfigChange({ backend: value, search_backend: value });
 
-      const label = WEB_PROVIDERS.find((p) => p.backend === value)?.label ?? "Auto";
+      const label = t(WEB_PROVIDERS.find((p) => p.backend === value)?.label ?? t("Auto"));
 
       if ((value === "tavily" || value === "exa") && !keyIsSet) {
         // Paid backend selected but no key on disk — explicit notice so
         // the user doesn't think the toast = ready-to-use.
         toast(
-          `${label} selected — no API key configured. Enter the key below to activate.`,
+          t("{l} selected — no API key configured. Enter the key below to activate.", { l: label }),
           "info",
         );
       } else {
-        toast(`Web search backend set to ${label}`, "success");
+        toast(t("Web search backend set to {l}", { l: label }), "success");
       }
       // Always refresh status so the badge reflects the new picture.
       await refreshStatus();
     } catch (e) {
       setBackend(initialBackend);
-      toast(e instanceof Error ? e.message : "Failed to set backend", "error");
+      toast(e instanceof Error ? e.message : t("Failed to set backend"), "error");
     }
     setBusy(false);
   };
@@ -242,10 +247,10 @@ function WebSearchSection({
       onEnvChange(provider.envKey, { is_set: true, redacted_value: "••••••" });
       setKeyInput("");
       setRevealed(null);
-      toast(`${provider.label} key saved`, "success");
+      toast(t("{l} key saved", { l: t(provider.label) }), "success");
       await refreshStatus();
     } catch (e) {
-      toast(e instanceof Error ? e.message : "Failed to save key", "error");
+      toast(e instanceof Error ? e.message : t("Failed to save key"), "error");
     }
     setBusy(false);
   };
@@ -258,10 +263,10 @@ function WebSearchSection({
       onEnvChange(provider.envKey, { is_set: false, redacted_value: null });
       setKeyInput("");
       setRevealed(null);
-      toast(`${provider.label} key cleared`, "info");
+      toast(t("{l} key cleared", { l: t(provider.label) }), "info");
       await refreshStatus();
     } catch (e) {
-      toast(e instanceof Error ? e.message : "Failed to clear key", "error");
+      toast(e instanceof Error ? e.message : t("Failed to clear key"), "error");
     }
     setBusy(false);
   };
@@ -276,23 +281,23 @@ function WebSearchSection({
       const res = await api.revealEnvVar(provider.envKey);
       setRevealed(res.value);
     } catch (e) {
-      toast(e instanceof Error ? e.message : "Failed to reveal key", "error");
+      toast(e instanceof Error ? e.message : t("Failed to reveal key"), "error");
     }
   };
 
   return (
     <section>
       <div className="flex items-center justify-between mb-2">
-        <SectionTitle>Web Search</SectionTitle>
+        <SectionTitle>{t("Web Search")}</SectionTitle>
         <span
-          className="text-[10px] px-1.5 py-0.5 rounded-full"
+          className="text-[11px] px-1.5 py-0.5 rounded-full"
           style={
             webConfigured
               ? { background: "var(--bg-success-subtle)", color: "var(--text-success)" }
               : { background: "var(--bg-tertiary)", color: "var(--text-muted)" }
           }
         >
-          {webConfigured ? "configured" : "no key"}
+          {webConfigured ? t("configured") : t("no key")}
         </span>
       </div>
 
@@ -300,14 +305,14 @@ function WebSearchSection({
           actual must-call detection gate. */}
       {wsStatus && (
         <div className="text-[11px] flex items-center gap-2 mb-2" style={{ color: "var(--text-faint)" }}>
-          <span>Active:</span>
+          <span>{t("Active:")}</span>
           {wsStatus.active_search_strict ? (
             <span style={{ color: "var(--text-success)" }}>
               ✓ {wsStatus.active_search_strict}
             </span>
           ) : (
             <span style={{ color: "var(--text-warning)" }}>
-              ✗ none usable
+              {t("✗ none usable")}
             </span>
           )}
           {wsStatus.providers.some((p) => !p.is_available && p.diagnostic) && (
@@ -317,7 +322,7 @@ function WebSearchSection({
               className="underline text-[11px]"
               style={{ color: "var(--text-faint)" }}
             >
-              {showDiagnostics ? "(hide)" : "(why?)"}
+              {showDiagnostics ? t("(hide)") : t("(why?)")}
             </button>
           )}
         </div>
@@ -342,7 +347,7 @@ function WebSearchSection({
                   <div className="ml-3 mt-0.5" style={{ color: "var(--text-secondary)" }}>
                     {p.diagnostic.reason}
                     {p.diagnostic.fix_hint && (
-                      <div className="text-[10px] mt-0.5" style={{ color: "var(--text-faint)" }}>
+                      <div className="text-[11px] mt-0.5" style={{ color: "var(--text-faint)" }}>
                         Fix: {p.diagnostic.fix_hint}
                       </div>
                     )}
@@ -364,7 +369,7 @@ function WebSearchSection({
         >
           {WEB_PROVIDERS.map((p) => (
             <option key={p.backend || "auto"} value={p.backend}>
-              {p.label}
+              {t(p.label)}
             </option>
           ))}
         </select>
@@ -387,10 +392,10 @@ function WebSearchSection({
                 }}
                 placeholder={
                   keyIsSet
-                    ? (envInfo?.redacted_value ?? "key set — enter to replace")
+                    ? (envInfo?.redacted_value ?? t("key set — enter to replace"))
                     : provider.isPassword
-                      ? "Paste API key"
-                      : "Enter value"
+                      ? t("Paste API key")
+                      : t("Enter value")
                 }
                 disabled={busy}
                 className="w-full text-[13px] rounded-md border pl-3 pr-9 py-2 outline-none transition-colors disabled:opacity-60"
@@ -400,7 +405,7 @@ function WebSearchSection({
                 <button
                   type="button"
                   onClick={handleReveal}
-                  title={revealed !== null ? "Hide" : "Reveal"}
+                  title={revealed !== null ? t("Hide") : t("Reveal")}
                   className="absolute right-2 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center rounded hover:bg-[var(--bg-hover)]"
                   style={{ color: "var(--text-muted)" }}
                 >
@@ -418,7 +423,7 @@ function WebSearchSection({
               className="shrink-0 text-[12px] px-3 rounded-md border transition-colors hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
               style={{ borderColor: "var(--border-secondary)", color: "var(--text-primary)" }}
             >
-              Save
+              {t("Save")}
             </button>
             {keyIsSet && (
               <button
@@ -428,7 +433,7 @@ function WebSearchSection({
                 className="shrink-0 text-[12px] px-3 rounded-md border transition-colors hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
                 style={{ borderColor: "var(--border-secondary)", color: "var(--text-muted)" }}
               >
-                Clear
+                {t("Clear")}
               </button>
             )}
           </div>
@@ -441,31 +446,30 @@ function WebSearchSection({
               }
               target="_blank"
               rel="noopener noreferrer"
-              className="text-[10px] hover:underline"
+              className="text-[11px] hover:underline"
               style={{ color: "var(--text-faint)" }}
             >
-              Get an API key →
+              {t("Get an API key →")}
             </a>
           )}
         </div>
       )}
 
       {provider.note && (
-        <p className="text-[10px] mt-1.5" style={{ color: "var(--text-faint)" }}>
+        <p className="text-[11px] mt-1.5" style={{ color: "var(--text-faint)" }}>
           {provider.note}
         </p>
       )}
       {backend === "" && (
-        <p className="text-[10px] mt-1.5" style={{ color: "var(--text-faint)" }}>
-          Auto-selects whichever provider has a key configured. Web search is fully
-          optional — the agent works normally without it.
+        <p className="text-[11px] mt-1.5" style={{ color: "var(--text-faint)" }}>
+          {t("Auto-selects whichever provider has a key configured. Web search is fully optional — the agent works normally without it.")}
         </p>
       )}
     </section>
   );
 }
 
-export function SettingsPanel({ open, onClose }: Props) {
+export const SettingsPanel = memo(function SettingsPanel({ open, onClose }: Props) {
   const { toast } = useToast();
   const [modelInfo, setModelInfo] = useState<ModelInfoResponse | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOptionsResponse | null>(null);
@@ -473,24 +477,15 @@ export function SettingsPanel({ open, onClose }: Props) {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [envVars, setEnvVars] = useState<Record<string, EnvVarInfo>>({});
-  // Tracks whether the current open-cycle's data has loaded. While open but not
-  // yet loaded the panel shows the spinner — derived during render instead of
-  // toggling a separate `loading` flag synchronously inside the fetch effect.
-  const [loadedOpen, setLoadedOpen] = useState(false);
-  const [prevOpen, setPrevOpen] = useState(open);
+  // The spinner shows only until the first load. Later opens render the data
+  // already on hand and refresh it silently in the background; saves update
+  // the local copy directly.
+  const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [toolsetsExpanded, setToolsetsExpanded] = useState(false);
 
-  // Reset the loaded flag the moment the drawer transitions open→closed, during
-  // render (no effect needed) so the next open re-fetches with a fresh spinner.
-  if (open !== prevOpen) {
-    setPrevOpen(open);
-    if (!open) setLoadedOpen(false);
-  }
+  const loading = open && !loaded;
 
-  const loading = open && !loadedOpen;
-
-  // Lazy-load everything the first time the drawer opens.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -510,21 +505,23 @@ export function SettingsPanel({ open, onClose }: Props) {
       if (st.status === "fulfilled") setStatus(st.value);
       if (cfg.status === "fulfilled") setConfig(cfg.value);
       if (ev.status === "fulfilled") setEnvVars(ev.value);
-      setLoadedOpen(true);
+      setLoaded(true);
     });
     return () => {
       cancelled = true;
     };
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  const dialogRef = useDialog<HTMLElement>(onClose, open);
+  const lang = useLangStore((s) => s.lang);
+
+  // Takes effect at once; the shared config key also sets the agent's language.
+  const changeLanguage = (value: Lang) => {
+    setLang(value);
+    api.saveConfig({ display: { language: value } }).catch((e) => {
+      toast(e instanceof Error ? e.message : t("Failed to save language"), "error");
+    });
+  };
 
   const handleModelChange = async (value: string) => {
     const sep = value.indexOf("::");
@@ -535,9 +532,9 @@ export function SettingsPanel({ open, onClose }: Props) {
     try {
       await api.setModelAssignment({ scope: "main", provider, model });
       setModelInfo((prev) => (prev ? { ...prev, model, provider } : prev));
-      toast(`Model set to ${model}`, "success");
+      toast(t("Model set to {m}", { m: model }), "success");
     } catch (e) {
-      toast(e instanceof Error ? e.message : "Failed to set model", "error");
+      toast(e instanceof Error ? e.message : t("Failed to set model"), "error");
     }
     setSaving(false);
   };
@@ -560,13 +557,18 @@ export function SettingsPanel({ open, onClose }: Props) {
       <aside
         className={`fixed top-0 left-0 z-[56] h-full w-[360px] max-w-[92vw] flex flex-col transition-transform duration-250 ease-out ${open ? "translate-x-0" : "-translate-x-full"}`}
         style={{ background: "var(--bg-secondary)", boxShadow: "var(--shadow-lg)", borderRight: "1px solid var(--border-primary)" }}
+        ref={dialogRef}
+        tabIndex={-1}
+        inert={!open}
         role="dialog"
-        aria-label="Settings"
+        aria-modal={open}
+        aria-label={t("Settings")}
       >
         <div className="flex items-center justify-between px-5 py-3.5 border-b shrink-0" style={{ borderColor: "var(--border-primary)" }}>
-          <h2 className="text-heading-sm" style={{ color: "var(--text-primary)" }}>Settings</h2>
+          <h2 className="text-heading-sm" style={{ color: "var(--text-primary)" }}>{t("Settings")}</h2>
           <button
             onClick={onClose}
+            aria-label={t("Close")}
             className="w-6 h-6 flex items-center justify-center rounded hover:bg-[var(--bg-hover)] transition-colors"
             style={{ color: "var(--text-muted)" }}
           >
@@ -580,7 +582,7 @@ export function SettingsPanel({ open, onClose }: Props) {
           {loading && (
             <div className="flex items-center gap-2 text-[12px]" style={{ color: "var(--text-muted)" }}>
               <span className="w-3 h-3 border-2 border-[var(--text-muted)] border-t-transparent rounded-full animate-spin" />
-              Loading settings…
+              {t("Loading settings…")}
             </div>
           )}
 
@@ -588,7 +590,7 @@ export function SettingsPanel({ open, onClose }: Props) {
             <>
               {/* Model & Theme */}
               <section>
-                <SectionTitle>Model &amp; Theme</SectionTitle>
+                <SectionTitle>{t("Model & Theme")}</SectionTitle>
                 <div className="relative">
                   <select
                     value={currentValue}
@@ -616,37 +618,49 @@ export function SettingsPanel({ open, onClose }: Props) {
                 </div>
                 {modelInfo && (
                   <div className="flex items-center gap-2 mt-2 flex-wrap">
-                    <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
+                    <span className="text-[11px] px-1.5 py-0.5 rounded" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
                       {modelInfo.provider}
                     </span>
                     {modelInfo.capabilities?.context_window && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
+                      <span className="text-[11px] px-1.5 py-0.5 rounded" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
                         {Math.round(modelInfo.capabilities.context_window / 1000)}k ctx
                       </span>
                     )}
                     {modelInfo.capabilities?.supports_vision && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>vision</span>
+                      <span className="text-[11px] px-1.5 py-0.5 rounded" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>vision</span>
                     )}
                     {modelInfo.capabilities?.supports_reasoning && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>reasoning</span>
+                      <span className="text-[11px] px-1.5 py-0.5 rounded" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>reasoning</span>
                     )}
                   </div>
                 )}
                 <div className="mt-3">
                   <ThemeSegment />
                 </div>
+                <div className="mt-3 flex items-center justify-between">
+                  <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>{t("Language")}</span>
+                  <select
+                    value={lang}
+                    onChange={(e) => changeLanguage(e.target.value as Lang)}
+                    className="text-[12px] rounded-md border px-2 py-1 outline-none"
+                    style={{ background: "var(--bg-input)", borderColor: "var(--border-secondary)", color: "var(--text-primary)" }}
+                  >
+                    <option value="en">English</option>
+                    <option value="zh">简体中文</option>
+                  </select>
+                </div>
               </section>
 
               {/* Runtime: execution environment + collapsible toolsets */}
               <section>
-                <SectionTitle>Runtime</SectionTitle>
+                <SectionTitle>{t("Runtime")}</SectionTitle>
                 <div className="rounded-md border p-3 space-y-2" style={{ borderColor: "var(--border-primary)", background: "var(--bg-tertiary)" }}>
                   <div className="flex items-center justify-between">
-                    <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>Sandbox</span>
+                    <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>{t("Sandbox")}</span>
                     <span className="text-[12px] font-mono capitalize" style={{ color: "var(--text-primary)" }}>{terminalBackend}</span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>Code execution</span>
+                    <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>{t("Code execution")}</span>
                     <span className="text-[12px] font-mono" style={{ color: "var(--text-primary)" }}>{executionMode}</span>
                   </div>
                 </div>
@@ -665,38 +679,38 @@ export function SettingsPanel({ open, onClose }: Props) {
                     >
                       <path d="M4 2.5L7.5 5.5L4 8.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
                     </svg>
-                    Toolsets
+                    {t("Toolsets")}
                   </span>
-                  <span className="text-[10px] tabular-nums" style={{ color: "var(--text-faint)" }}>
-                    {toolsets.filter((t) => t.enabled).length}/{toolsets.length} on
+                  <span className="text-[11px] tabular-nums" style={{ color: "var(--text-faint)" }}>
+                    {toolsets.filter((ts) => ts.enabled).length}/{toolsets.length} {t("on")}
                   </span>
                 </button>
                 {toolsetsExpanded && (
                   <div className="space-y-1.5 mt-1.5 animate-fade-in">
                     {toolsets.length === 0 && (
-                      <p className="text-[12px]" style={{ color: "var(--text-muted)" }}>No toolsets reported.</p>
+                      <p className="text-[12px]" style={{ color: "var(--text-muted)" }}>{t("No toolsets reported.")}</p>
                     )}
-                    {toolsets.map((t) => (
-                      <div key={t.name} className="flex items-center justify-between gap-2 rounded-md px-3 py-2 border" style={{ borderColor: "var(--border-primary)" }}>
+                    {toolsets.map((ts) => (
+                      <div key={ts.name} className="flex items-center justify-between gap-2 rounded-md px-3 py-2 border" style={{ borderColor: "var(--border-primary)" }}>
                         <div className="min-w-0">
-                          <div className="text-[12px] font-medium truncate" style={{ color: "var(--text-primary)" }}>{t.label || t.name}</div>
-                          {t.description && (
-                            <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>{t.description}</div>
+                          <div className="text-[12px] font-medium truncate" style={{ color: "var(--text-primary)" }}>{ts.label || ts.name}</div>
+                          {ts.description && (
+                            <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>{ts.description}</div>
                           )}
                         </div>
                         <span
-                          className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full"
+                          className="shrink-0 text-[11px] px-1.5 py-0.5 rounded-full"
                           style={
-                            t.enabled
+                            ts.enabled
                               ? { background: "var(--bg-success-subtle)", color: "var(--text-success)" }
                               : { background: "var(--bg-tertiary)", color: "var(--text-muted)" }
                           }
                         >
-                          {t.enabled ? "on" : "off"}
+                          {ts.enabled ? t("on") : t("off")}
                         </span>
                       </div>
                     ))}
-                    <p className="text-[10px] pt-1" style={{ color: "var(--text-faint)" }}>
+                    <p className="text-[11px] pt-1" style={{ color: "var(--text-faint)" }}>
                       Toolset availability is configured via the CLI / config file.
                     </p>
                   </div>
@@ -707,7 +721,7 @@ export function SettingsPanel({ open, onClose }: Props) {
               <WebSearchSection
                 config={config}
                 envVars={envVars}
-                webConfigured={!!toolsets.find((t) => t.name === "web")?.configured}
+                webConfigured={!!toolsets.find((ts) => ts.name === "web")?.configured}
                 onConfigChange={(web) =>
                   setConfig((prev) => ({ ...(prev ?? {}), web: { ...((prev?.web as object) ?? {}), ...web } }))
                 }
@@ -732,27 +746,27 @@ export function SettingsPanel({ open, onClose }: Props) {
 
               {/* About */}
               <section>
-                <SectionTitle>About</SectionTitle>
+                <SectionTitle>{t("About")}</SectionTitle>
                 <div className="rounded-md border p-3 space-y-2" style={{ borderColor: "var(--border-primary)", background: "var(--bg-tertiary)" }}>
                   <div className="flex items-center justify-between">
-                    <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>Version</span>
+                    <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>{t("Version")}</span>
                     <span className="text-[12px] font-mono" style={{ color: "var(--text-primary)" }}>{status?.version ?? "—"}</span>
                   </div>
                   {status?.release_date && (
                     <div className="flex items-center justify-between">
-                      <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>Released</span>
+                      <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>{t("Released")}</span>
                       <span className="text-[12px] font-mono" style={{ color: "var(--text-primary)" }}>{status.release_date}</span>
                     </div>
                   )}
                   <div className="flex items-center justify-between">
-                    <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>Active sessions</span>
+                    <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>{t("Active sessions")}</span>
                     <span className="text-[12px] font-mono" style={{ color: "var(--text-primary)" }}>{status?.active_sessions ?? 0}</span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>Gateway</span>
+                    <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>{t("Gateway")}</span>
                     <span className="flex items-center gap-1.5 text-[12px]" style={{ color: status?.gateway_running ? "var(--text-success)" : "var(--text-muted)" }}>
                       <span className="w-2 h-2 rounded-full" style={{ background: status?.gateway_running ? "var(--accent-green)" : "var(--text-faint)" }} />
-                      {status?.gateway_running ? "running" : "stopped"}
+                      {status?.gateway_running ? t("running") : t("stopped")}
                     </span>
                   </div>
                 </div>
@@ -763,4 +777,4 @@ export function SettingsPanel({ open, onClose }: Props) {
       </aside>
     </>
   );
-}
+});

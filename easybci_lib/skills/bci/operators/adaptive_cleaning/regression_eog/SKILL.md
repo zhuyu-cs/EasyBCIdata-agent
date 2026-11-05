@@ -39,10 +39,15 @@ per band.
 |---|---|---|
 | reference channels | `auto` | Explicit names (`regression_eog:VEOG,HEOG`), or `auto`. |
 
-Reference resolution (`auto`): EOG-typed / EOG-named channels → frontal-pole
-proxy (Fp1/Fp2/Fpz/AF7/AF8, with a warning in `pipeline_status` and the QC
-report: frontal EEG shared with the proxy is removed too) → none: the step
-changes nothing and warns loudly (never silent).
+Reference resolution (`auto`, shared with `ica` and `deep_inspect`):
+EOG-typed / EOG-named channels (`*EOG*`, `VEO`/`HEO`, `LOC`/`ROC`, AASM
+`E1`/`E2`) → frontal-pole proxy Fp1/Fp2/Fpz, else AF7/AF8/AF3/AF4/AFz
+(vendor-decorated names such as `EEG Fp1-REF` included; a warning in
+`pipeline_status` and the QC report: frontal EEG shared with the proxy is
+removed too) → none: the step changes nothing and warns loudly (never
+silent), saying whether the channel names were recognised as 10-20 / 10-10.
+For other naming schemes (EGI `E1..E256`, BioSemi `A1..D32`) name the
+reference explicitly.
 
 Least-squares with intercept; normal equations accumulated chunk-wise in
 float64 (bounded memory). Reference channels are left unchanged; drop them
@@ -57,14 +62,18 @@ sEEG / ECoG / fNIRS / spike: forbidden (no EOG analog).
 
 ## When to Use / NOT to Use
 
-**Use** when: online BCI; latency-critical; EOG channel present.
+**Use** when: online BCI; latency-critical; EOG channel present; or no EOG
+channel but frontal-pole channels and too little data for ICA (fewer than 12
+effective channels, under 60 s, or fewer than 25·k² samples for k
+components — see the `ocular_artifact` decision skill).
 
-**Don't use** when: no EOG; PAC / connectivity require very precise
-preservation (use SSP or ICA).
+**Don't use** when: neither an EOG nor a frontal-pole channel exists (nothing
+to regress on); PAC / connectivity require very precise preservation (use
+SSP or ICA).
 
 ## Constraints & Ordering
 
-- Apply after bandpass / drop_bads.
+- Apply after bandpass / drop_bads, **before car** (after car the blink is spread to every channel).
 - Apply before epoching / decoder.
 - EOG channel kept or dropped after (configurable).
 

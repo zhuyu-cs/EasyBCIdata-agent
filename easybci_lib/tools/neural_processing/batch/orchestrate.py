@@ -40,6 +40,9 @@ import os
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from easybci_lib.tools.neural_processing.quality.data_rank import (
+    summarize_work_dir as summarize_data_rank,
+)
 from easybci_lib.tools.neural_processing.quality.session_consistency import (
     summarize_work_dir as summarize_session_consistency,
 )
@@ -400,6 +403,9 @@ def build_repro_repo(
         _ts = summarize_time_separability(wd)
         if _ts:
             result["time_separability"] = _ts
+        _dr = summarize_data_rank(wd)
+        if _dr:
+            result["data_rank"] = _dr
     except Exception as exc:  # noqa: BLE001
         logger.debug("quality summaries skipped: %s", exc)
     return result

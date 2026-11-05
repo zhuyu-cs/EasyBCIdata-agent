@@ -399,7 +399,8 @@ layers:
       - ecog
     channel:
     - name: clip
-      description: Clamp signal amplitude to a maximum absolute value
+      description: Clamp signal amplitude to ± an absolute value (with a unit such
+        as 500uV, or in data units) or ± k·SD per channel
       path: operators/channel/clip/SKILL.md
       step_string: clip
       modalities:
@@ -834,6 +835,13 @@ layers:
       description: Manual IC selection
       path: operators/adaptive_cleaning/manual_ic_selection/SKILL.md
       step_string: manual_ic_selection
+      modalities:
+      - eeg
+      - meg
+    - name: ocular_artifact
+      description: Decision skill — whether and how to remove ocular (blink / saccade)
+        artifacts, and which steps do NOT count as removal
+      path: operators/adaptive_cleaning/ocular_artifact/SKILL.md
       modalities:
       - eeg
       - meg

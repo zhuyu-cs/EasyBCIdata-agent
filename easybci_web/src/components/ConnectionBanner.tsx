@@ -1,4 +1,5 @@
 import type { ConnectionState } from "@/hooks/useConnectionStatus";
+import { t } from "@/lib/i18n";
 
 interface Props {
   state: ConnectionState;
@@ -10,16 +11,16 @@ export function ConnectionBanner({ state, onRetry }: Props) {
 
   const messages: Record<string, { text: string; hint: string }> = {
     both_down: {
-      text: "Backend not connected",
-      hint: "Start with: easybci web --with-gateway",
+      text: t("Backend not connected"),
+      hint: t("Start with: easybci dashboard"),
     },
     dashboard_only: {
-      text: "Gateway not running",
-      hint: "Start with: python run_agent.py --serve --port 8642",
+      text: t("Gateway not running"),
+      hint: t("Start with: easybci dashboard"),
     },
     gateway_only: {
-      text: "Dashboard not running",
-      hint: "Start with: easybci web --port 9119",
+      text: t("Dashboard not running"),
+      hint: t("Start with: easybci dashboard"),
     },
   };
 
@@ -37,7 +38,7 @@ export function ConnectionBanner({ state, onRetry }: Props) {
         onClick={onRetry}
         className="text-[var(--text-warning)] underline hover:no-underline ml-2"
       >
-        Retry
+        {t("Retry")}
       </button>
     </div>
   );
@@ -64,15 +65,15 @@ export function GatewayRestartBanner({ show, onDismiss }: { show: boolean; onDis
         <svg width="13" height="13" viewBox="0 0 14 14" fill="none" className="shrink-0">
           <path d="M12 7a5 5 0 11-1.46-3.54M12 2v3h-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
-        <span className="font-medium shrink-0">Gateway restarted</span>
-        <span className="opacity-80 truncate">— in-flight runs were lost, please re-send your message</span>
+        <span className="font-medium shrink-0">{t("Gateway restarted")}</span>
+        <span className="opacity-80 truncate">{t("— in-flight runs were lost, please re-send your message")}</span>
       </div>
       <button
         onClick={onDismiss}
         className="underline hover:no-underline ml-2 shrink-0"
         style={{ color: "var(--text-warning)" }}
       >
-        Dismiss
+        {t("Dismiss")}
       </button>
     </div>
   );

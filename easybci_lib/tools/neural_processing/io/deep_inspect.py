@@ -38,6 +38,7 @@ from easybci_lib.tools.neural_processing.io.routing_table import (
     stem_safe,
     upsert_routing_entry,
 )
+from easybci_lib.tools.neural_processing.preprocess.eog_reference import resolve_eog_reference
 from easybci_lib.tools.neural_processing.profile.identity_resolver import (
     resolve_identity,
 )
@@ -425,7 +426,10 @@ def _scan(
 
     channel_stats = _per_channel_stats(data, channels)
     psd_summary = _psd_summary(data, fs=fs, resolution_hz=psd_resolution_hz)
-    artifact_summary = _artifact_summary(data, fs=fs, sample_pct=sample_pct)
+    artifact_summary = _artifact_summary(
+        data, fs=fs, sample_pct=sample_pct, channels=channels,
+        ch_types=(full.get("meta") or {}).get("ch_types"),
+    )
     channel_summary = _classify_channels(
         channel_stats=channel_stats, channels=channels, meta=meta,
         modality=modality,
@@ -547,11 +551,57 @@ def _psd_summary(data: np.ndarray, *, fs: float, resolution_hz: float) -> PsdSum
     )
 
 
+_BLINK_MAD_K = 5.0
+_BLINK_MIN_S = 0.05
+_BLINK_REFRACTORY_S = 0.3
+# Blink counting gets its own window: a few seconds of a short recording hold
+# too few blinks for a rate; under the minimum the rate is unmeasured, not 0.
+_BLINK_WINDOW_S = 120.0
+_BLINK_MIN_WINDOW_S = 30.0
+
+
+def _blink_reference(channels: list[str], ch_types=None) -> tuple[list[int], str | None]:
+    """Rows to count blinks on (vertical EOG → other EOG → Fp → AF) and their label."""
+    ref = resolve_eog_reference(channels, ch_types)
+    rows = list(ref["blink_indices"])
+    if not rows:
+        return [], None
+    kind = "eog" if ref["source"] == "eog_channel" else ref["source"]
+    return rows, "{}({})".format(kind, ",".join(str(channels[i]) for i in rows))
+
+
+def _count_blink_events(ref: np.ndarray, fs: float) -> int:
+    """Blink events on a 0.5–8 Hz band-passed reference: excursions beyond
+    ``_BLINK_MAD_K``·MAD lasting ≥ ``_BLINK_MIN_S``, ``_BLINK_REFRACTORY_S``
+    apart."""
+    from scipy.signal import butter, sosfiltfilt
+
+    x = np.asarray(ref, dtype=np.float64)
+    x = np.where(np.isfinite(x), x, np.nanmedian(x) if np.isfinite(x).any() else 0.0)
+    sos = butter(2, [0.5, 8.0], btype="band", fs=fs, output="sos")
+    y = sosfiltfilt(sos, x - np.median(x))
+    dev = np.abs(y - np.median(y))
+    sigma = 1.4826 * float(np.median(dev))
+    if sigma <= 0:
+        return 0
+    above = dev > _BLINK_MAD_K * sigma
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], above.astype(np.int8), [0]))))
+    onsets, offsets = edges[0::2], edges[1::2]
+    onsets = onsets[(offsets - onsets) >= int(_BLINK_MIN_S * fs)]
+    n, last = 0, -np.inf
+    for a in onsets:
+        if a - last >= _BLINK_REFRACTORY_S * fs:
+            n += 1
+            last = a
+    return n
+
+
 def _artifact_summary(
     data: np.ndarray, *, fs: float, sample_pct: float,
+    channels: list[str] | None = None, ch_types=None,
 ) -> ArtifactSummary:
     empty = ArtifactSummary(
-        sample_pct=sample_pct, blink_rate_per_min=0.0,
+        sample_pct=sample_pct, blink_rate_per_min=None,
         muscle_artifact_pct=0.0, saturation_pct=0.0,
     )
     if data.ndim != 2 or fs <= 0:
@@ -569,11 +619,13 @@ def _artifact_summary(
         float((np.abs(seg) > 0.999 * mx).mean() * 100.0) if mx > 0 else 0.0
     )
 
-    z = (seg[0] - np.nanmean(seg[0])) / (np.nanstd(seg[0]) + 1e-12)
-    blink_events = int(np.sum(np.abs(z) > 4))
-    blink_rate_per_min = (
-        float(blink_events / (n_sample / fs / 60.0)) if n_sample else 0.0
-    )
+    rows, blink_ref = _blink_reference(list(channels or []), ch_types)
+    blink_rate_per_min: float | None = None
+    n_blink = min(n_total, max(int(_BLINK_WINDOW_S * fs), n_sample))
+    if rows and fs > 16.0 and n_blink >= int(_BLINK_MIN_WINDOW_S * fs):
+        b0 = int((n_total - n_blink) / 2)
+        ref = np.nanmean(np.asarray(data[rows, b0:b0 + n_blink], dtype=np.float64), axis=0)
+        blink_rate_per_min = round(_count_blink_events(ref, fs) / (n_blink / fs / 60.0), 2)
 
     diff_var = np.var(np.diff(seg, axis=1), axis=1)
     if diff_var.size:
@@ -585,9 +637,10 @@ def _artifact_summary(
 
     return ArtifactSummary(
         sample_pct=sample_pct,
-        blink_rate_per_min=round(blink_rate_per_min, 2),
+        blink_rate_per_min=blink_rate_per_min,
         muscle_artifact_pct=round(muscle_pct, 2),
         saturation_pct=round(saturation_pct, 2),
+        blink_reference=blink_ref,
     )
 
 
@@ -807,7 +860,7 @@ def _degraded_lightweight(data_path: str, *, reason: str) -> InspectionReport:
             high_freq_noise_above_40hz_present=False,
         ),
         artifact_summary=ArtifactSummary(
-            sample_pct=0.0, blink_rate_per_min=0.0,
+            sample_pct=0.0, blink_rate_per_min=None,
             muscle_artifact_pct=0.0, saturation_pct=0.0,
         ),
         memory_estimate=MemoryEstimate(
@@ -851,7 +904,7 @@ def _spike_fingerprint(
             high_freq_noise_above_40hz_present=False,
         ),
         artifact_summary=ArtifactSummary(
-            sample_pct=0.0, blink_rate_per_min=0.0,
+            sample_pct=0.0, blink_rate_per_min=None,
             muscle_artifact_pct=0.0, saturation_pct=0.0,
         ),
         memory_estimate=MemoryEstimate(
